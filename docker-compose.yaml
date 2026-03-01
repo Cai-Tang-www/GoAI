@@ -1,0 +1,79 @@
+# 这是一份docker-compose文件
+# etcd mysql redis kafka 
+services:
+  etcd:
+    image: bitnami/etcd:3.5
+    container_name: goai_etcd
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+    ports:
+      - "2379:2379"
+  mysql:
+    image: mysql:8.0
+    container_name: goai_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: goai_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - goai_network
+
+  redis:
+    image: redis:6.2-alpine
+    container_name: goai_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - goai_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: goai_kafka
+    ports:
+      - "9092:9092"
+      - "9991:9991" # JMX Port
+    environment:
+      # 核心Kraft模式配置
+      KAFKA_BROKER_ID: 1
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092  # 修正：PLAINTEXT_HOST改为0.0.0.0，避免localhost绑定问题
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /tmp/kraft-kafka-logs
+      KAFKA_CLUSTER_ID: 883565bc-3275-4fa8-bfe0-aa0b9ac72786
+      KAFKA_JMX_PORT: 9991
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_ZOOKEEPER_CONNECT: ""
+    command:
+      - "bash"
+      - "-c"
+      - |
+        # 格式化存储：添加 --config 参数  指定Confluent Kafka的默认配置文件
+        kafka-storage format --config /etc/kafka/server.properties --cluster-id $$KAFKA_CLUSTER_ID --ignore-formatted
+        # 启动Kafka使用server.properties  环境变量会自动注入配置
+        exec kafka-server-start /etc/kafka/server.properties
+    networks:
+      - goai_network
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  goai_network:
+    driver: bridge
+
+volumes:
+  kafka_data:
+  mysql_data:
+# 卷积卷挂载保存
