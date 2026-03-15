@@ -10,6 +10,7 @@ import (
 	kgo "github.com/segmentio/kafka-go"
 )
 
+// Consumer Kafka 消费者
 var Consumer *kgo.Reader
 
 // InitConsumer 初始化 Kafka 消费者
@@ -30,7 +31,7 @@ func InitConsumer() {
 func StartConsumer(ctx context.Context) {
 	for {
 		select {
-		case <-ctx.Done():
+		case <-ctx.Done(): // 上下文取消信号
 			log.Println("Kafka 消费者停止消费")
 			return
 		default:

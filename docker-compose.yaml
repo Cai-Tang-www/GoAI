@@ -1,14 +1,6 @@
 # 这是一份docker-compose文件
 # etcd mysql redis kafka 
 services:
-  etcd:
-    image: bitnami/etcd:3.5
-    container_name: goai_etcd
-    environment:
-      - ALLOW_NONE_AUTHENTICATION=yes
-      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
-    ports:
-      - "2379:2379"
   mysql:
     image: mysql:8.0
     container_name: goai_mysql
@@ -38,6 +30,7 @@ services:
       - "9991:9991" # JMX Port
     environment:
       # 核心Kraft模式配置
+      KAFKA_ZOOKEEPER_CONNECT: ""
       KAFKA_BROKER_ID: 1
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -49,18 +42,9 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_LOG_DIRS: /tmp/kraft-kafka-logs
-      KAFKA_CLUSTER_ID: 883565bc-3275-4fa8-bfe0-aa0b9ac72786
+      CLUSTER_ID: "khHGu2WFTXOZAWVhJMcePQ=="
       KAFKA_JMX_PORT: 9991
       KAFKA_JMX_HOSTNAME: localhost
-      KAFKA_ZOOKEEPER_CONNECT: ""
-    command:
-      - "bash"
-      - "-c"
-      - |
-        # 格式化存储：添加 --config 参数  指定Confluent Kafka的默认配置文件
-        kafka-storage format --config /etc/kafka/server.properties --cluster-id $$KAFKA_CLUSTER_ID --ignore-formatted
-        # 启动Kafka使用server.properties  环境变量会自动注入配置
-        exec kafka-server-start /etc/kafka/server.properties
     networks:
       - goai_network
     healthcheck:

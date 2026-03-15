@@ -11,18 +11,19 @@ import (
 	kgo "github.com/segmentio/kafka-go"
 )
 
+// Producer Kafka 生产者
 var Producer *kgo.Writer
 
 // InitProducer 初始化 Kafka 生产者
 func InitProducer() {
 	Producer = &kgo.Writer{
-		Addr:     kgo.TCP(config.AppConfig.KafkaBootstrapServers),
-		Topic:    config.AppConfig.KafkaTopic,
-		Balancer: &kgo.LeastBytes{},
+		Addr:         kgo.TCP(config.AppConfig.KafkaBootstrapServers),
+		Topic:        config.AppConfig.KafkaTopic,
+		Balancer:     &kgo.LeastBytes{},
 		BatchTimeout: 10 * time.Millisecond, // 批量发送超时时间
-		BatchSize:    100,                 // 批量发送大小
+		BatchSize:    100,                   // 批量发送大小
 		RequiredAcks: kgo.RequireAll,        // 要求所有副本都确认
-		MaxAttempts:  3,                   // 最大重试次数
+		MaxAttempts:  3,                     // 最大重试次数
 	}
 
 	// 尝试连接 Kafka
@@ -47,7 +48,15 @@ func SendMessage(ctx context.Context, key, value []byte) error {
 		fmt.Printf("发送 Kafka 消息失败: %v\n", err)
 		return err
 	}
+	fmt.Printf("发送 Kafka 消息成功: Key=%s, Value=%s\n", string(key), string(value))
 	return nil
+}
+
+// SendTaskEvent 复用SendMessage
+func SendTaskEvent(ctx context.Context, taskID string, status string) error {
+	Key := []byte(taskID)
+	Value := []byte(status)
+	return SendMessage(ctx, Key, Value)
 }
 
 // CloseProducer 关闭 Kafka 生产者

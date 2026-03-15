@@ -27,7 +27,7 @@ func GenerateToken(userID uint) (string, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(config.AppConfig.JWTSecret))
+	return token.SignedString([]byte(config.AppConfig.JWTSecret)) // 签名并返回 token
 }
 
 // JWTAuthMiddleware 是 JWT 认证中间件
@@ -48,7 +48,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-
+		// 解析 token
 		token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 			return []byte(config.AppConfig.JWTSecret), nil
 		})

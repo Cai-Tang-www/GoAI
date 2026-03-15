@@ -41,6 +41,7 @@ func RegisterUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "注册成功", "user_id": user.ID, "username": user.Username})
+
 }
 
 // LoginUser 处理用户登录请求

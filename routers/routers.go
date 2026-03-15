@@ -10,13 +10,13 @@ import (
 )
 
 // InitRouter 初始化所有 API 路由
-func InitRouter() *gin.Engine {
+func InitRouter() *gin.Engine { //Engine rounter group
 	router := gin.Default()
 
 	// 健康检查路由
 	router.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
+			"message": "ping success",
 		})
 	})
 
@@ -44,6 +44,8 @@ func InitRouter() *gin.Engine {
 				"user_id": userID,
 			})
 		})
+		apiGroup.POST("/tasks", handlers.CreateTask)
+		apiGroup.POST("/chat", handlers.Chat)
 
 		apiGroup.POST("/users", handlers.CreateUser)
 		apiGroup.GET("/users", handlers.ListUsers)

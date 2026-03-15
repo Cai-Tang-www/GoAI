@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"GoAI/config"
 	"GoAI/db"
 	"GoAI/kafka"
 	"GoAI/redis"
 	routers "GoAI/routers"
+	"context"
 	"log"
 	"os"
 	"os/signal"

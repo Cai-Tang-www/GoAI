@@ -7,6 +7,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Config 配置结构体
 type Config struct {
 	MySQLRootPassword     string
 	MySQLDatabase         string
@@ -19,10 +20,14 @@ type Config struct {
 	KafkaZookeeperConnect string
 	KafkaTopic            string
 	JWTSecret             string
+	ModelScopeKey         string
+	ModelScopeModel       string
 }
 
+// AppConfig 全局配置
 var AppConfig *Config
 
+// LoadConfig 加载配置
 func LoadConfig() error {
 	err := godotenv.Load()
 	if err != nil {
@@ -37,6 +42,8 @@ func LoadConfig() error {
 		KafkaClusterID:        os.Getenv("KAFKA_CLUSTER_ID"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
 		KafkaTopic:            os.Getenv("KAFKA_TOPIC"),
+		ModelScopeKey:         os.Getenv("MODELSCOPE_KEY"),
+		ModelScopeModel:       os.Getenv("MODELSCOPE_MODEL"),
 	}
 
 	// 转换 int 类型
