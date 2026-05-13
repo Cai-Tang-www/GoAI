@@ -3,9 +3,18 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+type ModelProviderConfig struct {
+	Driver       string
+	BaseURL      string
+	APIKey       string
+	DefaultModel string
+	EndpointPath string
+}
 
 // Config 配置结构体
 type Config struct {
@@ -22,6 +31,8 @@ type Config struct {
 	JWTSecret             string
 	ModelScopeKey         string
 	ModelScopeModel       string
+	ModelProviderDefault  string
+	ModelProviders        map[string]ModelProviderConfig
 }
 
 // AppConfig 全局配置
@@ -44,6 +55,8 @@ func LoadConfig() error {
 		KafkaTopic:            os.Getenv("KAFKA_TOPIC"),
 		ModelScopeKey:         os.Getenv("MODELSCOPE_KEY"),
 		ModelScopeModel:       os.Getenv("MODELSCOPE_MODEL"),
+		ModelProviderDefault:  strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
+		ModelProviders:        make(map[string]ModelProviderConfig),
 	}
 
 	// 转换 int 类型
@@ -63,5 +76,51 @@ func LoadConfig() error {
 		}
 	}
 
+	providers := []string{"mimo", "deepseek", "qwen", "modelscope", "openai"}
+	for _, name := range providers {
+		upper := strings.ToUpper(name)
+		cfg := ModelProviderConfig{
+			Driver:       strings.TrimSpace(os.Getenv("MODEL_DRIVER_" + upper)),
+			BaseURL:      strings.TrimSpace(os.Getenv("MODEL_BASE_URL_" + upper)),
+			APIKey:       strings.TrimSpace(os.Getenv("MODEL_API_KEY_" + upper)),
+			DefaultModel: strings.TrimSpace(os.Getenv("MODEL_NAME_DEFAULT_" + upper)),
+			EndpointPath: strings.TrimSpace(os.Getenv("MODEL_ENDPOINT_PATH_" + upper)),
+		}
+		if cfg.Driver == "" {
+			cfg.Driver = "openai_compatible"
+		}
+		if cfg.EndpointPath == "" {
+			cfg.EndpointPath = defaultEndpointPath(name)
+		}
+		if cfg.BaseURL != "" || cfg.APIKey != "" || cfg.DefaultModel != "" {
+			AppConfig.ModelProviders[name] = cfg
+		}
+	}
+
+	// 兼容旧配置：若没有显式的 modelscope 配置，复用旧 MODELSCOPE_* 环境变量。
+	if _, exists := AppConfig.ModelProviders["modelscope"]; !exists &&
+		(AppConfig.ModelScopeKey != "" || AppConfig.ModelScopeModel != "") {
+		baseURL := strings.TrimSpace(os.Getenv("MODEL_BASE_URL_MODELSCOPE"))
+		if baseURL == "" {
+			baseURL = "https://api-inference.modelscope.cn"
+		}
+		AppConfig.ModelProviders["modelscope"] = ModelProviderConfig{
+			Driver:       "openai_compatible",
+			BaseURL:      baseURL,
+			APIKey:       AppConfig.ModelScopeKey,
+			DefaultModel: AppConfig.ModelScopeModel,
+			EndpointPath: "/v1/chat/completions",
+		}
+	}
+
 	return nil
+}
+
+func defaultEndpointPath(providerName string) string {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case "deepseek":
+		return "/v1/chat/completions"
+	default:
+		return "/chat/completions"
+	}
 }

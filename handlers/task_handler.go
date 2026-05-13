@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"GoAI/ai"
@@ -31,6 +32,7 @@ func Chat(c *gin.Context) {
 	var req struct {
 		Messages []ai.Message `json:"messages"`
 		Model    string       `json:"model"`
+		Provider string       `json:"provider"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
@@ -38,9 +40,14 @@ func Chat(c *gin.Context) {
 	}
 
 	// 2. 调用业务层
-	stream, err := services.Chat(c.Request.Context(), req.Messages, req.Model)
+	stream, err := services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI 调用失败"})
+		status := http.StatusInternalServerError
+		if errors.Is(err, ai.ErrProviderNotFound) || errors.Is(err, ai.ErrDriverNotFound) ||
+			errors.Is(err, ai.ErrInvalidProviderInput) || errors.Is(err, ai.ErrModelNotConfigured) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -50,8 +57,27 @@ func Chat(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 
 	// 逐字流式输出
-	for content := range stream {
-		_, _ = c.Writer.WriteString("data: " + content + "\n\n")
-		c.Writer.Flush() // 强制刷新到客户端
+	chunks := stream.Chunks
+	errs := stream.Errs
+	for chunks != nil || errs != nil {
+		select {
+		case content, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			_, _ = c.Writer.WriteString("data: " + content + "\n\n")
+			c.Writer.Flush() // 强制刷新到客户端
+		case streamErr, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if streamErr != nil {
+				_, _ = c.Writer.WriteString("event: error\ndata: " + streamErr.Error() + "\n\n")
+				c.Writer.Flush()
+				return
+			}
+		}
 	}
 }
