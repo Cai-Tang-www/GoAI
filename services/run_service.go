@@ -3,6 +3,7 @@ package services
 import (
 	"GoAI/ai"
 	"GoAI/db"
+	"GoAI/domain/runstate"
 	"GoAI/kafka"
 	"GoAI/models"
 	"context"
@@ -453,46 +454,11 @@ func transitionStepStatus(ctx context.Context, tx *gorm.DB, step *models.RunStep
 }
 
 func isValidRunTransition(from, to string) bool {
-	transitions := map[string]map[string]struct{}{
-		models.RunStatusPending: {
-			models.RunStatusQueued: {}},
-		models.RunStatusQueued: {
-			models.RunStatusRunning:   {},
-			models.RunStatusFailed:    {},
-			models.RunStatusCancelled: {},
-		},
-		models.RunStatusRunning: {
-			models.RunStatusSuccess:   {},
-			models.RunStatusFailed:    {},
-			models.RunStatusCancelled: {},
-		},
-	}
-	next, ok := transitions[from]
-	if !ok {
-		return false
-	}
-	_, allowed := next[to]
-	return allowed
+	return runstate.IsValidRunTransition(from, to)
 }
 
 func isValidRunStepTransition(from, to string) bool {
-	transitions := map[string]map[string]struct{}{
-		models.RunStepStatusPending: {
-			models.RunStepStatusRunning: {},
-			models.RunStepStatusSkipped: {},
-		},
-		models.RunStepStatusRunning: {
-			models.RunStepStatusSuccess: {},
-			models.RunStepStatusFailed:  {},
-			models.RunStepStatusSkipped: {},
-		},
-	}
-	next, ok := transitions[from]
-	if !ok {
-		return false
-	}
-	_, allowed := next[to]
-	return allowed
+	return runstate.IsValidRunStepTransition(from, to)
 }
 
 func resolveWorkflow(ctx context.Context, agentID uint64, version int) (*models.Workflow, error) {
