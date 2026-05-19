@@ -28,8 +28,14 @@ func InitDB() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// 自动迁移数据库表结构
-	err = DB.AutoMigrate(&models.Task{}, &models.User{}, &models.DialogueMessage{})
+	// 自动迁移数据库表结构（Task 体系已替换为 Runs 体系）
+	err = DB.AutoMigrate(
+		&models.User{},
+		&models.Agent{},
+		&models.Workflow{},
+		&models.Run{},
+		&models.RunStep{},
+	)
 	if err != nil {
 		log.Fatalf("Failed to auto migrate database: %v", err)
 	}

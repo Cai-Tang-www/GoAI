@@ -28,6 +28,8 @@ type Config struct {
 	KafkaBootstrapServers string
 	KafkaZookeeperConnect string
 	KafkaTopic            string
+	KafkaRunTopic         string
+	KafkaRunGroupID       string
 	JWTSecret             string
 	ModelScopeKey         string
 	ModelScopeModel       string
@@ -53,6 +55,8 @@ func LoadConfig() error {
 		KafkaClusterID:        os.Getenv("KAFKA_CLUSTER_ID"),
 		JWTSecret:             os.Getenv("JWT_SECRET"),
 		KafkaTopic:            os.Getenv("KAFKA_TOPIC"),
+		KafkaRunTopic:         strings.TrimSpace(os.Getenv("KAFKA_RUN_TOPIC")),
+		KafkaRunGroupID:       strings.TrimSpace(os.Getenv("KAFKA_RUN_GROUP_ID")),
 		ModelScopeKey:         os.Getenv("MODELSCOPE_KEY"),
 		ModelScopeModel:       os.Getenv("MODELSCOPE_MODEL"),
 		ModelProviderDefault:  strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
@@ -74,6 +78,12 @@ func LoadConfig() error {
 		if port, err := strconv.Atoi(portStr); err == nil {
 			AppConfig.KafkaJMXPort = port
 		}
+	}
+	if AppConfig.KafkaRunTopic == "" {
+		AppConfig.KafkaRunTopic = "run_execute"
+	}
+	if AppConfig.KafkaRunGroupID == "" {
+		AppConfig.KafkaRunGroupID = "run-worker-group"
 	}
 
 	providers := []string{"mimo", "deepseek", "qwen", "modelscope", "openai"}
