@@ -44,8 +44,11 @@ func InitRouter() *gin.Engine { //Engine rounter group
 				"user_id": userID,
 			})
 		})
-		apiGroup.POST("/tasks", handlers.CreateTask)
 		apiGroup.POST("/chat", handlers.Chat)
+		apiGroup.POST("/runs", handlers.CreateRun)
+		apiGroup.GET("/runs/:run_id", handlers.GetRun)
+		apiGroup.GET("/runs/:run_id/steps", handlers.ListRunSteps)
+		apiGroup.POST("/runs/:run_id/replay", handlers.ReplayRun)
 
 		apiGroup.POST("/users", handlers.CreateUser)
 		apiGroup.GET("/users", handlers.ListUsers)

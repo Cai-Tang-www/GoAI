@@ -3,6 +3,7 @@ package kafka
 import (
 	"GoAI/config"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -12,19 +13,25 @@ import (
 
 // Consumer Kafka 消费者
 var Consumer *kgo.Reader
+var runMessageHandler func(context.Context, RunExecuteMessage) error
 
 // InitConsumer 初始化 Kafka 消费者
 func InitConsumer() {
 	Consumer = kgo.NewReader(kgo.ReaderConfig{
 		Brokers:        []string{config.AppConfig.KafkaBootstrapServers},
-		Topic:          config.AppConfig.KafkaTopic,
-		GroupID:        "my-group",       // 消费者组ID
+		Topic:          config.AppConfig.KafkaRunTopic,
+		GroupID:        config.AppConfig.KafkaRunGroupID,
 		MinBytes:       10e3,             // 10KB
 		MaxBytes:       10e6,             // 10MB
 		MaxWait:        10 * time.Second, // 最长等待时间
 		CommitInterval: time.Second,      // 自动提交偏移量的时间间隔
 	})
 	log.Println("Kafka 消费者初始化成功")
+}
+
+// RegisterRunMessageHandler 注册 Run 消费处理器。
+func RegisterRunMessageHandler(handler func(context.Context, RunExecuteMessage) error) {
+	runMessageHandler = handler
 }
 
 // StartConsumer 开始消费 Kafka 消息
@@ -42,6 +49,22 @@ func StartConsumer(ctx context.Context) {
 			}
 			fmt.Printf("收到消息 -> Topic: %s, Partition: %d, Offset: %d, Key: %s, Value: %s\n",
 				message.Topic, message.Partition, message.Offset, string(message.Key), string(message.Value))
+			if runMessageHandler == nil {
+				log.Println("Run message handler 未注册，跳过消息处理")
+				continue
+			}
+			var payload RunExecuteMessage
+			if err := json.Unmarshal(message.Value, &payload); err != nil {
+				log.Printf("解析 Run 消息失败: %v", err)
+				continue
+			}
+			if payload.RunID == "" {
+				log.Println("Run 消息缺少 run_id，跳过")
+				continue
+			}
+			if err := runMessageHandler(ctx, payload); err != nil {
+				log.Printf("处理 Run 消息失败(run_id=%s): %v", payload.RunID, err)
+			}
 		}
 	}
 }

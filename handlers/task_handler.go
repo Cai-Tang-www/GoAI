@@ -5,26 +5,10 @@ import (
 	"net/http"
 
 	"GoAI/ai"
-	"GoAI/models"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
 )
-
-// CreateTask 创建任务
-func CreateTask(c *gin.Context) {
-	var task models.Task
-	if err := c.ShouldBindJSON(&task); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	// 调用服务层创建任务
-	if err := services.CreateTask(c, &task); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "任务创建成功"})
-}
 
 // Chat 处理聊天请求
 func Chat(c *gin.Context) {

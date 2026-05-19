@@ -3,35 +3,12 @@ package services
 import (
 	"GoAI/ai"
 	"GoAI/config"
-	"GoAI/db"
-	"GoAI/kafka"
-	"GoAI/models"
 	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 )
-
-// CreateTask 创建任务
-func CreateTask(ctx context.Context, task *models.Task) error {
-	// 验证任务参数
-	if task.TaskID == "" {
-		return errors.New("任务ID不能为空")
-	}
-
-	// 创建任务
-	if err := db.DB.Create(task).Error; err != nil {
-		return err
-	}
-
-	// 发送任务创建事件
-	if err := kafka.SendTaskEvent(ctx, task.TaskID, "created"); err != nil {
-		return err
-	}
-
-	return nil
-}
 
 var (
 	providerRegistry     *ai.Registry

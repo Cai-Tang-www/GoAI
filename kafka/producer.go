@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -18,7 +19,7 @@ var Producer *kgo.Writer
 func InitProducer() {
 	Producer = &kgo.Writer{
 		Addr:         kgo.TCP(config.AppConfig.KafkaBootstrapServers),
-		Topic:        config.AppConfig.KafkaTopic,
+		Topic:        config.AppConfig.KafkaRunTopic,
 		Balancer:     &kgo.LeastBytes{},
 		BatchTimeout: 10 * time.Millisecond, // 批量发送超时时间
 		BatchSize:    100,                   // 批量发送大小
@@ -27,7 +28,7 @@ func InitProducer() {
 	}
 
 	// 尝试连接 Kafka
-	conn, err := kgo.DialLeader(context.Background(), "tcp", config.AppConfig.KafkaBootstrapServers, config.AppConfig.KafkaTopic, 0)
+	conn, err := kgo.DialLeader(context.Background(), "tcp", config.AppConfig.KafkaBootstrapServers, config.AppConfig.KafkaRunTopic, 0)
 	if err != nil {
 		log.Fatalf("连接 Kafka 失败: %v", err)
 	}
@@ -52,11 +53,17 @@ func SendMessage(ctx context.Context, key, value []byte) error {
 	return nil
 }
 
-// SendTaskEvent 复用SendMessage
-func SendTaskEvent(ctx context.Context, taskID string, status string) error {
-	Key := []byte(taskID)
-	Value := []byte(status)
-	return SendMessage(ctx, Key, Value)
+type RunExecuteMessage struct {
+	RunID string `json:"run_id"`
+}
+
+// SendRunExecuteEvent 发送 run 执行事件到 Kafka。
+func SendRunExecuteEvent(ctx context.Context, runID string) error {
+	payload, err := json.Marshal(RunExecuteMessage{RunID: runID})
+	if err != nil {
+		return err
+	}
+	return SendMessage(ctx, []byte(runID), payload)
 }
 
 // CloseProducer 关闭 Kafka 生产者
