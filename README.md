@@ -26,3 +26,20 @@
 - `MODEL_ENDPOINT_PATH_<PROVIDER>`：聊天端点（可选，不填按代码默认值）
 
 DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)。
+
+## 当前后端架构（Run 编排主线）
+
+### 分层
+- `handlers/`：HTTP 接口层（鉴权后的请求解析与响应）
+- `services/`：应用服务层（CreateRun/ReplayRun/执行编排用例）
+- `domain/workflow`：工作流 DSL 校验与拓扑执行顺序
+- `domain/runstate`：Run/Step 状态机迁移规则
+- `kafka/`：消息生产消费基础设施
+- `worker/`：异步执行入口（Kafka 消费后触发 Run 执行）
+- `ai/`：模型适配层（编排中的 LLM 节点调用）
+
+### 主链路
+1. `POST /api/runs` 写入 `runs`（状态 `queued`）并发送 `run_execute` 消息
+2. `worker` 消费消息后执行工作流节点，逐步写入 `run_steps`
+3. 节点执行完成后更新 `runs` 终态（`success/failed`）
+4. `GET /api/runs/:run_id` 与 `GET /api/runs/:run_id/steps` 提供查询与回放支撑
