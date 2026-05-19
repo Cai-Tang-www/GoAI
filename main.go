@@ -6,7 +6,7 @@ import (
 	"GoAI/kafka"
 	"GoAI/redis"
 	routers "GoAI/routers"
-	"GoAI/services"
+	"GoAI/worker"
 	"context"
 	"log"
 	"os"
@@ -34,7 +34,7 @@ func main() {
 	// 初始化 Kafka 消费者
 	kafka.InitConsumer()
 	defer kafka.CloseConsumer()
-	kafka.RegisterRunMessageHandler(services.HandleRunExecuteMessage)
+	worker.RegisterKafkaRunWorker()
 
 	// 创建一个上下文用于控制消费者 goroutine 的生命周期
 	ctx, cancel := context.WithCancel(context.Background())
