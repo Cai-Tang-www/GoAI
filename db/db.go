@@ -31,6 +31,10 @@ func InitDB() {
 	// 自动迁移数据库表结构（Task 体系已替换为 Runs 体系）
 	err = DB.AutoMigrate(
 		&models.User{},
+		&models.Role{},
+		&models.Permission{},
+		&models.UserRole{},
+		&models.RolePermission{},
 		&models.Agent{},
 		&models.Workflow{},
 		&models.Run{},
@@ -38,6 +42,10 @@ func InitDB() {
 	)
 	if err != nil {
 		log.Fatalf("Failed to auto migrate database: %v", err)
+	}
+
+	if err = SeedRBAC(); err != nil {
+		log.Fatalf("Failed to seed RBAC data: %v", err)
 	}
 
 	log.Println("Database connected successfully!")

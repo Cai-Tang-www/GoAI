@@ -1,6 +1,7 @@
 package routers
 
 import (
+	"GoAI/models"
 	"net/http"
 
 	"GoAI/handlers"
@@ -30,7 +31,7 @@ func InitRouter() *gin.Engine { //Engine rounter group
 
 	// 需要 JWT 认证的 API 路由组
 	apiGroup := router.Group("/api")
-	apiGroup.Use(middlewares.JWTAuthMiddleware()) // 应用 JWT 认证中间件
+	apiGroup.Use(middlewares.JWTAuthMiddleware(), middlewares.RBACContextMiddleware()) // 认证 + RBAC 上下文
 	{
 		// 示例受保护路由
 		apiGroup.GET("/protected", func(c *gin.Context) {
@@ -44,17 +45,23 @@ func InitRouter() *gin.Engine { //Engine rounter group
 				"user_id": userID,
 			})
 		})
-		apiGroup.POST("/chat", handlers.Chat)
-		apiGroup.POST("/runs", handlers.CreateRun)
-		apiGroup.GET("/runs/:run_id", handlers.GetRun)
-		apiGroup.GET("/runs/:run_id/steps", handlers.ListRunSteps)
-		apiGroup.POST("/runs/:run_id/replay", handlers.ReplayRun)
+		apiGroup.POST("/chat", middlewares.RequirePermission(models.PermissionChatUse), handlers.Chat)
+		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), handlers.CreateRun)
+		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), handlers.GetRun)
+		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), handlers.ListRunSteps)
+		apiGroup.POST("/runs/:run_id/replay", middlewares.RequirePermission(models.PermissionRunReplay), handlers.ReplayRun)
 
-		apiGroup.POST("/users", handlers.CreateUser)
-		apiGroup.GET("/users", handlers.ListUsers)
-		apiGroup.GET("/users/:id", handlers.GetUserByID)
-		apiGroup.PUT("/users/:id", handlers.UpdateUser)
-		apiGroup.DELETE("/users/:id", handlers.DeleteUser)
+		apiGroup.POST("/users", middlewares.RequirePermission(models.PermissionUserManage), handlers.CreateUser)
+		apiGroup.GET("/users", middlewares.RequirePermission(models.PermissionUserManage), handlers.ListUsers)
+		apiGroup.GET("/users/:id",
+			middlewares.RequireSelfOrPermission("id", models.PermissionUserReadSelf, models.PermissionUserManage),
+			handlers.GetUserByID,
+		)
+		apiGroup.PUT("/users/:id",
+			middlewares.RequireSelfOrPermission("id", models.PermissionUserUpdateSelf, models.PermissionUserManage),
+			handlers.UpdateUser,
+		)
+		apiGroup.DELETE("/users/:id", middlewares.RequirePermission(models.PermissionUserManage), handlers.DeleteUser)
 	}
 
 	return router

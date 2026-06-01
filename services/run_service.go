@@ -130,23 +130,23 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*model
 	return run, nil
 }
 
-func GetRunByRunID(ctx context.Context, userID uint64, runID string) (*models.Run, error) {
+func GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
 	run, err := fetchRunByRunID(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	if run.UserID != userID {
+	if run.UserID != userID && !isAdmin {
 		return nil, errRunForbidden
 	}
 	return run, nil
 }
 
-func GetRunStepsByRunID(ctx context.Context, userID uint64, runID string) ([]models.RunStep, error) {
+func GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.RunStep, error) {
 	run, err := fetchRunByRunID(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	if run.UserID != userID {
+	if run.UserID != userID && !isAdmin {
 		return nil, errRunForbidden
 	}
 
@@ -161,8 +161,8 @@ func GetRunStepsByRunID(ctx context.Context, userID uint64, runID string) ([]mod
 	return steps, nil
 }
 
-func ReplayRun(ctx context.Context, userID uint64, runID string) (*models.Run, error) {
-	origin, err := GetRunByRunID(ctx, userID, runID)
+func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
+	origin, err := GetRunByRunID(ctx, userID, isAdmin, runID)
 	if err != nil {
 		return nil, err
 	}

@@ -18,23 +18,25 @@ type ModelProviderConfig struct {
 
 // Config 配置结构体
 type Config struct {
-	MySQLRootPassword     string
-	MySQLDatabase         string
-	RedisPassword         string
-	RedisPort             int
-	KafkaPort             int
-	KafkaJMXPort          int
-	KafkaClusterID        string
-	KafkaBootstrapServers string
-	KafkaZookeeperConnect string
-	KafkaTopic            string
-	KafkaRunTopic         string
-	KafkaRunGroupID       string
-	JWTSecret             string
-	ModelScopeKey         string
-	ModelScopeModel       string
-	ModelProviderDefault  string
-	ModelProviders        map[string]ModelProviderConfig
+	MySQLRootPassword          string
+	MySQLDatabase              string
+	RedisPassword              string
+	RedisPort                  int
+	KafkaPort                  int
+	KafkaJMXPort               int
+	KafkaClusterID             string
+	KafkaBootstrapServers      string
+	KafkaZookeeperConnect      string
+	KafkaTopic                 string
+	KafkaRunTopic              string
+	KafkaRunGroupID            string
+	JWTSecret                  string
+	RBACEnable                 bool
+	RBACBootstrapAdminUsername string
+	ModelScopeKey              string
+	ModelScopeModel            string
+	ModelProviderDefault       string
+	ModelProviders             map[string]ModelProviderConfig
 }
 
 // AppConfig 全局配置
@@ -47,20 +49,22 @@ func LoadConfig() error {
 	}
 
 	AppConfig = &Config{
-		MySQLRootPassword:     os.Getenv("MYSQL_ROOT_PASSWORD"),
-		MySQLDatabase:         os.Getenv("MYSQL_DATABASE"),
-		RedisPassword:         os.Getenv("REDIS_PASSWORD"),
-		KafkaBootstrapServers: os.Getenv("KAFKA_BOOTSTRAP_SERVERS"),
-		KafkaZookeeperConnect: os.Getenv("KAFKA_ZOOKEEPER_CONNECT"),
-		KafkaClusterID:        os.Getenv("KAFKA_CLUSTER_ID"),
-		JWTSecret:             os.Getenv("JWT_SECRET"),
-		KafkaTopic:            os.Getenv("KAFKA_TOPIC"),
-		KafkaRunTopic:         strings.TrimSpace(os.Getenv("KAFKA_RUN_TOPIC")),
-		KafkaRunGroupID:       strings.TrimSpace(os.Getenv("KAFKA_RUN_GROUP_ID")),
-		ModelScopeKey:         os.Getenv("MODELSCOPE_KEY"),
-		ModelScopeModel:       os.Getenv("MODELSCOPE_MODEL"),
-		ModelProviderDefault:  strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
-		ModelProviders:        make(map[string]ModelProviderConfig),
+		MySQLRootPassword:          os.Getenv("MYSQL_ROOT_PASSWORD"),
+		MySQLDatabase:              os.Getenv("MYSQL_DATABASE"),
+		RedisPassword:              os.Getenv("REDIS_PASSWORD"),
+		KafkaBootstrapServers:      os.Getenv("KAFKA_BOOTSTRAP_SERVERS"),
+		KafkaZookeeperConnect:      os.Getenv("KAFKA_ZOOKEEPER_CONNECT"),
+		KafkaClusterID:             os.Getenv("KAFKA_CLUSTER_ID"),
+		JWTSecret:                  os.Getenv("JWT_SECRET"),
+		KafkaTopic:                 os.Getenv("KAFKA_TOPIC"),
+		KafkaRunTopic:              strings.TrimSpace(os.Getenv("KAFKA_RUN_TOPIC")),
+		KafkaRunGroupID:            strings.TrimSpace(os.Getenv("KAFKA_RUN_GROUP_ID")),
+		RBACEnable:                 true,
+		RBACBootstrapAdminUsername: strings.TrimSpace(os.Getenv("RBAC_BOOTSTRAP_ADMIN_USERNAME")),
+		ModelScopeKey:              os.Getenv("MODELSCOPE_KEY"),
+		ModelScopeModel:            os.Getenv("MODELSCOPE_MODEL"),
+		ModelProviderDefault:       strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
+		ModelProviders:             make(map[string]ModelProviderConfig),
 	}
 
 	// 转换 int 类型
@@ -84,6 +88,10 @@ func LoadConfig() error {
 	}
 	if AppConfig.KafkaRunGroupID == "" {
 		AppConfig.KafkaRunGroupID = "run-worker-group"
+	}
+	if enableStr := strings.TrimSpace(os.Getenv("RBAC_ENABLE")); enableStr != "" {
+		enableLower := strings.ToLower(enableStr)
+		AppConfig.RBACEnable = enableLower == "1" || enableLower == "true" || enableLower == "yes" || enableLower == "on"
 	}
 
 	providers := []string{"mimo", "deepseek", "qwen", "modelscope", "openai"}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"GoAI/middlewares"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
@@ -16,7 +17,7 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	userID, ok := authUserID(c)
+	userID, _, ok := authPrincipal(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -35,13 +36,13 @@ func CreateRun(c *gin.Context) {
 }
 
 func GetRun(c *gin.Context) {
-	userID, ok := authUserID(c)
+	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 	runID := c.Param("run_id")
-	run, err := services.GetRunByRunID(c.Request.Context(), userID, runID)
+	run, err := services.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		if errors.Is(err, services.ErrRunForbidden()) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
@@ -58,13 +59,13 @@ func GetRun(c *gin.Context) {
 }
 
 func ListRunSteps(c *gin.Context) {
-	userID, ok := authUserID(c)
+	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 	runID := c.Param("run_id")
-	steps, err := services.GetRunStepsByRunID(c.Request.Context(), userID, runID)
+	steps, err := services.GetRunStepsByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		if errors.Is(err, services.ErrRunForbidden()) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
@@ -81,13 +82,13 @@ func ListRunSteps(c *gin.Context) {
 }
 
 func ReplayRun(c *gin.Context) {
-	userID, ok := authUserID(c)
+	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 	runID := c.Param("run_id")
-	newRun, err := services.ReplayRun(c.Request.Context(), userID, runID)
+	newRun, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		if errors.Is(err, services.ErrRunForbidden()) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
@@ -106,14 +107,15 @@ func ReplayRun(c *gin.Context) {
 	})
 }
 
-func authUserID(c *gin.Context) (uint64, bool) {
+// authPrincipal 统一提取当前请求用户 ID 与 admin 标记，供 Run 权限判断复用。
+func authPrincipal(c *gin.Context) (uint64, bool, bool) {
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		return 0, false
+		return 0, false, false
 	}
 	userID, ok := rawUserID.(uint)
 	if !ok {
-		return 0, false
+		return 0, false, false
 	}
-	return uint64(userID), true
+	return uint64(userID), middlewares.IsAdmin(c), true
 }
