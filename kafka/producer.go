@@ -3,11 +3,11 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
 	"GoAI/config"
+	"GoAI/requestctx"
 
 	kgo "github.com/segmentio/kafka-go"
 )
@@ -46,24 +46,33 @@ func SendMessage(ctx context.Context, key, value []byte) error {
 
 	err := Producer.WriteMessages(ctx, message)
 	if err != nil {
-		fmt.Printf("发送 Kafka 消息失败: %v\n", err)
+		log.Printf("kafka send failed trace_id=%s err=%v", requestctx.TraceIDFromContext(ctx), err)
 		return err
 	}
-	fmt.Printf("发送 Kafka 消息成功: Key=%s, Value=%s\n", string(key), string(value))
+	log.Printf("kafka send success trace_id=%s key=%s", requestctx.TraceIDFromContext(ctx), string(key))
 	return nil
 }
 
 type RunExecuteMessage struct {
-	RunID string `json:"run_id"`
+	RunID   string `json:"run_id"`
+	TraceID string `json:"trace_id"`
 }
 
 // SendRunExecuteEvent 发送 run 执行事件到 Kafka。
 func SendRunExecuteEvent(ctx context.Context, runID string) error {
-	payload, err := json.Marshal(RunExecuteMessage{RunID: runID})
+	payload, err := json.Marshal(newRunExecuteMessage(ctx, runID))
 	if err != nil {
 		return err
 	}
 	return SendMessage(ctx, []byte(runID), payload)
+}
+
+// newRunExecuteMessage 构造包含 trace_id 的 Run 执行消息。
+func newRunExecuteMessage(ctx context.Context, runID string) RunExecuteMessage {
+	return RunExecuteMessage{
+		RunID:   runID,
+		TraceID: requestctx.TraceIDFromContext(ctx),
+	}
 }
 
 // CloseProducer 关闭 Kafka 生产者

@@ -1,0 +1,53 @@
+package middlewares
+
+import (
+	"GoAI/ai"
+	"GoAI/services"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+)
+
+// TestWrapErrorMapsKnownSentinels 验证已知 sentinel error 会映射为稳定错误码。
+func TestWrapErrorMapsKnownSentinels(t *testing.T) {
+	testCases := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "run not found", err: services.ErrRunNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeRunNotFound},
+		{name: "run forbidden", err: services.ErrRunForbidden(), wantStatus: http.StatusForbidden, wantCode: CodeAuthForbidden},
+		{name: "provider missing", err: ai.ErrProviderNotFound, wantStatus: http.StatusBadRequest, wantCode: CodeProviderNotFound},
+		{name: "stream interrupted", err: ai.ErrStreamInterrupted, wantStatus: http.StatusInternalServerError, wantCode: CodeStreamInterrupted},
+		{name: "dispatch failed", err: fmt.Errorf("%w: kafka down", services.ErrRunDispatchFailed()), wantStatus: http.StatusInternalServerError, wantCode: CodeKafkaPublishFailed},
+	}
+
+	for _, tc := range testCases {
+		got := WrapError(tc.err)
+		if got.HTTPStatus != tc.wantStatus || got.Code != tc.wantCode {
+			t.Fatalf("%s: got status=%d code=%s", tc.name, got.HTTPStatus, got.Code)
+		}
+	}
+}
+
+// TestErrorHandlingMiddlewareRecoversPanic 验证 panic 会转成统一内部错误响应。
+func TestErrorHandlingMiddlewareRecoversPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(TraceMiddleware(), ErrorHandlingMiddleware())
+	router.GET("/panic", func(c *gin.Context) {
+		panic("boom")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", w.Code, w.Body.String())
+	}
+}
