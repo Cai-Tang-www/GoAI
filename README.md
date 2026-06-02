@@ -27,6 +27,35 @@
 
 DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)。
 
+## RBAC 配置
+
+- `RBAC_ENABLE`：是否启用 RBAC 授权，默认 `true`
+- `RBAC_BOOTSTRAP_ADMIN_USERNAME`：启动补种时自动授予 `admin` 角色的用户名（推荐配置）
+
+## RBAC 权限矩阵（Issue #1）
+
+### 预置角色
+- `admin`：拥有全部预置权限
+- `member`：默认角色，拥有除 `user:manage` 以外的预置权限
+
+### 预置权限
+- `run:create` `run:read` `run:replay`
+- `user:read_self` `user:update_self` `user:manage`
+- `chat:use`
+
+### 路由授权规则
+- `POST /api/chat`：需要 `chat:use`
+- `POST /api/runs`：需要 `run:create`
+- `GET /api/runs/:run_id`、`GET /api/runs/:run_id/steps`：需要 `run:read`，且默认仅本人可读（`admin` 可绕过）
+- `POST /api/runs/:run_id/replay`：需要 `run:replay`，且默认仅本人可重放（`admin` 可绕过）
+- `GET /api/users/:id`：本人需要 `user:read_self`，非本人需要 `user:manage`
+- `PUT /api/users/:id`：本人需要 `user:update_self`，非本人需要 `user:manage`
+- `POST /api/users`、`GET /api/users`、`DELETE /api/users/:id`：需要 `user:manage`
+
+### 403 语义
+- 请求已通过 JWT 认证但权限不足，统一返回 `403` 与错误体 `{ "error": "forbidden" }`
+- `RBAC_ENABLE=false` 时关闭 RBAC 权限校验（仅保留 JWT 认证）
+
 ## 当前后端架构（Run 编排主线）
 
 ### 分层
