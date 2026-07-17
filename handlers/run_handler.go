@@ -13,98 +13,78 @@ import (
 func CreateRun(c *gin.Context) {
 	var req services.CreateRunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
 		return
 	}
 
 	userID, _, ok := authPrincipal(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
 		return
 	}
 
 	run, err := services.CreateRun(c.Request.Context(), userID, req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, services.ErrRunDispatchFailed()) {
+			middlewares.AbortWithError(c, middlewares.WrapError(err))
+			return
+		}
+		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
 		return
 	}
 
-	c.JSON(http.StatusAccepted, services.CreateRunResponse{
+	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
 		RunID:  run.RunID,
 		Status: run.Status,
-	})
+	}, "success")
 }
 
 func GetRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
 		return
 	}
 	runID := c.Param("run_id")
 	run, err := services.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
-		if errors.Is(err, services.ErrRunForbidden()) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-			return
-		}
-		if errors.Is(err, services.ErrRunNotFound()) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
-	c.JSON(http.StatusOK, run)
+	middlewares.Success(c, http.StatusOK, run, "success")
 }
 
 func ListRunSteps(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
 		return
 	}
 	runID := c.Param("run_id")
 	steps, err := services.GetRunStepsByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
-		if errors.Is(err, services.ErrRunForbidden()) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-			return
-		}
-		if errors.Is(err, services.ErrRunNotFound()) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
-	c.JSON(http.StatusOK, steps)
+	middlewares.Success(c, http.StatusOK, steps, "success")
 }
 
 func ReplayRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
 		return
 	}
 	runID := c.Param("run_id")
 	newRun, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
-		if errors.Is(err, services.ErrRunForbidden()) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-			return
-		}
-		if errors.Is(err, services.ErrRunNotFound()) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
-	c.JSON(http.StatusAccepted, services.CreateRunResponse{
+	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
 		RunID:  newRun.RunID,
 		Status: newRun.Status,
-	})
+	}, "success")
 }
 
 // authPrincipal 统一提取当前请求用户 ID 与 admin 标记，供 Run 权限判断复用。

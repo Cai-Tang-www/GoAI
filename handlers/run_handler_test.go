@@ -5,6 +5,7 @@ import (
 	"GoAI/db"
 	"GoAI/middlewares"
 	"GoAI/models"
+	"GoAI/requestctx"
 	routers "GoAI/routers"
 	"GoAI/services"
 	"bytes"
@@ -75,7 +76,9 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 		JWTSecret: "test-secret",
 	}
 
+	var publishedTraceID string
 	services.SetPublishRunExecuteEventForTest(func(ctx context.Context, runID string) error {
+		publishedTraceID = requestctx.TraceIDFromContext(ctx)
 		return nil
 	})
 	defer services.SetPublishRunExecuteEventForTest(nil)
@@ -102,14 +105,22 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token1)
+	req.Header.Set(requestctx.TraceIDHeader, "trace-run-create")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("create run expected 202, got %d, body=%s", w.Code, w.Body.String())
 	}
+	createEnv := decodeEnvelope(t, w)
+	if createEnv.Code != "OK" {
+		t.Fatalf("unexpected create code: %s body=%s", createEnv.Code, w.Body.String())
+	}
+	if publishedTraceID != "trace-run-create" {
+		t.Fatalf("expected published trace id, got %q", publishedTraceID)
+	}
 	var createResp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &createResp); err != nil {
-		t.Fatalf("parse create response failed: %v", err)
+	if err := json.Unmarshal(createEnv.Data, &createResp); err != nil {
+		t.Fatalf("parse create data failed: %v", err)
 	}
 	runID, _ := createResp["run_id"].(string)
 	if runID == "" {
@@ -123,6 +134,10 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	if getW.Code != http.StatusOK {
 		t.Fatalf("get run expected 200, got %d, body=%s", getW.Code, getW.Body.String())
 	}
+	getEnv := decodeEnvelope(t, getW)
+	if getEnv.Code != "OK" {
+		t.Fatalf("unexpected get code: %s body=%s", getEnv.Code, getW.Body.String())
+	}
 
 	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)
 	forbiddenReq.Header.Set("Authorization", "Bearer "+token2)
@@ -130,5 +145,9 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	router.ServeHTTP(forbiddenW, forbiddenReq)
 	if forbiddenW.Code != http.StatusForbidden {
 		t.Fatalf("forbidden query expected 403, got %d, body=%s", forbiddenW.Code, forbiddenW.Body.String())
+	}
+	forbiddenEnv := decodeEnvelope(t, forbiddenW)
+	if forbiddenEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected forbidden code: %s body=%s", forbiddenEnv.Code, forbiddenW.Body.String())
 	}
 }

@@ -1,7 +1,6 @@
 package middlewares
 
 import (
-	"net/http"
 	"time"
 
 	"GoAI/config"
@@ -35,8 +34,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := c.GetHeader("Authorization")
 		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "请求头中缺少 Authorization"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedMissingToken())
 			return
 		}
 
@@ -44,8 +42,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 		if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
 			tokenString = tokenString[7:]
 		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization 格式错误"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedInvalidToken())
 			return
 		}
 		// 解析 token
@@ -54,8 +51,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 		})
 
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的 token"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedInvalidToken())
 			return
 		}
 
@@ -63,8 +59,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 			c.Set("user_id", claims.UserID) // 将 user_id 存储在 context 中，方便后续处理函数获取
 			c.Next()
 		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的 token"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedInvalidToken())
 			return
 		}
 	}

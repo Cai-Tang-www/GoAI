@@ -50,6 +50,13 @@ func initProviderRegistry() (*ai.Registry, error) {
 	return providerRegistry, providerRegistryErr
 }
 
+// ResetProviderRegistryForTest 重置 provider registry，供跨包测试复用。
+func ResetProviderRegistryForTest() {
+	providerRegistry = nil
+	providerRegistryErr = nil
+	providerRegistryOnce = sync.Once{}
+}
+
 // Chat 调用统一 provider 接口
 func Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
 	reg, err := initProviderRegistry()

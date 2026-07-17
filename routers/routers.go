@@ -12,13 +12,16 @@ import (
 
 // InitRouter 初始化所有 API 路由
 func InitRouter() *gin.Engine { //Engine rounter group
-	router := gin.Default()
+	router := gin.New()
+	router.Use(
+		middlewares.TraceMiddleware(),
+		middlewares.RequestLogMiddleware(),
+		middlewares.ErrorHandlingMiddleware(),
+	)
 
 	// 健康检查路由
 	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "ping success",
-		})
+		middlewares.Success(c, http.StatusOK, gin.H{"message": "ping success"}, "success")
 	})
 
 	// 用户认证相关的路由 (例如注册、登录，这些通常不需要 JWT 认证)
@@ -37,13 +40,13 @@ func InitRouter() *gin.Engine { //Engine rounter group
 		apiGroup.GET("/protected", func(c *gin.Context) {
 			userID, exists := c.Get("user_id")
 			if !exists {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "无法获取用户ID"})
+				middlewares.AbortWithError(c, middlewares.InternalError("internal error", nil))
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{
+			middlewares.Success(c, http.StatusOK, gin.H{
 				"message": "你已通过认证",
 				"user_id": userID,
-			})
+			}, "success")
 		})
 		apiGroup.POST("/chat", middlewares.RequirePermission(models.PermissionChatUse), handlers.Chat)
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), handlers.CreateRun)

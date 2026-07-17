@@ -1,10 +1,11 @@
 package handlers
 
 import (
-	"errors"
+	"log"
 	"net/http"
 
 	"GoAI/ai"
+	"GoAI/middlewares"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
@@ -19,19 +20,14 @@ func Chat(c *gin.Context) {
 		Provider string       `json:"provider"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid request body", nil))
 		return
 	}
 
 	// 2. 调用业务层
 	stream, err := services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, ai.ErrProviderNotFound) || errors.Is(err, ai.ErrDriverNotFound) ||
-			errors.Is(err, ai.ErrInvalidProviderInput) || errors.Is(err, ai.ErrModelNotConfigured) {
-			status = http.StatusBadRequest
-		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
 
@@ -39,6 +35,7 @@ func Chat(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
 
 	// 逐字流式输出
 	chunks := stream.Chunks
@@ -50,18 +47,26 @@ func Chat(c *gin.Context) {
 				chunks = nil
 				continue
 			}
-			_, _ = c.Writer.WriteString("data: " + content + "\n\n")
-			c.Writer.Flush() // 强制刷新到客户端
+			if err := writeSSEEnvelope(c, "chunk", middlewares.CodeOK, "success", map[string]any{"content": content}); err != nil {
+				log.Printf("sse chunk write failed trace_id=%s err=%v", middlewares.TraceID(c), err)
+				return
+			}
 		case streamErr, ok := <-errs:
 			if !ok {
 				errs = nil
 				continue
 			}
 			if streamErr != nil {
-				_, _ = c.Writer.WriteString("event: error\ndata: " + streamErr.Error() + "\n\n")
-				c.Writer.Flush()
+				appErr := middlewares.WrapError(streamErr)
+				if err := writeSSEEnvelope(c, "error", appErr.Code, appErr.Message, nil); err != nil {
+					log.Printf("sse error write failed trace_id=%s err=%v", middlewares.TraceID(c), err)
+				}
 				return
 			}
 		}
+	}
+
+	if err := writeSSEEnvelope(c, "done", middlewares.CodeOK, "success", map[string]any{"done": true}); err != nil {
+		log.Printf("sse done write failed trace_id=%s err=%v", middlewares.TraceID(c), err)
 	}
 }

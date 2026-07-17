@@ -21,6 +21,7 @@ import (
 var (
 	errRunNotFound           = errors.New("run not found")
 	errRunForbidden          = errors.New("run does not belong to current user")
+	errRunDispatchFailed     = errors.New("run execute event publish failed")
 	errInvalidRunTransition  = errors.New("invalid run status transition")
 	errInvalidStepTransition = errors.New("invalid step status transition")
 	publishRunExecuteEvent   = func(ctx context.Context, runID string) error {
@@ -37,6 +38,12 @@ func ErrRunForbidden() error {
 	return errRunForbidden
 }
 
+// ErrRunDispatchFailed 返回 Run 入队失败的统一 sentinel error。
+func ErrRunDispatchFailed() error {
+	return errRunDispatchFailed
+}
+
+// SetPublishRunExecuteEventForTest 允许测试替换 Kafka 投递函数。
 func SetPublishRunExecuteEventForTest(fn func(ctx context.Context, runID string) error) {
 	if fn == nil {
 		publishRunExecuteEvent = func(ctx context.Context, runID string) error {
@@ -124,7 +131,7 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*model
 
 	if err := publishRunExecuteEvent(ctx, run.RunID); err != nil {
 		_ = failRunWithMessage(ctx, run.RunID, fmt.Sprintf("dispatch run message failed: %v", err))
-		return run, err
+		return run, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
 	}
 
 	return run, nil
@@ -204,7 +211,7 @@ func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string) (
 	}
 	if err := publishRunExecuteEvent(ctx, clone.RunID); err != nil {
 		_ = failRunWithMessage(ctx, clone.RunID, fmt.Sprintf("dispatch replay message failed: %v", err))
-		return clone, err
+		return clone, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
 	}
 	return clone, nil
 }

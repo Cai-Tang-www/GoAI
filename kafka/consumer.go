@@ -2,9 +2,9 @@ package kafka
 
 import (
 	"GoAI/config"
+	"GoAI/requestctx"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
@@ -44,26 +44,29 @@ func StartConsumer(ctx context.Context) {
 		default:
 			message, err := Consumer.ReadMessage(ctx)
 			if err != nil {
-				log.Printf("读取 Kafka 消息失败: %v", err)
+				log.Printf("kafka read failed trace_id=%s err=%v", requestctx.TraceIDFromContext(ctx), err)
 				continue
 			}
-			fmt.Printf("收到消息 -> Topic: %s, Partition: %d, Offset: %d, Key: %s, Value: %s\n",
-				message.Topic, message.Partition, message.Offset, string(message.Key), string(message.Value))
 			if runMessageHandler == nil {
 				log.Println("Run message handler 未注册，跳过消息处理")
 				continue
 			}
 			var payload RunExecuteMessage
 			if err := json.Unmarshal(message.Value, &payload); err != nil {
-				log.Printf("解析 Run 消息失败: %v", err)
+				log.Printf("parse run message failed err=%v", err)
 				continue
 			}
 			if payload.RunID == "" {
 				log.Println("Run 消息缺少 run_id，跳过")
 				continue
 			}
-			if err := runMessageHandler(ctx, payload); err != nil {
-				log.Printf("处理 Run 消息失败(run_id=%s): %v", payload.RunID, err)
+			msgCtx := ctx
+			if payload.TraceID != "" {
+				msgCtx = requestctx.WithTraceID(ctx, payload.TraceID)
+			}
+			log.Printf("kafka consume trace_id=%s topic=%s partition=%d offset=%d run_id=%s", requestctx.TraceIDFromContext(msgCtx), message.Topic, message.Partition, message.Offset, payload.RunID)
+			if err := runMessageHandler(msgCtx, payload); err != nil {
+				log.Printf("handle run message failed trace_id=%s run_id=%s err=%v", requestctx.TraceIDFromContext(msgCtx), payload.RunID, err)
 			}
 		}
 	}

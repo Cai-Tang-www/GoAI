@@ -4,7 +4,6 @@ import (
 	"GoAI/config"
 	"GoAI/db"
 	"GoAI/models"
-	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -27,15 +26,13 @@ func RBACContextMiddleware() gin.HandlerFunc {
 
 		userID, ok := getUserIDFromContext(c)
 		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedInvalidToken())
 			return
 		}
 
 		permissionSet, isAdmin, err := loadPermissionSet(userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "rbac permission load failed"})
-			c.Abort()
+			AbortWithError(c, RbacPermissionLoadFailed(err))
 			return
 		}
 		c.Set(contextPermissionSetKey, permissionSet)
@@ -55,8 +52,7 @@ func RequirePermission(permission string) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-		c.Abort()
+		AbortWithError(c, ForbiddenError())
 	}
 }
 
@@ -69,16 +65,14 @@ func RequireSelfOrPermission(idParam string, selfPermission string, managePermis
 		}
 		userID, ok := getUserIDFromContext(c)
 		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-			c.Abort()
+			AbortWithError(c, UnauthorizedInvalidToken())
 			return
 		}
 
 		targetIDRaw := c.Param(idParam)
 		targetID, err := strconv.ParseUint(targetIDRaw, 10, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
-			c.Abort()
+			AbortWithError(c, InvalidIDError())
 			return
 		}
 
@@ -87,8 +81,7 @@ func RequireSelfOrPermission(idParam string, selfPermission string, managePermis
 				c.Next()
 				return
 			}
-			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-			c.Abort()
+			AbortWithError(c, ForbiddenError())
 			return
 		}
 
@@ -96,8 +89,7 @@ func RequireSelfOrPermission(idParam string, selfPermission string, managePermis
 			c.Next()
 			return
 		}
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-		c.Abort()
+		AbortWithError(c, ForbiddenError())
 	}
 }
 

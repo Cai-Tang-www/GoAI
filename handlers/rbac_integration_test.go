@@ -108,6 +108,10 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 	if wUsers.Code != http.StatusForbidden {
 		t.Fatalf("member list users expected 403, got %d body=%s", wUsers.Code, wUsers.Body.String())
 	}
+	usersEnv := decodeEnvelope(t, wUsers)
+	if usersEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected users error code: %s body=%s", usersEnv.Code, wUsers.Body.String())
+	}
 
 	// member 可创建 run（需要 run:create）
 	createBody := map[string]any{
@@ -125,9 +129,12 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 	if wCreate.Code != http.StatusAccepted {
 		t.Fatalf("member create run expected 202, got %d body=%s", wCreate.Code, wCreate.Body.String())
 	}
-
+	createEnv := decodeEnvelope(t, wCreate)
+	if createEnv.Code != "OK" {
+		t.Fatalf("unexpected create code: %s body=%s", createEnv.Code, wCreate.Body.String())
+	}
 	var createResp map[string]any
-	_ = json.Unmarshal(wCreate.Body.Bytes(), &createResp)
+	_ = json.Unmarshal(createEnv.Data, &createResp)
 	memberRunID, _ := createResp["run_id"].(string)
 	if memberRunID == "" {
 		t.Fatalf("member run_id empty: %v", createResp)
@@ -155,6 +162,10 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 	if wMemberReadAdminRun.Code != http.StatusForbidden {
 		t.Fatalf("member read admin run expected 403, got %d body=%s", wMemberReadAdminRun.Code, wMemberReadAdminRun.Body.String())
 	}
+	memberReadEnv := decodeEnvelope(t, wMemberReadAdminRun)
+	if memberReadEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected member read code: %s body=%s", memberReadEnv.Code, wMemberReadAdminRun.Body.String())
+	}
 
 	// admin 可读取 member 的 run（admin 绕过 ownership）
 	reqAdminReadMemberRun := httptest.NewRequest(http.MethodGet, "/api/runs/"+memberRunID, nil)
@@ -163,6 +174,10 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 	router.ServeHTTP(wAdminReadMemberRun, reqAdminReadMemberRun)
 	if wAdminReadMemberRun.Code != http.StatusOK {
 		t.Fatalf("admin read member run expected 200, got %d body=%s", wAdminReadMemberRun.Code, wAdminReadMemberRun.Body.String())
+	}
+	adminReadEnv := decodeEnvelope(t, wAdminReadMemberRun)
+	if adminReadEnv.Code != "OK" {
+		t.Fatalf("unexpected admin read code: %s body=%s", adminReadEnv.Code, wAdminReadMemberRun.Body.String())
 	}
 }
 
@@ -196,6 +211,10 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 	if wBefore.Code != http.StatusForbidden {
 		t.Fatalf("before promote expected 403, got %d body=%s", wBefore.Code, wBefore.Body.String())
 	}
+	beforeEnv := decodeEnvelope(t, wBefore)
+	if beforeEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected before promote code: %s body=%s", beforeEnv.Code, wBefore.Body.String())
+	}
 
 	var adminRole models.Role
 	if err := db.DB.Where("name = ?", models.RoleAdmin).First(&adminRole).Error; err != nil {
@@ -212,6 +231,10 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 	router.ServeHTTP(wAfter, reqAfter)
 	if wAfter.Code != http.StatusOK {
 		t.Fatalf("after promote expected 200, got %d body=%s", wAfter.Code, wAfter.Body.String())
+	}
+	afterEnv := decodeEnvelope(t, wAfter)
+	if afterEnv.Code != "OK" {
+		t.Fatalf("unexpected after promote code: %s body=%s", afterEnv.Code, wAfter.Body.String())
 	}
 }
 
@@ -263,6 +286,10 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 	if wGetSelf.Code != http.StatusOK {
 		t.Fatalf("member get self expected 200, got %d body=%s", wGetSelf.Code, wGetSelf.Body.String())
 	}
+	getSelfEnv := decodeEnvelope(t, wGetSelf)
+	if getSelfEnv.Code != "OK" {
+		t.Fatalf("unexpected get self code: %s body=%s", getSelfEnv.Code, wGetSelf.Body.String())
+	}
 
 	// member 读取他人资料应为 403（需要 user:manage）。
 	reqGetOther := httptest.NewRequest(http.MethodGet, "/api/users/"+strconv.FormatUint(uint64(admin.ID), 10), nil)
@@ -271,6 +298,10 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 	router.ServeHTTP(wGetOther, reqGetOther)
 	if wGetOther.Code != http.StatusForbidden {
 		t.Fatalf("member get other expected 403, got %d body=%s", wGetOther.Code, wGetOther.Body.String())
+	}
+	getOtherEnv := decodeEnvelope(t, wGetOther)
+	if getOtherEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected get other code: %s body=%s", getOtherEnv.Code, wGetOther.Body.String())
 	}
 
 	// member 更新自己资料可通过授权（具体更新成功由 handler 逻辑决定，这里只验证非 403）。
@@ -304,6 +335,10 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 	if wCreateUser.Code != http.StatusForbidden {
 		t.Fatalf("member create user expected 403, got %d body=%s", wCreateUser.Code, wCreateUser.Body.String())
 	}
+	createUserEnv := decodeEnvelope(t, wCreateUser)
+	if createUserEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected create user code: %s body=%s", createUserEnv.Code, wCreateUser.Body.String())
+	}
 
 	// member 删除用户应为 403（需要 user:manage）。
 	reqDeleteUser := httptest.NewRequest(http.MethodDelete, "/api/users/"+strconv.FormatUint(uint64(admin.ID), 10), nil)
@@ -312,6 +347,10 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 	router.ServeHTTP(wDeleteUser, reqDeleteUser)
 	if wDeleteUser.Code != http.StatusForbidden {
 		t.Fatalf("member delete user expected 403, got %d body=%s", wDeleteUser.Code, wDeleteUser.Body.String())
+	}
+	deleteUserEnv := decodeEnvelope(t, wDeleteUser)
+	if deleteUserEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected delete user code: %s body=%s", deleteUserEnv.Code, wDeleteUser.Body.String())
 	}
 
 	// member 可访问 chat（具备 chat:use），这里验证授权通过（非 403）。
@@ -338,5 +377,9 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 	router.ServeHTTP(wChatOutsider, reqChatOutsider)
 	if wChatOutsider.Code != http.StatusForbidden {
 		t.Fatalf("outsider chat expected 403, got %d body=%s", wChatOutsider.Code, wChatOutsider.Body.String())
+	}
+	chatOutsiderEnv := decodeEnvelope(t, wChatOutsider)
+	if chatOutsiderEnv.Code != "AUTH_FORBIDDEN" {
+		t.Fatalf("unexpected outsider chat code: %s body=%s", chatOutsiderEnv.Code, wChatOutsider.Body.String())
 	}
 }

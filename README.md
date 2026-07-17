@@ -53,8 +53,43 @@ DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)�
 - `POST /api/users`、`GET /api/users`、`DELETE /api/users/:id`：需要 `user:manage`
 
 ### 403 语义
-- 请求已通过 JWT 认证但权限不足，统一返回 `403` 与错误体 `{ "error": "forbidden" }`
+- 请求已通过 JWT 认证但权限不足，统一返回 `403` 与错误体 `{ "code": "AUTH_FORBIDDEN", "message": "forbidden", "data": null, "trace_id": "..." }`
 - `RBAC_ENABLE=false` 时关闭 RBAC 权限校验（仅保留 JWT 认证）
+
+## 统一响应与错误码（Issue #2）
+
+### JSON 响应结构
+- 所有普通 JSON API 统一返回：`{ code, message, data, trace_id }`
+- 成功响应固定 `code=OK`
+- 错误响应返回稳定字符串错误码，并在响应头与响应体中同时返回 `X-Trace-ID` / `trace_id`
+
+### 常用错误码
+- 认证：`AUTH_MISSING_TOKEN` `AUTH_INVALID_TOKEN` `AUTH_INVALID_CREDENTIALS`
+- 授权：`AUTH_FORBIDDEN`
+- 参数：`VALIDATION_FAILED` `INVALID_ID`
+- 资源：`USER_NOT_FOUND` `USER_ALREADY_EXISTS` `RUN_NOT_FOUND`
+- Provider：`PROVIDER_NOT_FOUND` `PROVIDER_DRIVER_NOT_FOUND` `PROVIDER_INVALID_CONFIG` `MODEL_NOT_CONFIGURED` `STREAM_INTERRUPTED`
+- 系统：`INTERNAL_ERROR` `RBAC_PERMISSION_LOAD_FAILED` `KAFKA_PUBLISH_FAILED`
+
+### SSE 响应约定（`POST /api/chat`）
+- 保持 `Content-Type: text/event-stream`
+- `event: chunk`：`data.content` 为增量文本
+- `event: done`：`data.done=true`
+- `event: error`：返回统一 envelope 的错误事件
+
+### 示例
+
+```json
+{
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "run_id": "run_xxx",
+    "status": "queued"
+  },
+  "trace_id": "8dca6d4a9f6f0c44f8a2e77d"
+}
+```
 
 ## 当前后端架构（Run 编排主线）
 
