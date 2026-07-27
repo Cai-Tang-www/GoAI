@@ -17,7 +17,7 @@ import (
 
 // TestUserAuthAndEnvelope 验证 register/login 与缺 token 场景都会走统一响应结构。
 func TestUserAuthAndEnvelope(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open("file:user_handler_test?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
@@ -78,5 +78,42 @@ func TestUserAuthAndEnvelope(t *testing.T) {
 	protectedEnv := decodeEnvelope(t, protectedW)
 	if protectedEnv.Code != "AUTH_MISSING_TOKEN" {
 		t.Fatalf("unexpected auth code: %s body=%s", protectedEnv.Code, protectedW.Body.String())
+	}
+}
+
+// TestRegisterValidationError 验证用户注册时邮箱和密码格式错误会被明确拦截。
+func TestRegisterValidationError(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	if err := gdb.AutoMigrate(&models.User{}); err != nil {
+		t.Fatalf("auto migrate failed: %v", err)
+	}
+	db.DB = gdb
+
+	config.AppConfig = &config.Config{
+		JWTSecret:      "user-test-secret",
+		RBACEnable:     false,
+		ModelProviders: map[string]config.ModelProviderConfig{},
+	}
+	router := routers.InitRouter()
+
+	registerBody, _ := json.Marshal(map[string]any{
+		"username": "a",
+		"email":    "bad-email",
+		"password": "123",
+	})
+	registerReq := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerW := httptest.NewRecorder()
+	router.ServeHTTP(registerW, registerReq)
+
+	if registerW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", registerW.Code, registerW.Body.String())
+	}
+	env := decodeEnvelope(t, registerW)
+	if env.Code != "VALIDATION_FAILED" {
+		t.Fatalf("unexpected code: %s body=%s", env.Code, registerW.Body.String())
 	}
 }

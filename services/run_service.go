@@ -30,6 +30,14 @@ var (
 	stepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 )
 
+var allowedRunTriggerTypes = map[string]struct{}{
+	"api":      {},
+	"manual":   {},
+	"replay":   {},
+	"schedule": {},
+	"webhook":  {},
+}
+
 func ErrRunNotFound() error {
 	return errRunNotFound
 }
@@ -77,11 +85,46 @@ type CreateRunResponse struct {
 	Status string `json:"status"`
 }
 
-func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*models.Run, error) {
+// ValidateCreateRunRequest 校验 Run 创建请求的关键字段，避免非法输入进入执行主链路。
+func ValidateCreateRunRequest(req CreateRunRequest) error {
 	agentCode := strings.TrimSpace(req.AgentCode)
 	if agentCode == "" {
-		return nil, errors.New("agent_code is required")
+		return errors.New("agent_code is required")
 	}
+	if len(agentCode) > 64 {
+		return errors.New("agent_code must be at most 64 characters")
+	}
+	if req.WorkflowVersion < 0 {
+		return errors.New("workflow_version must be greater than or equal to 0")
+	}
+	if len(strings.TrimSpace(req.ThreadID)) > 128 {
+		return errors.New("thread_id must be at most 128 characters")
+	}
+	triggerType := strings.TrimSpace(req.TriggerType)
+	if triggerType != "" {
+		if _, ok := allowedRunTriggerTypes[triggerType]; !ok {
+			return errors.New("trigger_type must be one of api,manual,replay,schedule,webhook")
+		}
+	}
+	if len(strings.TrimSpace(req.Provider)) > 64 {
+		return errors.New("provider must be at most 64 characters")
+	}
+	if len(strings.TrimSpace(req.Model)) > 128 {
+		return errors.New("model must be at most 128 characters")
+	}
+	inputJSON := strings.TrimSpace(string(req.Input))
+	if inputJSON != "" && !json.Valid(req.Input) {
+		return errors.New("input must be valid JSON")
+	}
+	return nil
+}
+
+func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*models.Run, error) {
+	if err := ValidateCreateRunRequest(req); err != nil {
+		return nil, err
+	}
+
+	agentCode := strings.TrimSpace(req.AgentCode)
 
 	var agent models.Agent
 	if err := db.DB.WithContext(ctx).

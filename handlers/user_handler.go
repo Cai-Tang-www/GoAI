@@ -14,27 +14,34 @@ import (
 
 // RegisterUser 处理用户注册请求
 func RegisterUser(c *gin.Context) {
-	var user models.User
-	if err := c.ShouldBindJSON(&user); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+	var req userWriteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid user payload", nil))
+		return
+	}
+	normalizeUserWriteRequest(&req)
+	if appErr := validateUserWriteRequest(req, true); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
-	// 检查用户是否已存在
 	var existingUser models.User
-	if result := db.DB.Where("username = ? OR email = ?", user.Username, user.Email).First(&existingUser); result.RowsAffected > 0 {
+	if result := db.DB.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
 		middlewares.AbortWithError(c, middlewares.UserAlreadyExistsError())
 		return
 	}
 
-	// 密码加密
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("password hash failed", err))
 		return
 	}
-	user.Password = string(hashedPassword)
 
+	user := models.User{
+		Username: req.Username,
+		Email:    req.Email,
+		Password: string(hashedPassword),
+	}
 	if result := db.DB.Create(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
 		return
@@ -48,29 +55,28 @@ func RegisterUser(c *gin.Context) {
 
 // LoginUser 处理用户登录请求
 func LoginUser(c *gin.Context) {
-	var loginInfo struct {
-		Username string `json:"username" binding:"required"`
-		Password string `json:"password" binding:"required"`
+	var req loginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid login payload", nil))
+		return
 	}
-
-	if err := c.ShouldBindJSON(&loginInfo); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+	normalizeLoginRequest(&req)
+	if appErr := validateLoginRequest(req); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
 	var user models.User
-	if result := db.DB.Where("username = ?", loginInfo.Username).First(&user); result.Error != nil {
+	if result := db.DB.Where("username = ?", req.Username).First(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidCredentials())
 		return
 	}
 
-	// 验证密码
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(loginInfo.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidCredentials())
 		return
 	}
 
-	// 生成 JWT Token
 	token, err := middlewares.GenerateToken(user.ID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("generate token failed", err))
@@ -82,26 +88,34 @@ func LoginUser(c *gin.Context) {
 
 // CreateUser 处理创建用户的请求
 func CreateUser(c *gin.Context) {
-	var user models.User
-	if err := c.ShouldBindJSON(&user); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+	var req userWriteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid user payload", nil))
+		return
+	}
+	normalizeUserWriteRequest(&req)
+	if appErr := validateUserWriteRequest(req, true); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
 	var existingUser models.User
-	if result := db.DB.Where("username = ? OR email = ?", user.Username, user.Email).First(&existingUser); result.RowsAffected > 0 {
+	if result := db.DB.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
 		middlewares.AbortWithError(c, middlewares.UserAlreadyExistsError())
 		return
 	}
 
-	// 密码加密
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("password hash failed", err))
 		return
 	}
-	user.Password = string(hashedPassword)
 
+	user := models.User{
+		Username: req.Username,
+		Email:    req.Email,
+		Password: string(hashedPassword),
+	}
 	if result := db.DB.Create(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
 		return
@@ -143,9 +157,14 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 
-	var req models.User
+	var req userWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid user payload", nil))
+		return
+	}
+	normalizeUserWriteRequest(&req)
+	if appErr := validateUserWriteRequest(req, false); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
@@ -157,11 +176,8 @@ func UpdateUser(c *gin.Context) {
 
 	user.Username = req.Username
 	user.Email = req.Email
-	user.Password = req.Password
-
-	// 如果请求中包含密码，则重新加密
-	if user.Password != "" {
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if req.Password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			middlewares.AbortWithError(c, middlewares.InternalError("password hash failed", err))
 			return

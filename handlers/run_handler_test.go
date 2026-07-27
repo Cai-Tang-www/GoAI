@@ -21,7 +21,7 @@ import (
 
 func setupRunIntegrationDB(t *testing.T) {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open("file:run_handler_test?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
@@ -149,5 +149,60 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	forbiddenEnv := decodeEnvelope(t, forbiddenW)
 	if forbiddenEnv.Code != "AUTH_FORBIDDEN" {
 		t.Fatalf("unexpected forbidden code: %s body=%s", forbiddenEnv.Code, forbiddenW.Body.String())
+	}
+}
+
+func TestCreateRunValidationError(t *testing.T) {
+	setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token failed: %v", err)
+	}
+
+	router := routers.InitRouter()
+	invalidBody := map[string]any{
+		"agent_code":       "",
+		"trigger_type":     "bad-trigger",
+		"workflow_version": -1,
+	}
+	raw, _ := json.Marshal(invalidBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w)
+	if env.Code != "VALIDATION_FAILED" {
+		t.Fatalf("unexpected code: %s body=%s", env.Code, w.Body.String())
+	}
+}
+
+func TestRunPathValidationError(t *testing.T) {
+	setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token failed: %v", err)
+	}
+
+	router := routers.InitRouter()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/%20", nil)
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w)
+	if env.Code != "VALIDATION_FAILED" {
+		t.Fatalf("unexpected code: %s body=%s", env.Code, w.Body.String())
 	}
 }
