@@ -21,7 +21,7 @@ import (
 
 func setupRBACIntegrationDB(t *testing.T) {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open("file:rbac_integration?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}

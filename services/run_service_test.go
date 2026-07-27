@@ -81,6 +81,29 @@ func TestCreateRunSuccessAndQueued(t *testing.T) {
 	}
 }
 
+func TestCreateRunValidation(t *testing.T) {
+	if err := ValidateCreateRunRequest(CreateRunRequest{AgentCode: "", WorkflowVersion: -1, TriggerType: "bad"}); err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if err := ValidateCreateRunRequest(CreateRunRequest{AgentCode: "agent", TriggerType: "api", Input: []byte(`{"prompt":"ok"}`)}); err != nil {
+		t.Fatalf("expected validation success, got %v", err)
+	}
+}
+
+func TestCreateRunRejectsInvalidInputJSON(t *testing.T) {
+	setupRunTestDB(t)
+	seedAgentWorkflow(t)
+
+	_, err := CreateRun(context.Background(), 1, CreateRunRequest{
+		AgentCode:   "agent_test",
+		TriggerType: "api",
+		Input:       []byte(`{"prompt":`),
+	})
+	if err == nil {
+		t.Fatal("expected invalid json error, got nil")
+	}
+}
+
 func TestCreateRunDispatchFailMarksRunFailed(t *testing.T) {
 	setupRunTestDB(t)
 	seedAgentWorkflow(t)

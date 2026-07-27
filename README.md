@@ -91,6 +91,52 @@ DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)�
 }
 ```
 
+## 参数校验与启动期配置校验（Issue #3）
+
+### 请求参数校验
+- `POST /auth/register`：校验 `username/email/password` 的必填、格式和长度。
+- `POST /auth/login`：校验 `username/password` 必填。
+- `POST /api/chat`：校验 `messages` 非空、消息 `role` 合法、`content` 非空，以及可选 `provider/model` 长度。
+- `POST /api/runs`：校验 `agent_code`、`workflow_version`、`trigger_type`、`thread_id`、`provider`、`model` 和 `input` JSON 合法性。
+- `GET /api/runs/:run_id`、`GET /api/runs/:run_id/steps`、`POST /api/runs/:run_id/replay`：校验 `run_id` 非空、长度与字符集。
+- `GET/PUT/DELETE /api/users/:id`：校验数值型 `id`，非法时统一返回 `INVALID_ID`。
+
+### 启动期关键配置校验
+服务启动时会在 `config.LoadConfig()` 阶段直接校验下面这些关键配置，缺失时拒绝启动：
+
+- MySQL：`MYSQL_HOST` `MYSQL_PORT` `MYSQL_USER` `MYSQL_DATABASE`
+- Redis：`REDIS_HOST` `REDIS_PORT`
+- Server：`SERVER_PORT`
+- Kafka：`KAFKA_BOOTSTRAP_SERVERS` `KAFKA_RUN_TOPIC` `KAFKA_RUN_GROUP_ID`
+- JWT：`JWT_SECRET`
+- Provider：当存在 provider profile 时，必须有 `MODEL_PROVIDER_DEFAULT`，且默认 provider 的 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME_DEFAULT` 完整可用
+
+### 推荐最小本地配置
+参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)。至少保证下面这些变量可用：
+
+```env
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_DATABASE=goai_db
+REDIS_HOST=localhost
+REDIS_PORT=6379
+SERVER_PORT=8080
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+KAFKA_RUN_TOPIC=run_execute
+KAFKA_RUN_GROUP_ID=run-worker-group
+JWT_SECRET=change_me
+MODEL_PROVIDER_DEFAULT=deepseek
+MODEL_BASE_URL_DEEPSEEK=https://api.deepseek.com
+MODEL_API_KEY_DEEPSEEK=
+MODEL_NAME_DEFAULT_DEEPSEEK=deepseek-chat
+```
+
+### 常见失败语义
+- 参数不合法：返回 `400` + `VALIDATION_FAILED`
+- 用户路径参数非法：返回 `400` + `INVALID_ID`
+- 启动缺配置：进程直接报错退出，不延迟到运行期再暴露
+
 ## 当前后端架构（Run 编排主线）
 
 ### 分层

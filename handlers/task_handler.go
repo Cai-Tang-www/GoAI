@@ -4,7 +4,6 @@ import (
 	"log"
 	"net/http"
 
-	"GoAI/ai"
 	"GoAI/middlewares"
 	"GoAI/services"
 
@@ -13,31 +12,28 @@ import (
 
 // Chat 处理聊天请求
 func Chat(c *gin.Context) {
-	// 1. 解析请求体（前端传的消息列表）
-	var req struct {
-		Messages []ai.Message `json:"messages"`
-		Model    string       `json:"model"`
-		Provider string       `json:"provider"`
-	}
+	var req chatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid request body", nil))
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid chat payload", nil))
+		return
+	}
+	normalizeChatRequest(&req)
+	if appErr := validateChatRequest(req); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
-	// 2. 调用业务层
 	stream, err := services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
 
-	// 流式响应给前端（SSE 格式）
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Status(http.StatusOK)
 
-	// 逐字流式输出
 	chunks := stream.Chunks
 	errs := stream.Errs
 	for chunks != nil || errs != nil {
