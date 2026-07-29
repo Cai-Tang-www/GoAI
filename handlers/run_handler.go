@@ -10,11 +10,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const idempotencyKeyHeader = "Idempotency-Key"
+
 // CreateRun 处理创建 Run 请求，并在进入 service 前完成基础参数校验。
 func CreateRun(c *gin.Context) {
 	var req services.CreateRunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid run payload", nil))
+		return
+	}
+	req.IdempotencyKey = c.GetHeader(idempotencyKeyHeader)
+	if appErr := validateIdempotencyKey(req.IdempotencyKey); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 	if appErr := validateCreateRunRequest(&req); appErr != nil {
@@ -28,8 +35,12 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	run, err := services.CreateRun(c.Request.Context(), userID, req)
+	result, err := services.CreateRun(c.Request.Context(), userID, req)
 	if err != nil {
+		if errors.Is(err, services.ErrIdempotencyKeyReused()) {
+			middlewares.AbortWithError(c, middlewares.WrapError(err))
+			return
+		}
 		if errors.Is(err, services.ErrRunDispatchFailed()) {
 			middlewares.AbortWithError(c, middlewares.WrapError(err))
 			return
@@ -38,9 +49,13 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
-		RunID:  run.RunID,
-		Status: run.Status,
+	status := http.StatusAccepted
+	if result.IdempotentHit {
+		status = http.StatusOK
+	}
+	middlewares.Success(c, status, services.CreateRunResponse{
+		RunID:  result.Run.RunID,
+		Status: result.Run.Status,
 	}, "success")
 }
 
@@ -96,14 +111,23 @@ func ReplayRun(c *gin.Context) {
 		middlewares.AbortWithError(c, appErr)
 		return
 	}
-	newRun, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID)
+	idempotencyKey := c.GetHeader(idempotencyKeyHeader)
+	if appErr := validateIdempotencyKey(idempotencyKey); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	result, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID, idempotencyKey)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
-	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
-		RunID:  newRun.RunID,
-		Status: newRun.Status,
+	status := http.StatusAccepted
+	if result.IdempotentHit {
+		status = http.StatusOK
+	}
+	middlewares.Success(c, status, services.CreateRunResponse{
+		RunID:  result.Run.RunID,
+		Status: result.Run.Status,
 	}, "success")
 }
 

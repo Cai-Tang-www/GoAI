@@ -211,6 +211,18 @@ func validateRunIDParam(runID string) *middlewares.AppError {
 	return nil
 }
 
+// validateIdempotencyKey 校验可选幂等键的长度，避免异常 header 进入服务层。
+func validateIdempotencyKey(key string) *middlewares.AppError {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if len(key) > 128 {
+		return validationError("invalid idempotency key", []validationFieldError{newValidationFieldError("idempotency_key", "must be at most 128 characters")})
+	}
+	return nil
+}
+
 // validationError 将字段级错误聚合成统一的 ValidationFailed 响应。
 func validationError(message string, fieldErrors []validationFieldError) *middlewares.AppError {
 	if len(fieldErrors) == 0 {

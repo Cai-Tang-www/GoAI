@@ -39,6 +39,7 @@ func InitDB() {
 		&models.Workflow{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunIdempotency{},
 	)
 	if err != nil {
 		log.Fatalf("Failed to auto migrate database: %v", err)

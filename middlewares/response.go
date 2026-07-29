@@ -32,6 +32,7 @@ const (
 	CodeInternalError          = "INTERNAL_ERROR"
 	CodeRBACPermissionLoad     = "RBAC_PERMISSION_LOAD_FAILED"
 	CodeKafkaPublishFailed     = "KAFKA_PUBLISH_FAILED"
+	CodeIdempotencyKeyReused   = "IDEMPOTENCY_KEY_REUSED"
 )
 
 // ResponseEnvelope 定义所有 HTTP JSON 与 SSE payload 共用的响应结构。
@@ -158,6 +159,11 @@ func RunNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeRunNotFound, Message: "run not found"}
 }
 
+// IdempotencyKeyReusedError 构造幂等键冲突错误。
+func IdempotencyKeyReusedError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeIdempotencyKeyReused, Message: "idempotency key reused with different request"}
+}
+
 // RbacPermissionLoadFailed 构造 RBAC 查询失败错误。
 func RbacPermissionLoadFailed(err error) *AppError {
 	return &AppError{HTTPStatus: http.StatusInternalServerError, Code: CodeRBACPermissionLoad, Message: "rbac permission load failed", Err: err}
@@ -194,6 +200,8 @@ func WrapError(err error) *AppError {
 		return ForbiddenError()
 	case errors.Is(err, services.ErrRunDispatchFailed()):
 		return KafkaPublishFailed(err)
+	case errors.Is(err, services.ErrIdempotencyKeyReused()):
+		return IdempotencyKeyReusedError()
 	case errors.Is(err, ai.ErrProviderNotFound):
 		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeProviderNotFound, Message: "provider not found", Err: err}
 	case errors.Is(err, ai.ErrDriverNotFound):
