@@ -2,11 +2,12 @@ package middlewares
 
 import (
 	"GoAI/config"
-	"GoAI/db"
 	"GoAI/models"
+	"errors"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 const (
@@ -15,7 +16,7 @@ const (
 )
 
 // RBACContextMiddleware 在 JWT 之后加载用户权限集并写入请求上下文。
-func RBACContextMiddleware() gin.HandlerFunc {
+func RBACContextMiddleware(database *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if config.AppConfig == nil || !config.AppConfig.RBACEnable {
 			c.Set(contextPermissionSetKey, map[string]bool{})
@@ -30,7 +31,7 @@ func RBACContextMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		permissionSet, isAdmin, err := loadPermissionSet(userID)
+		permissionSet, isAdmin, err := loadPermissionSet(database, userID)
 		if err != nil {
 			AbortWithError(c, RbacPermissionLoadFailed(err))
 			return
@@ -127,13 +128,16 @@ func getUserIDFromContext(c *gin.Context) (uint, bool) {
 }
 
 // loadPermissionSet 实时查询用户角色与权限，并返回权限集合及 admin 标记。
-func loadPermissionSet(userID uint) (map[string]bool, bool, error) {
+func loadPermissionSet(database *gorm.DB, userID uint) (map[string]bool, bool, error) {
 	type permissionRow struct {
 		RoleName       string `gorm:"column:role_name"`
 		PermissionCode string `gorm:"column:permission_code"`
 	}
 	var rows []permissionRow
-	err := db.DB.Table("user_roles AS ur").
+	if database == nil {
+		return nil, false, errors.New("RBAC database is nil")
+	}
+	err := database.Table("user_roles AS ur").
 		Select("r.name AS role_name, p.code AS permission_code").
 		Joins("JOIN roles r ON r.id = ur.role_id").
 		Joins("LEFT JOIN role_permissions rp ON rp.role_id = r.id").

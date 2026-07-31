@@ -2,9 +2,7 @@ package services
 
 import (
 	"GoAI/ai"
-	"GoAI/db"
 	"GoAI/domain/runstate"
-	"GoAI/kafka"
 	"GoAI/models"
 	"context"
 	"crypto/rand"
@@ -26,11 +24,44 @@ var (
 	errIdempotencyKeyReused  = errors.New("idempotency key reused with different request")
 	errInvalidRunTransition  = errors.New("invalid run status transition")
 	errInvalidStepTransition = errors.New("invalid step status transition")
-	publishRunExecuteEvent   = func(ctx context.Context, runID string) error {
-		return kafka.SendRunExecuteEvent(ctx, runID)
-	}
-	stepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 )
+
+var defaultStepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+// RunEventPublisher 定义 Run 创建和回放后的异步投递边界。
+type RunEventPublisher interface {
+	PublishRunExecute(context.Context, string) error
+}
+
+// RunEventPublisherFunc 让普通函数可以作为 Run 事件发布器注入。
+type RunEventPublisherFunc func(context.Context, string) error
+
+// PublishRunExecute 调用底层函数发布 Run 执行事件。
+func (f RunEventPublisherFunc) PublishRunExecute(ctx context.Context, runID string) error {
+	return f(ctx, runID)
+}
+
+// RunService 协调 Run 持久化、入队、查询、回放和异步执行。
+type RunService struct {
+	database          *gorm.DB
+	publisher         RunEventPublisher
+	stepRetryBackoffs []time.Duration
+}
+
+// NewRunService 使用显式数据库和事件发布器构造 RunService。
+func NewRunService(database *gorm.DB, publisher RunEventPublisher) (*RunService, error) {
+	if database == nil {
+		return nil, errors.New("creating run service: database is nil")
+	}
+	if publisher == nil {
+		return nil, errors.New("creating run service: publisher is nil")
+	}
+	return &RunService{
+		database:          database,
+		publisher:         publisher,
+		stepRetryBackoffs: append([]time.Duration(nil), defaultStepRetryBackoffs...),
+	}, nil
+}
 
 var allowedRunTriggerTypes = map[string]struct{}{
 	"api":      {},
@@ -56,25 +87,6 @@ func ErrRunDispatchFailed() error {
 // ErrIdempotencyKeyReused 返回幂等键复用冲突的统一 sentinel error。
 func ErrIdempotencyKeyReused() error {
 	return errIdempotencyKeyReused
-}
-
-// SetPublishRunExecuteEventForTest 允许测试替换 Kafka 投递函数。
-func SetPublishRunExecuteEventForTest(fn func(ctx context.Context, runID string) error) {
-	if fn == nil {
-		publishRunExecuteEvent = func(ctx context.Context, runID string) error {
-			return kafka.SendRunExecuteEvent(ctx, runID)
-		}
-		return
-	}
-	publishRunExecuteEvent = fn
-}
-
-func SetStepRetryBackoffsForTest(backoffs []time.Duration) {
-	if len(backoffs) == 0 {
-		stepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-		return
-	}
-	stepRetryBackoffs = backoffs
 }
 
 type CreateRunRequest struct {
@@ -257,9 +269,9 @@ func isUniqueConstraintError(err error) bool {
 }
 
 // createQueuedRunWithIdempotency 在事务中创建 Run、回填幂等记录并推进到 queued。
-func createQueuedRunWithIdempotency(ctx context.Context, run *models.Run, idempotency *models.RunIdempotency) (*RunMutationResult, error) {
+func (s *RunService) createQueuedRunWithIdempotency(ctx context.Context, run *models.Run, idempotency *models.RunIdempotency) (*RunMutationResult, error) {
 	result := &RunMutationResult{}
-	err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if idempotency != nil {
 			if err := tx.Create(idempotency).Error; err != nil {
 				if !isUniqueConstraintError(err) {
@@ -307,9 +319,9 @@ func createQueuedRunWithIdempotency(ctx context.Context, run *models.Run, idempo
 }
 
 // claimRunForExecution 将 queued 状态的 Run 原子推进到 running。
-func claimRunForExecution(ctx context.Context, runID string) (*models.Run, bool, error) {
+func (s *RunService) claimRunForExecution(ctx context.Context, runID string) (*models.Run, bool, error) {
 	now := time.Now()
-	result := db.DB.WithContext(ctx).Model(&models.Run{}).
+	result := s.database.WithContext(ctx).Model(&models.Run{}).
 		Where("run_id = ? AND status = ?", strings.TrimSpace(runID), models.RunStatusQueued).
 		Updates(map[string]any{
 			"status":        models.RunStatusRunning,
@@ -320,13 +332,13 @@ func claimRunForExecution(ctx context.Context, runID string) (*models.Run, bool,
 		return nil, false, result.Error
 	}
 	if result.RowsAffected == 0 {
-		run, err := fetchRunByRunID(ctx, runID)
+		run, err := s.fetchRunByRunID(ctx, runID)
 		if err != nil {
 			return nil, false, err
 		}
 		return run, false, nil
 	}
-	run, err := fetchRunByRunID(ctx, runID)
+	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -336,7 +348,7 @@ func claimRunForExecution(ctx context.Context, runID string) (*models.Run, bool,
 	return run, true, nil
 }
 
-func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMutationResult, error) {
+func (s *RunService) CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMutationResult, error) {
 	if err := ValidateCreateRunRequest(req); err != nil {
 		return nil, err
 	}
@@ -347,13 +359,13 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMu
 	}
 
 	var agent models.Agent
-	if err := db.DB.WithContext(ctx).
+	if err := s.database.WithContext(ctx).
 		Where("agent_code = ? AND status = ?", normalized.AgentCode, models.AgentStatusActive).
 		First(&agent).Error; err != nil {
 		return nil, fmt.Errorf("find active agent by code: %w", err)
 	}
 
-	workflow, err := resolveWorkflow(ctx, agent.ID, normalized.WorkflowVersion)
+	workflow, err := s.resolveWorkflow(ctx, agent.ID, normalized.WorkflowVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +400,7 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMu
 		}
 	}
 
-	result, err := createQueuedRunWithIdempotency(ctx, run, idempotency)
+	result, err := s.createQueuedRunWithIdempotency(ctx, run, idempotency)
 	if err != nil {
 		return nil, err
 	}
@@ -396,16 +408,16 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMu
 		return result, nil
 	}
 
-	if err := publishRunExecuteEvent(ctx, result.Run.RunID); err != nil {
-		_ = failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch run message failed: %v", err))
+	if err := s.publisher.PublishRunExecute(ctx, result.Run.RunID); err != nil {
+		_ = s.failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch run message failed: %v", err))
 		return result, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
 	}
 
 	return result, nil
 }
 
-func GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
-	run, err := fetchRunByRunID(ctx, runID)
+func (s *RunService) GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
+	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -415,8 +427,8 @@ func GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID strin
 	return run, nil
 }
 
-func GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.RunStep, error) {
-	run, err := fetchRunByRunID(ctx, runID)
+func (s *RunService) GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.RunStep, error) {
+	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +437,7 @@ func GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID 
 	}
 
 	var steps []models.RunStep
-	if err := db.DB.WithContext(ctx).
+	if err := s.database.WithContext(ctx).
 		Where("run_id = ?", runID).
 		Order("created_at ASC").
 		Order("attempt ASC").
@@ -435,8 +447,8 @@ func GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID 
 	return steps, nil
 }
 
-func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, idempotencyKey string) (*RunMutationResult, error) {
-	origin, err := GetRunByRunID(ctx, userID, isAdmin, runID)
+func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, idempotencyKey string) (*RunMutationResult, error) {
+	origin, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +485,7 @@ func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, i
 		}
 	}
 
-	result, err := createQueuedRunWithIdempotency(ctx, clone, idempotency)
+	result, err := s.createQueuedRunWithIdempotency(ctx, clone, idempotency)
 	if err != nil {
 		return nil, err
 	}
@@ -481,15 +493,15 @@ func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, i
 		return result, nil
 	}
 
-	if err := publishRunExecuteEvent(ctx, result.Run.RunID); err != nil {
-		_ = failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch replay message failed: %v", err))
+	if err := s.publisher.PublishRunExecute(ctx, result.Run.RunID); err != nil {
+		_ = s.failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch replay message failed: %v", err))
 		return result, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
 	}
 	return result, nil
 }
 
-func HandleRunExecuteMessage(ctx context.Context, msg kafka.RunExecuteMessage) error {
-	run, claimed, err := claimRunForExecution(ctx, msg.RunID)
+func (s *RunService) HandleRunExecute(ctx context.Context, runID string) error {
+	run, claimed, err := s.claimRunForExecution(ctx, runID)
 	if err != nil {
 		return err
 	}
@@ -498,43 +510,43 @@ func HandleRunExecuteMessage(ctx context.Context, msg kafka.RunExecuteMessage) e
 	}
 
 	var workflow models.Workflow
-	if err := db.DB.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
-		_ = failRunWithMessage(ctx, run.RunID, err.Error())
+	if err := s.database.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
+		_ = s.failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 
 	def, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON)
 	if err != nil {
-		_ = failRunWithMessage(ctx, run.RunID, err.Error())
+		_ = s.failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 
 	order, err := ResolveExecutionOrder(def)
 	if err != nil {
-		_ = failRunWithMessage(ctx, run.RunID, err.Error())
+		_ = s.failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 
-	if err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	if err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		for _, node := range order {
 			if err := tx.Model(&models.Run{}).
 				Where("run_id = ?", run.RunID).
 				Update("current_step", node.Key).Error; err != nil {
 				return err
 			}
-			if execErr := executeNodeWithRetry(ctx, tx, run, node); execErr != nil {
+			if execErr := s.executeNodeWithRetry(ctx, tx, run, node); execErr != nil {
 				return transitionRunStatus(ctx, tx, run, models.RunStatusFailed, execErr.Error())
 			}
 		}
 		return transitionRunStatus(ctx, tx, run, models.RunStatusSuccess, "")
 	}); err != nil {
-		_ = failRunWithMessage(ctx, run.RunID, err.Error())
+		_ = s.failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 	return nil
 }
 
-func executeNodeWithRetry(ctx context.Context, tx *gorm.DB, run *models.Run, node WorkflowNode) error {
+func (s *RunService) executeNodeWithRetry(ctx context.Context, tx *gorm.DB, run *models.Run, node WorkflowNode) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		startedAt := time.Now()
@@ -566,11 +578,11 @@ func executeNodeWithRetry(ctx context.Context, tx *gorm.DB, run *models.Run, nod
 				Update("retry_count", gorm.Expr("retry_count + ?", 1)).Error; err != nil {
 				return err
 			}
-			if attempt < len(stepRetryBackoffs)+1 {
+			if attempt < len(s.stepRetryBackoffs)+1 {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(stepRetryBackoffs[attempt-1]):
+				case <-time.After(s.stepRetryBackoffs[attempt-1]):
 				}
 			}
 			continue
@@ -739,9 +751,9 @@ func isValidRunStepTransition(from, to string) bool {
 	return runstate.IsValidRunStepTransition(from, to)
 }
 
-func resolveWorkflow(ctx context.Context, agentID uint64, version int) (*models.Workflow, error) {
+func (s *RunService) resolveWorkflow(ctx context.Context, agentID uint64, version int) (*models.Workflow, error) {
 	var workflow models.Workflow
-	query := db.DB.WithContext(ctx).Where("agent_id = ?", agentID)
+	query := s.database.WithContext(ctx).Where("agent_id = ?", agentID)
 	if version > 0 {
 		err := query.Where("version = ?", version).First(&workflow).Error
 		if err != nil {
@@ -756,12 +768,12 @@ func resolveWorkflow(ctx context.Context, agentID uint64, version int) (*models.
 	return &workflow, nil
 }
 
-func fetchRunByRunID(ctx context.Context, runID string) (*models.Run, error) {
-	return loadRunByRunID(db.DB.WithContext(ctx), runID)
+func (s *RunService) fetchRunByRunID(ctx context.Context, runID string) (*models.Run, error) {
+	return loadRunByRunID(s.database.WithContext(ctx), runID)
 }
 
-func failRunWithMessage(ctx context.Context, runID, msg string) error {
-	return db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (s *RunService) failRunWithMessage(ctx context.Context, runID, msg string) error {
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var run models.Run
 		if err := tx.Where("run_id = ?", runID).First(&run).Error; err != nil {
 			return err

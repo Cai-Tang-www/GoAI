@@ -2,11 +2,9 @@ package handlers_test
 
 import (
 	"GoAI/config"
-	"GoAI/db"
 	"GoAI/middlewares"
 	"GoAI/models"
 	"GoAI/requestctx"
-	routers "GoAI/routers"
 	"GoAI/services"
 	"bytes"
 	"context"
@@ -19,7 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func setupRunIntegrationDB(t *testing.T) {
+func setupRunIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
@@ -28,18 +26,18 @@ func setupRunIntegrationDB(t *testing.T) {
 	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
-	db.DB = gdb
+	return gdb
 }
 
-func seedRunIntegrationData(t *testing.T) (models.User, models.User, models.Agent, models.Workflow) {
+func seedRunIntegrationData(t *testing.T, gdb *gorm.DB) (models.User, models.User, models.Agent, models.Workflow) {
 	t.Helper()
 
 	user1 := models.User{Username: "u1", Email: "u1@test.com", Password: "p1"}
 	user2 := models.User{Username: "u2", Email: "u2@test.com", Password: "p2"}
-	if err := db.DB.Create(&user1).Error; err != nil {
+	if err := gdb.Create(&user1).Error; err != nil {
 		t.Fatalf("create user1 failed: %v", err)
 	}
-	if err := db.DB.Create(&user2).Error; err != nil {
+	if err := gdb.Create(&user2).Error; err != nil {
 		t.Fatalf("create user2 failed: %v", err)
 	}
 
@@ -50,7 +48,7 @@ func seedRunIntegrationData(t *testing.T) (models.User, models.User, models.Agen
 		OwnerUserID: uint64(user1.ID),
 		Status:      models.AgentStatusActive,
 	}
-	if err := db.DB.Create(&agent).Error; err != nil {
+	if err := gdb.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent failed: %v", err)
 	}
 
@@ -62,7 +60,7 @@ func seedRunIntegrationData(t *testing.T) (models.User, models.User, models.Agen
 		IsActive:       true,
 		CreatedBy:      uint64(user1.ID),
 	}
-	if err := db.DB.Create(&workflow).Error; err != nil {
+	if err := gdb.Create(&workflow).Error; err != nil {
 		t.Fatalf("create workflow failed: %v", err)
 	}
 
@@ -70,18 +68,17 @@ func seedRunIntegrationData(t *testing.T) (models.User, models.User, models.Agen
 }
 
 func TestRunAPIs_CreateAndQuery(t *testing.T) {
-	setupRunIntegrationDB(t)
-	user1, user2, _, _ := seedRunIntegrationData(t)
+	gdb := setupRunIntegrationDB(t)
+	user1, user2, _, _ := seedRunIntegrationData(t, gdb)
 	config.AppConfig = &config.Config{
 		JWTSecret: "test-secret",
 	}
 
 	var publishedTraceID string
-	services.SetPublishRunExecuteEventForTest(func(ctx context.Context, runID string) error {
+	publisher := services.RunEventPublisherFunc(func(ctx context.Context, runID string) error {
 		publishedTraceID = requestctx.TraceIDFromContext(ctx)
 		return nil
 	})
-	defer services.SetPublishRunExecuteEventForTest(nil)
 
 	token1, err := middlewares.GenerateToken(user1.ID)
 	if err != nil {
@@ -92,7 +89,7 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 		t.Fatalf("generate token2 failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, publisher)
 
 	createBody := map[string]any{
 		"agent_code":   "agent_api",
@@ -153,15 +150,15 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 }
 
 func TestCreateRunValidationError(t *testing.T) {
-	setupRunIntegrationDB(t)
-	user1, _, _, _ := seedRunIntegrationData(t)
+	gdb := setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t, gdb)
 	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
 	token1, err := middlewares.GenerateToken(user1.ID)
 	if err != nil {
 		t.Fatalf("generate token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 	invalidBody := map[string]any{
 		"agent_code":       "",
 		"trigger_type":     "bad-trigger",
@@ -184,15 +181,15 @@ func TestCreateRunValidationError(t *testing.T) {
 }
 
 func TestRunPathValidationError(t *testing.T) {
-	setupRunIntegrationDB(t)
-	user1, _, _, _ := seedRunIntegrationData(t)
+	gdb := setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t, gdb)
 	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
 	token1, err := middlewares.GenerateToken(user1.ID)
 	if err != nil {
 		t.Fatalf("generate token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/runs/%20", nil)
 	req.Header.Set("Authorization", "Bearer "+token1)
 	w := httptest.NewRecorder()
@@ -208,18 +205,15 @@ func TestRunPathValidationError(t *testing.T) {
 }
 
 func TestRunIdempotencyCreateAndReplay(t *testing.T) {
-	setupRunIntegrationDB(t)
-	user1, _, _, _ := seedRunIntegrationData(t)
+	gdb := setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t, gdb)
 	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
-
-	services.SetPublishRunExecuteEventForTest(func(ctx context.Context, runID string) error { return nil })
-	defer services.SetPublishRunExecuteEventForTest(nil)
 
 	token1, err := middlewares.GenerateToken(user1.ID)
 	if err != nil {
 		t.Fatalf("generate token failed: %v", err)
 	}
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 
 	createBody := map[string]any{
 		"agent_code":   "agent_api",

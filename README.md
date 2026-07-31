@@ -104,10 +104,9 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - Provider Registry 与 OpenAI-compatible 调试通道
 - HTTP / SSE / Kafka / Worker 优雅关闭
 - 旧 Task 模型、空包和误导性文件名清理
+- db / redis / kafka 显式依赖装配
 
 ### 在建
-
-- db / redis / kafka 显式依赖装配
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 领域模型
 - AG-UI Gateway
 - A2A Gateway 与 transport

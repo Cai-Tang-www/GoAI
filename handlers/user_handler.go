@@ -1,19 +1,28 @@
 package handlers
 
 import (
+	"GoAI/middlewares"
+	"GoAI/models"
 	"net/http"
 	"strconv"
 
-	"GoAI/db"
-	"GoAI/middlewares"
-	"GoAI/models"
-
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
+// UserHandler 处理用户认证与用户管理接口，并显式持有数据库依赖。
+type UserHandler struct {
+	database *gorm.DB
+}
+
+// NewUserHandler 创建用户接口处理器。
+func NewUserHandler(database *gorm.DB) *UserHandler {
+	return &UserHandler{database: database}
+}
+
 // RegisterUser 处理用户注册请求
-func RegisterUser(c *gin.Context) {
+func (h *UserHandler) RegisterUser(c *gin.Context) {
 	var req userWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid user payload", nil))
@@ -26,7 +35,7 @@ func RegisterUser(c *gin.Context) {
 	}
 
 	var existingUser models.User
-	if result := db.DB.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
+	if result := h.database.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
 		middlewares.AbortWithError(c, middlewares.UserAlreadyExistsError())
 		return
 	}
@@ -42,7 +51,7 @@ func RegisterUser(c *gin.Context) {
 		Email:    req.Email,
 		Password: string(hashedPassword),
 	}
-	if result := db.DB.Create(&user); result.Error != nil {
+	if result := h.database.Create(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
 		return
 	}
@@ -54,7 +63,7 @@ func RegisterUser(c *gin.Context) {
 }
 
 // LoginUser 处理用户登录请求
-func LoginUser(c *gin.Context) {
+func (h *UserHandler) LoginUser(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid login payload", nil))
@@ -67,7 +76,7 @@ func LoginUser(c *gin.Context) {
 	}
 
 	var user models.User
-	if result := db.DB.Where("username = ?", req.Username).First(&user); result.Error != nil {
+	if result := h.database.Where("username = ?", req.Username).First(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidCredentials())
 		return
 	}
@@ -87,7 +96,7 @@ func LoginUser(c *gin.Context) {
 }
 
 // CreateUser 处理创建用户的请求
-func CreateUser(c *gin.Context) {
+func (h *UserHandler) CreateUser(c *gin.Context) {
 	var req userWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid user payload", nil))
@@ -100,7 +109,7 @@ func CreateUser(c *gin.Context) {
 	}
 
 	var existingUser models.User
-	if result := db.DB.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
+	if result := h.database.Where("username = ? OR email = ?", req.Username, req.Email).First(&existingUser); result.RowsAffected > 0 {
 		middlewares.AbortWithError(c, middlewares.UserAlreadyExistsError())
 		return
 	}
@@ -116,7 +125,7 @@ func CreateUser(c *gin.Context) {
 		Email:    req.Email,
 		Password: string(hashedPassword),
 	}
-	if result := db.DB.Create(&user); result.Error != nil {
+	if result := h.database.Create(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
 		return
 	}
@@ -125,7 +134,7 @@ func CreateUser(c *gin.Context) {
 }
 
 // GetUserByID 处理根据 ID 获取用户的请求
-func GetUserByID(c *gin.Context) {
+func (h *UserHandler) GetUserByID(c *gin.Context) {
 	id := c.Param("id")
 	userID, err := strconv.ParseUint(id, 10, 32)
 	if err != nil {
@@ -134,7 +143,7 @@ func GetUserByID(c *gin.Context) {
 	}
 
 	var user models.User
-	if result := db.DB.First(&user, userID); result.Error != nil {
+	if result := h.database.First(&user, userID); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.UserNotFoundError())
 		return
 	}
@@ -143,7 +152,7 @@ func GetUserByID(c *gin.Context) {
 }
 
 // UpdateUser 处理更新用户的请求
-func UpdateUser(c *gin.Context) {
+func (h *UserHandler) UpdateUser(c *gin.Context) {
 	id := c.Param("id")
 	userID, err := strconv.ParseUint(id, 10, 32)
 	if err != nil {
@@ -152,7 +161,7 @@ func UpdateUser(c *gin.Context) {
 	}
 
 	var user models.User
-	if result := db.DB.First(&user, userID); result.Error != nil {
+	if result := h.database.First(&user, userID); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.UserNotFoundError())
 		return
 	}
@@ -169,7 +178,7 @@ func UpdateUser(c *gin.Context) {
 	}
 
 	var existingUser models.User
-	if result := db.DB.Where("(username = ? OR email = ?) AND id <> ?", req.Username, req.Email, user.ID).First(&existingUser); result.RowsAffected > 0 {
+	if result := h.database.Where("(username = ? OR email = ?) AND id <> ?", req.Username, req.Email, user.ID).First(&existingUser); result.RowsAffected > 0 {
 		middlewares.AbortWithError(c, middlewares.UserAlreadyExistsError())
 		return
 	}
@@ -185,7 +194,7 @@ func UpdateUser(c *gin.Context) {
 		user.Password = string(hashedPassword)
 	}
 
-	if result := db.DB.Save(&user); result.Error != nil {
+	if result := h.database.Save(&user); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("update user failed", result.Error))
 		return
 	}
@@ -194,7 +203,7 @@ func UpdateUser(c *gin.Context) {
 }
 
 // DeleteUser 处理删除用户的请求
-func DeleteUser(c *gin.Context) {
+func (h *UserHandler) DeleteUser(c *gin.Context) {
 	id := c.Param("id")
 	userID, err := strconv.ParseUint(id, 10, 32)
 	if err != nil {
@@ -202,7 +211,7 @@ func DeleteUser(c *gin.Context) {
 		return
 	}
 
-	if result := db.DB.Delete(&models.User{}, userID); result.Error != nil {
+	if result := h.database.Delete(&models.User{}, userID); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("delete user failed", result.Error))
 		return
 	}
@@ -211,9 +220,9 @@ func DeleteUser(c *gin.Context) {
 }
 
 // ListUsers 处理获取所有用户的请求
-func ListUsers(c *gin.Context) {
+func (h *UserHandler) ListUsers(c *gin.Context) {
 	var users []models.User
-	if result := db.DB.Find(&users); result.Error != nil {
+	if result := h.database.Find(&users); result.Error != nil {
 		middlewares.AbortWithError(c, middlewares.InternalError("list users failed", result.Error))
 		return
 	}

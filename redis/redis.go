@@ -3,36 +3,39 @@ package redis
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"GoAI/config"
 
-	"github.com/go-redis/redis/v8"
+	goredis "github.com/go-redis/redis/v8"
 )
 
-var Rdb *redis.Client
-var ctx = context.Background()
-
-// InitRedis 初始化 Redis 客户端并执行连通性探测。
-func InitRedis() {
-	Rdb = redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", config.AppConfig.RedisHost, config.AppConfig.RedisPort),
-		Password: config.AppConfig.RedisPassword,
+// New 创建 Redis 客户端并完成启动连通性探测。
+func New(ctx context.Context, cfg *config.Config) (*goredis.Client, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("creating Redis client: config is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client := goredis.NewClient(&goredis.Options{
+		Addr:     fmt.Sprintf("%s:%d", cfg.RedisHost, cfg.RedisPort),
+		Password: cfg.RedisPassword,
 		DB:       0,
 	})
-
-	_, err := Rdb.Ping(ctx).Result()
-	if err != nil {
-		log.Fatalf("Could not connect to Redis: %v", err)
+	if _, err := client.Ping(ctx).Result(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("pinging Redis: %w", err)
 	}
-
-	log.Println("Redis connected successfully!")
+	return client, nil
 }
 
-// Close 关闭 Redis 客户端连接。
-func Close() error {
-	if Rdb == nil {
+// Close 关闭指定 Redis 客户端。
+func Close(client *goredis.Client) error {
+	if client == nil {
 		return nil
 	}
-	return Rdb.Close()
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("closing Redis client: %w", err)
+	}
+	return nil
 }

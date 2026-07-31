@@ -5,10 +5,7 @@ import (
 	"GoAI/db"
 	"GoAI/middlewares"
 	"GoAI/models"
-	routers "GoAI/routers"
-	"GoAI/services"
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func setupRBACIntegrationDB(t *testing.T) {
+func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
@@ -38,18 +35,18 @@ func setupRBACIntegrationDB(t *testing.T) {
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
-	db.DB = gdb
+	return gdb
 }
 
 func TestRBACMemberAndAdminAccess(t *testing.T) {
-	setupRBACIntegrationDB(t)
+	gdb := setupRBACIntegrationDB(t)
 
 	admin := models.User{Username: "admin", Email: "admin@t.com", Password: "x"}
 	member := models.User{Username: "member", Email: "member@t.com", Password: "x"}
-	if err := db.DB.Create(&admin).Error; err != nil {
+	if err := gdb.Create(&admin).Error; err != nil {
 		t.Fatalf("create admin failed: %v", err)
 	}
-	if err := db.DB.Create(&member).Error; err != nil {
+	if err := gdb.Create(&member).Error; err != nil {
 		t.Fatalf("create member failed: %v", err)
 	}
 
@@ -60,12 +57,9 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 		ModelProviderDefault:       "",
 		ModelProviders:             map[string]config.ModelProviderConfig{},
 	}
-	if err := db.SeedRBAC(); err != nil {
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
 		t.Fatalf("seed rbac failed: %v", err)
 	}
-
-	services.SetPublishRunExecuteEventForTest(func(ctx context.Context, runID string) error { return nil })
-	defer services.SetPublishRunExecuteEventForTest(nil)
 
 	agent := models.Agent{
 		AgentCode:   "agent_rbac",
@@ -74,7 +68,7 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 		OwnerUserID: uint64(member.ID),
 		Status:      models.AgentStatusActive,
 	}
-	if err := db.DB.Create(&agent).Error; err != nil {
+	if err := gdb.Create(&agent).Error; err != nil {
 		t.Fatalf("create agent failed: %v", err)
 	}
 	workflow := models.Workflow{
@@ -85,7 +79,7 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 		IsActive:       true,
 		CreatedBy:      uint64(member.ID),
 	}
-	if err := db.DB.Create(&workflow).Error; err != nil {
+	if err := gdb.Create(&workflow).Error; err != nil {
 		t.Fatalf("create workflow failed: %v", err)
 	}
 
@@ -98,7 +92,7 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 		t.Fatalf("generate admin token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 
 	// member 不能访问 users 列表（需要 user:manage）
 	reqUsers := httptest.NewRequest(http.MethodGet, "/api/users", nil)
@@ -151,7 +145,7 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 		InputJSON:   `{"prompt":"a"}`,
 		Status:      models.RunStatusQueued,
 	}
-	if err := db.DB.Create(&adminRun).Error; err != nil {
+	if err := gdb.Create(&adminRun).Error; err != nil {
 		t.Fatalf("create admin run failed: %v", err)
 	}
 
@@ -182,10 +176,10 @@ func TestRBACMemberAndAdminAccess(t *testing.T) {
 }
 
 func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
-	setupRBACIntegrationDB(t)
+	gdb := setupRBACIntegrationDB(t)
 
 	user := models.User{Username: "promote", Email: "promote@t.com", Password: "x"}
-	if err := db.DB.Create(&user).Error; err != nil {
+	if err := gdb.Create(&user).Error; err != nil {
 		t.Fatalf("create user failed: %v", err)
 	}
 	config.AppConfig = &config.Config{
@@ -194,7 +188,7 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 		RBACBootstrapAdminUsername: "not-exist",
 		ModelProviders:             map[string]config.ModelProviderConfig{},
 	}
-	if err := db.SeedRBAC(); err != nil {
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
 		t.Fatalf("seed rbac failed: %v", err)
 	}
 
@@ -203,7 +197,7 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 		t.Fatalf("generate token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 	reqBefore := httptest.NewRequest(http.MethodGet, "/api/users", nil)
 	reqBefore.Header.Set("Authorization", "Bearer "+token)
 	wBefore := httptest.NewRecorder()
@@ -217,10 +211,10 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 	}
 
 	var adminRole models.Role
-	if err := db.DB.Where("name = ?", models.RoleAdmin).First(&adminRole).Error; err != nil {
+	if err := gdb.Where("name = ?", models.RoleAdmin).First(&adminRole).Error; err != nil {
 		t.Fatalf("query admin role failed: %v", err)
 	}
-	if err := db.DB.Create(&models.UserRole{UserID: uint64(user.ID), RoleID: adminRole.ID}).Error; err != nil {
+	if err := gdb.Create(&models.UserRole{UserID: uint64(user.ID), RoleID: adminRole.ID}).Error; err != nil {
 		t.Fatalf("bind admin role failed: %v", err)
 	}
 
@@ -239,15 +233,15 @@ func TestRBACRoleChangeTakesEffectWithoutNewToken(t *testing.T) {
 }
 
 func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
-	setupRBACIntegrationDB(t)
+	gdb := setupRBACIntegrationDB(t)
 
 	admin := models.User{Username: "admin2", Email: "admin2@t.com", Password: "x"}
 	member := models.User{Username: "member2", Email: "member2@t.com", Password: "x"}
 	outsider := models.User{Username: "outsider", Email: "outsider@t.com", Password: "x"}
-	if err := db.DB.Create(&admin).Error; err != nil {
+	if err := gdb.Create(&admin).Error; err != nil {
 		t.Fatalf("create admin failed: %v", err)
 	}
-	if err := db.DB.Create(&member).Error; err != nil {
+	if err := gdb.Create(&member).Error; err != nil {
 		t.Fatalf("create member failed: %v", err)
 	}
 
@@ -258,12 +252,12 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 		ModelProviderDefault:       "",
 		ModelProviders:             map[string]config.ModelProviderConfig{},
 	}
-	if err := db.SeedRBAC(); err != nil {
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
 		t.Fatalf("seed rbac failed: %v", err)
 	}
 
 	// seed 后再创建用户，确保该用户没有任何角色，用于验证缺权限 403。
-	if err := db.DB.Create(&outsider).Error; err != nil {
+	if err := gdb.Create(&outsider).Error; err != nil {
 		t.Fatalf("create outsider failed: %v", err)
 	}
 
@@ -276,7 +270,7 @@ func TestRBACUsersAndChatPermissionMatrix(t *testing.T) {
 		t.Fatalf("generate outsider token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 
 	// member 可读取自己的用户信息（self: user:read_self）。
 	reqGetSelf := httptest.NewRequest(http.MethodGet, "/api/users/"+strconv.FormatUint(uint64(member.ID), 10), nil)

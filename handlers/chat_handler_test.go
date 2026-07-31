@@ -5,7 +5,6 @@ import (
 	"GoAI/config"
 	"GoAI/middlewares"
 	"GoAI/requestctx"
-	routers "GoAI/routers"
 	"GoAI/services"
 	"bytes"
 	"context"
@@ -31,7 +30,7 @@ func TestChatValidationErrorUsesEnvelope(t *testing.T) {
 		t.Fatalf("generate token failed: %v", err)
 	}
 
-	router := routers.InitRouter()
+	router := newTestRouter(t, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader("{"))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -62,7 +61,7 @@ func TestChatMessageValidation(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{"messages": []map[string]any{}})
-	router := routers.InitRouter()
+	router := newTestRouter(t, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -111,7 +110,7 @@ func TestChatSSEUsesUnifiedEnvelope(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": "hello"}},
 	})
-	router := routers.InitRouter()
+	router := newTestRouter(t, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -166,7 +165,7 @@ func TestChatSSEStreamErrorUsesEnvelope(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": "hello"}},
 	})
-	router := routers.InitRouter()
+	router := newTestRouter(t, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/chat", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -228,7 +227,7 @@ func TestChatSSEStopsWhenRequestContextIsCancelled(t *testing.T) {
 	w := httptest.NewRecorder()
 	handlerDone := make(chan struct{})
 	go func() {
-		routers.InitRouter().ServeHTTP(w, req)
+		newTestRouter(t, nil, nil).ServeHTTP(w, req)
 		close(handlerDone)
 	}()
 

@@ -21,9 +21,9 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 仓库术语统一到 `Thread / Message / Run / Delegation / Workflow`
 - 误导性的空包、旧文件名和旧模型已经删除
 
-### 3. 基础设施显式装配
-- `db / redis / kafka` 从全局可变单例逐步收口为显式装配
-- 为协议 gateway 与 runtime 演进做准备
+### 3. 基础设施显式装配（已完成，Issue #15）
+- `db / redis / kafka` 已从全局可变单例收口为构造实例并由 `main` 显式装配
+- 已为协议 gateway 与 runtime 演进建立可测试的依赖边界
 
 ### 4. 内部统一领域模型
 - `threads`

@@ -12,8 +12,18 @@ import (
 
 const idempotencyKeyHeader = "Idempotency-Key"
 
+// RunHandler 负责把 Run HTTP 请求映射到显式注入的 RunService。
+type RunHandler struct {
+	service *services.RunService
+}
+
+// NewRunHandler 创建 Run 接口处理器。
+func NewRunHandler(service *services.RunService) *RunHandler {
+	return &RunHandler{service: service}
+}
+
 // CreateRun 处理创建 Run 请求，并在进入 service 前完成基础参数校验。
-func CreateRun(c *gin.Context) {
+func (h *RunHandler) CreateRun(c *gin.Context) {
 	var req services.CreateRunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid run payload", nil))
@@ -35,7 +45,7 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	result, err := services.CreateRun(c.Request.Context(), userID, req)
+	result, err := h.service.CreateRun(c.Request.Context(), userID, req)
 	if err != nil {
 		if errors.Is(err, services.ErrIdempotencyKeyReused()) {
 			middlewares.AbortWithError(c, middlewares.WrapError(err))
@@ -60,7 +70,7 @@ func CreateRun(c *gin.Context) {
 }
 
 // GetRun 处理 Run 详情查询并映射 service 层返回的统一错误。
-func GetRun(c *gin.Context) {
+func (h *RunHandler) GetRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
@@ -71,7 +81,7 @@ func GetRun(c *gin.Context) {
 		middlewares.AbortWithError(c, appErr)
 		return
 	}
-	run, err := services.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
+	run, err := h.service.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
@@ -80,7 +90,7 @@ func GetRun(c *gin.Context) {
 }
 
 // ListRunSteps 处理 Run 步骤查询并保证 owner 与 admin 的访问语义一致。
-func ListRunSteps(c *gin.Context) {
+func (h *RunHandler) ListRunSteps(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
@@ -91,7 +101,7 @@ func ListRunSteps(c *gin.Context) {
 		middlewares.AbortWithError(c, appErr)
 		return
 	}
-	steps, err := services.GetRunStepsByRunID(c.Request.Context(), userID, isAdmin, runID)
+	steps, err := h.service.GetRunStepsByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
@@ -100,7 +110,7 @@ func ListRunSteps(c *gin.Context) {
 }
 
 // ReplayRun 处理 Run 回放请求，并复用 service 层的稳定回放逻辑。
-func ReplayRun(c *gin.Context) {
+func (h *RunHandler) ReplayRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
 		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
@@ -116,7 +126,7 @@ func ReplayRun(c *gin.Context) {
 		middlewares.AbortWithError(c, appErr)
 		return
 	}
-	result, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID, idempotencyKey)
+	result, err := h.service.ReplayRun(c.Request.Context(), userID, isAdmin, runID, idempotencyKey)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
