@@ -2,17 +2,14 @@ package handlers_test
 
 import (
 	"GoAI/config"
-	"GoAI/db"
 	"GoAI/models"
 	"bytes"
 	"encoding/json"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	routers "GoAI/routers"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 // TestUserAuthAndEnvelope 验证 register/login 与缺 token 场景都会走统一响应结构。
@@ -24,14 +21,13 @@ func TestUserAuthAndEnvelope(t *testing.T) {
 	if err := gdb.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
-	db.DB = gdb
 
 	config.AppConfig = &config.Config{
 		JWTSecret:      "user-test-secret",
 		RBACEnable:     false,
 		ModelProviders: map[string]config.ModelProviderConfig{},
 	}
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 
 	registerBody, _ := json.Marshal(map[string]any{
 		"username": "user1",
@@ -90,14 +86,13 @@ func TestRegisterValidationError(t *testing.T) {
 	if err := gdb.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
-	db.DB = gdb
 
 	config.AppConfig = &config.Config{
 		JWTSecret:      "user-test-secret",
 		RBACEnable:     false,
 		ModelProviders: map[string]config.ModelProviderConfig{},
 	}
-	router := routers.InitRouter()
+	router := newTestRouter(t, gdb, nil)
 
 	registerBody, _ := json.Marshal(map[string]any{
 		"username": "a",

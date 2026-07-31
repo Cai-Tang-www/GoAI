@@ -1,10 +1,18 @@
 package handlers_test
 
 import (
+	"GoAI/models"
+	"GoAI/routers"
+	"GoAI/services"
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 type apiEnvelope struct {
@@ -32,4 +40,41 @@ func uniqueSQLiteDSN(t *testing.T) string {
 	t.Helper()
 	name := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
 	return "file:" + name + "?mode=memory&cache=shared"
+}
+
+func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher) *gin.Engine {
+	t.Helper()
+	if database == nil {
+		var err error
+		database, err = gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("open sqlite failed: %v", err)
+		}
+		if err := database.AutoMigrate(
+			&models.User{},
+			&models.Role{},
+			&models.Permission{},
+			&models.UserRole{},
+			&models.RolePermission{},
+			&models.Agent{},
+			&models.Workflow{},
+			&models.Run{},
+			&models.RunStep{},
+			&models.RunIdempotency{},
+		); err != nil {
+			t.Fatalf("auto migrate test database failed: %v", err)
+		}
+	}
+	if publisher == nil {
+		publisher = services.RunEventPublisherFunc(func(_ context.Context, _ string) error { return nil })
+	}
+	runService, err := services.NewRunService(database, publisher)
+	if err != nil {
+		t.Fatalf("create run service failed: %v", err)
+	}
+	router, err := routers.New(routers.Dependencies{Database: database, RunService: runService})
+	if err != nil {
+		t.Fatalf("create router failed: %v", err)
+	}
+	return router
 }

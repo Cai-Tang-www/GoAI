@@ -1,43 +1,51 @@
 package db
 
 import (
-	"GoAI/config"
-	"GoAI/models"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
+
+	"GoAI/config"
+	"GoAI/models"
 
 	"gorm.io/gorm"
 )
 
 // SeedRBAC 在启动阶段执行 RBAC 角色、权限和映射的幂等补种。
-func SeedRBAC() error {
-	if DB == nil || config.AppConfig == nil || !config.AppConfig.RBACEnable {
+func SeedRBAC(database *gorm.DB, cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("seeding RBAC: config is nil")
+	}
+	if !cfg.RBACEnable {
 		return nil
 	}
+	if database == nil {
+		return fmt.Errorf("seeding RBAC: database is nil")
+	}
 
-	roleIDs, err := ensureRoles()
+	roleIDs, err := ensureRoles(database)
 	if err != nil {
 		return err
 	}
-	permissionIDs, err := ensurePermissions()
+	permissionIDs, err := ensurePermissions(database)
 	if err != nil {
 		return err
 	}
-	if err := ensureRolePermissions(roleIDs, permissionIDs); err != nil {
+	if err := ensureRolePermissions(database, roleIDs, permissionIDs); err != nil {
 		return err
 	}
-	if err := ensureAllUsersHaveMemberRole(roleIDs[models.RoleMember]); err != nil {
+	if err := ensureAllUsersHaveMemberRole(database, roleIDs[models.RoleMember]); err != nil {
 		return err
 	}
-	if err := ensureBootstrapAdmin(roleIDs[models.RoleAdmin]); err != nil {
+	if err := ensureBootstrapAdmin(database, cfg, roleIDs[models.RoleAdmin]); err != nil {
 		return err
 	}
 	return nil
 }
 
 // ensureRoles 确保基础角色存在，并返回角色名到角色 ID 的映射。
-func ensureRoles() (map[string]uint64, error) {
+func ensureRoles(database *gorm.DB) (map[string]uint64, error) {
 	type roleSeed struct {
 		Name        string
 		Description string
@@ -49,10 +57,10 @@ func ensureRoles() (map[string]uint64, error) {
 	result := make(map[string]uint64, len(seeds))
 	for _, seed := range seeds {
 		role := models.Role{Name: seed.Name}
-		if err := DB.Where("name = ?", seed.Name).First(&role).Error; err != nil {
+		if err := database.Where("name = ?", seed.Name).First(&role).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				role.Description = seed.Description
-				if createErr := DB.Create(&role).Error; createErr != nil {
+				if createErr := database.Create(&role).Error; createErr != nil {
 					return nil, createErr
 				}
 			} else {
@@ -65,7 +73,7 @@ func ensureRoles() (map[string]uint64, error) {
 }
 
 // ensurePermissions 确保预置权限存在，并返回权限码到权限 ID 的映射。
-func ensurePermissions() (map[string]uint64, error) {
+func ensurePermissions(database *gorm.DB) (map[string]uint64, error) {
 	type permissionSeed struct {
 		Code        string
 		Description string
@@ -82,10 +90,10 @@ func ensurePermissions() (map[string]uint64, error) {
 	result := make(map[string]uint64, len(seeds))
 	for _, seed := range seeds {
 		perm := models.Permission{Code: seed.Code}
-		if err := DB.Where("code = ?", seed.Code).First(&perm).Error; err != nil {
+		if err := database.Where("code = ?", seed.Code).First(&perm).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				perm.Description = seed.Description
-				if createErr := DB.Create(&perm).Error; createErr != nil {
+				if createErr := database.Create(&perm).Error; createErr != nil {
 					return nil, createErr
 				}
 			} else {
@@ -98,7 +106,7 @@ func ensurePermissions() (map[string]uint64, error) {
 }
 
 // ensureRolePermissions 绑定角色与权限关系，保证 admin/member 的权限集完整。
-func ensureRolePermissions(roleIDs map[string]uint64, permissionIDs map[string]uint64) error {
+func ensureRolePermissions(database *gorm.DB, roleIDs map[string]uint64, permissionIDs map[string]uint64) error {
 	adminPerms := []string{
 		models.PermissionRunCreate,
 		models.PermissionRunRead,
@@ -117,26 +125,26 @@ func ensureRolePermissions(roleIDs map[string]uint64, permissionIDs map[string]u
 		models.PermissionChatUse,
 	}
 
-	if err := bindRolePermissions(roleIDs[models.RoleAdmin], adminPerms, permissionIDs); err != nil {
+	if err := bindRolePermissions(database, roleIDs[models.RoleAdmin], adminPerms, permissionIDs); err != nil {
 		return err
 	}
-	if err := bindRolePermissions(roleIDs[models.RoleMember], memberPerms, permissionIDs); err != nil {
+	if err := bindRolePermissions(database, roleIDs[models.RoleMember], memberPerms, permissionIDs); err != nil {
 		return err
 	}
 	return nil
 }
 
 // bindRolePermissions 按权限码列表为指定角色补齐缺失的权限绑定。
-func bindRolePermissions(roleID uint64, permCodes []string, permissionIDs map[string]uint64) error {
+func bindRolePermissions(database *gorm.DB, roleID uint64, permCodes []string, permissionIDs map[string]uint64) error {
 	for _, code := range permCodes {
 		permID, ok := permissionIDs[code]
 		if !ok {
 			continue
 		}
 		rp := models.RolePermission{RoleID: roleID, PermissionID: permID}
-		if err := DB.Where("role_id = ? AND permission_id = ?", roleID, permID).First(&rp).Error; err != nil {
+		if err := database.Where("role_id = ? AND permission_id = ?", roleID, permID).First(&rp).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if createErr := DB.Create(&rp).Error; createErr != nil {
+				if createErr := database.Create(&rp).Error; createErr != nil {
 					return createErr
 				}
 			} else {
@@ -148,16 +156,16 @@ func bindRolePermissions(roleID uint64, permCodes []string, permissionIDs map[st
 }
 
 // ensureAllUsersHaveMemberRole 为存量用户补齐 member 角色，保证默认可用权限。
-func ensureAllUsersHaveMemberRole(memberRoleID uint64) error {
+func ensureAllUsersHaveMemberRole(database *gorm.DB, memberRoleID uint64) error {
 	var userIDs []uint64
-	if err := DB.Model(&models.User{}).Pluck("id", &userIDs).Error; err != nil {
+	if err := database.Model(&models.User{}).Pluck("id", &userIDs).Error; err != nil {
 		return err
 	}
 	for _, uid := range userIDs {
 		ur := models.UserRole{UserID: uid, RoleID: memberRoleID}
-		if err := DB.Where("user_id = ? AND role_id = ?", uid, memberRoleID).First(&ur).Error; err != nil {
+		if err := database.Where("user_id = ? AND role_id = ?", uid, memberRoleID).First(&ur).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if createErr := DB.Create(&ur).Error; createErr != nil {
+				if createErr := database.Create(&ur).Error; createErr != nil {
 					return createErr
 				}
 			} else {
@@ -169,14 +177,14 @@ func ensureAllUsersHaveMemberRole(memberRoleID uint64) error {
 }
 
 // ensureBootstrapAdmin 按配置用户名补 admin 角色，不存在用户时仅告警不中断启动。
-func ensureBootstrapAdmin(adminRoleID uint64) error {
-	username := strings.TrimSpace(config.AppConfig.RBACBootstrapAdminUsername)
+func ensureBootstrapAdmin(database *gorm.DB, cfg *config.Config, adminRoleID uint64) error {
+	username := strings.TrimSpace(cfg.RBACBootstrapAdminUsername)
 	if username == "" {
 		return nil
 	}
 
 	var user models.User
-	if err := DB.Where("username = ?", username).First(&user).Error; err != nil {
+	if err := database.Where("username = ?", username).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("RBAC bootstrap admin user %q not found; skip admin role assign", username)
 			return nil
@@ -184,9 +192,9 @@ func ensureBootstrapAdmin(adminRoleID uint64) error {
 		return err
 	}
 	ur := models.UserRole{UserID: uint64(user.ID), RoleID: adminRoleID}
-	if err := DB.Where("user_id = ? AND role_id = ?", ur.UserID, ur.RoleID).First(&ur).Error; err != nil {
+	if err := database.Where("user_id = ? AND role_id = ?", ur.UserID, ur.RoleID).First(&ur).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			if createErr := DB.Create(&ur).Error; createErr != nil {
+			if createErr := database.Create(&ur).Error; createErr != nil {
 				return createErr
 			}
 		} else {
