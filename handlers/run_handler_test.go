@@ -13,16 +13,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
 func setupRunIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	gdb := openSQLiteTestDB(t)
 	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

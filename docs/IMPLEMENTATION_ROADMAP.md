@@ -28,17 +28,20 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 ### 4. 内部统一领域模型（已完成，Issue #18）
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 已建模并纳入迁移
 - Delegation 明确关联 Parent Run、唯一 Child Run、请求 Message 与结果 Message
-- Endpoint 使用统一 A2A 协议语义，通过 `local / https` transport 区分传输方式
+- Endpoint 使用统一 A2A 协议语义；本地开发通过同一 Gateway 的 loopback HTTP，远程通过 HTTPS，不提供 Service 直调旁路
 - 内部模型不直接复制 AG-UI/A2A 外部协议字段
 
-### 5. AG-UI Gateway
-- 基础协议接入
-- Thread / Run 创建
-- 流式回传
+### 5. AG-UI Gateway（已完成，Issue #19）
+- 使用官方 AG-UI Go SDK 接收 `RunAgentInput`
+- 将协议请求映射为内部 `Thread / Message / Run`
+- 支持 Thread 创建与本人 active Thread 复用
+- 通过官方 SSE 事件回传 Run、RunStep 与 Result Message
+- 支持请求取消、稳定错误事件和历史消息去重
+- V1 仅支持普通文本消息，多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 显式拒绝；空对象/空数组不渗透到内部模型。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 分开建模
 
-### 6. A2A Gateway
+### 6. A2A Gateway（下一步，Issue #20）
 - Agent 间委派入口与统一 A2A 消息模型
-- 远程 Agent 使用 HTTPS transport，本地 Agent 使用遵守相同语义的进程内 transport
+- 远程 Agent 使用 HTTPS，本地开发使用 loopback HTTP；两者都访问同一 A2A Gateway，并执行相同契约、鉴权、Message、Delegation 与状态语义
 - 回调 / 结果通知
 - 协议映射到 Message + Delegation + Child Run + Trace
 

@@ -7,7 +7,9 @@ const (
 )
 
 const (
-	AgentEndpointTransportLocal = "local"
+	// AgentEndpointTransportHTTP 表示本地开发通过 loopback HTTP 访问统一 A2A Gateway。
+	AgentEndpointTransportHTTP = "http"
+	// AgentEndpointTransportHTTPS 表示远程 Agent 通过 HTTPS 访问统一 A2A Gateway。
 	AgentEndpointTransportHTTPS = "https"
 )
 
@@ -17,7 +19,7 @@ const (
 	AgentEndpointStatusUnhealthy = "unhealthy"
 )
 
-// AgentEndpoint 描述 Agent 的协议入口；Protocol 定义协作语义，Transport 仅定义本地或远程传输方式。
+// AgentEndpoint 描述 Agent 的 A2A 协议入口；本地开发使用 loopback HTTP，远程使用 HTTPS，二者都必须经过统一 A2A Gateway。
 type AgentEndpoint struct {
 	ID            uint64 `gorm:"primaryKey;autoIncrement"`
 	AgentID       uint64 `gorm:"not null;uniqueIndex:idx_agent_endpoint_unique,priority:1;index"`

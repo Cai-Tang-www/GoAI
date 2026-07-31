@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.24.2-alpine AS builder
+FROM golang:1.26.5-alpine AS builder
 WORKDIR /src
 
+ARG GOPROXY=https://proxy.golang.org,direct
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GOPROXY=${GOPROXY} go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/goai .

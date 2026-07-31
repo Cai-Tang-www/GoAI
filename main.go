@@ -64,6 +64,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
+	runtimeService, err := services.NewRuntimeService(database, runService)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
 	runWorker, err := worker.NewRunWorker(runService)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
@@ -77,6 +81,7 @@ func run(ctx context.Context) error {
 	router, err := routers.New(routers.Dependencies{
 		Database:   database,
 		RunService: runService,
+		Runtime:    runtimeService,
 	})
 	if err != nil {
 		return errors.Join(err, consumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))

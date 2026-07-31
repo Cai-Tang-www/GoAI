@@ -1,12 +1,13 @@
 package middlewares
 
 import (
-	"GoAI/ai"
-	"GoAI/services"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"GoAI/ai"
+	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,6 +22,8 @@ func TestWrapErrorMapsKnownSentinels(t *testing.T) {
 	}{
 		{name: "run not found", err: services.ErrRunNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeRunNotFound},
 		{name: "run forbidden", err: services.ErrRunForbidden(), wantStatus: http.StatusForbidden, wantCode: CodeAuthForbidden},
+		{name: "agent not found", err: services.ErrAgentNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeAgentNotFound},
+		{name: "workflow not found", err: services.ErrWorkflowNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeWorkflowNotFound},
 		{name: "provider missing", err: ai.ErrProviderNotFound, wantStatus: http.StatusBadRequest, wantCode: CodeProviderNotFound},
 		{name: "stream interrupted", err: ai.ErrStreamInterrupted, wantStatus: http.StatusInternalServerError, wantCode: CodeStreamInterrupted},
 		{name: "dispatch failed", err: fmt.Errorf("%w: kafka down", services.ErrRunDispatchFailed()), wantStatus: http.StatusInternalServerError, wantCode: CodeKafkaPublishFailed},

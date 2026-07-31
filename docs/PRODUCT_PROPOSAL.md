@@ -160,7 +160,7 @@ Thread 内的通信单元，既可以是用户消息，也可以是 Agent 间消
 A2A 的约束：
 
 - A2A 定义 Agent 协作语义，HTTPS 只是远程 transport，Kafka 只是异步基础设施
-- 远程 Agent 使用 HTTPS transport；本地 Agent 可以使用进程内 transport adapter
+- 远程 Agent 使用 HTTPS transport；本地 Agent 通过 loopback HTTP 访问同一 A2A Gateway，不提供进程内 transport adapter
 - 不同 transport 必须共享同一套 A2A 请求、状态与结果模型
 - 每次跨 Agent 调用必须持久化 Message、Delegation、Child Run，并关联 Trace
 - 不允许用 service 直接调用或只投递一个 Kafka run_id 来替代 A2A 协作语义
@@ -290,13 +290,13 @@ A2A 的约束：
 
 ### 11.2 agent_endpoints
 
-表示 Agent 对平台暴露的协议入口。V1 的 Agent 协作协议固定为 `a2a`，传输方式通过独立字段区分，避免把进程内调用误建模成另一套协议。
+表示 Agent 对平台暴露的协议入口。V1 的 Agent 协作协议固定为 `a2a`，传输方式通过独立字段区分；本地 loopback HTTP 与远程 HTTPS 都访问统一 A2A Gateway，不提供进程内调用旁路。
 
 关键字段：
 - `agent_id`
 - `endpoint_code`，在同一 Agent 内唯一
 - `protocol`，V1 为 `a2a`
-- `transport` (`local` / `https`)
+- `transport`（本地开发使用 loopback HTTP，远程使用 HTTPS；两者都经过同一 A2A Gateway，不允许退化为 Service 直调）
 - `address`
 - `auth_type`
 - `credential_ref`，只保存凭据引用，不保存真实密钥
@@ -412,13 +412,13 @@ Run 中每个可观测执行步骤及其重试 attempt。RunStep 可以记录 Wo
 
 ### 12.1 AG-UI 链路
 
-`Client -> AG-UI Gateway -> Thread / Message -> Create Run -> Runtime Coordination -> Eino Graph / Tool / LLM -> RunStep / Message -> Stream Back to Client`
+`Client -> AG-UI Gateway -> Runtime StartRun -> Thread / Input Message / Run -> Kafka Worker -> Workflow / Tool / LLM -> RunStep / Result Message -> AG-UI SSE Events`
 
 ### 12.2 A2A 链路
 
-`Source Agent -> A2A Gateway / Local Transport -> Delegation -> Child Run -> Target Agent Execution -> A2A Result / Callback -> Result Message -> Parent Run Continue`
+`Source Agent -> A2A Client -> loopback HTTP / remote HTTPS -> A2A Gateway -> Delegation -> Child Run -> Target Agent Eino Graph -> A2A Result / Callback -> Result Message -> Parent Run Continue`
 
-Workflow 中的 Agent/Delegation 节点必须调用 Runtime 创建 Delegation 与 Child Run；目标 Agent 无论本地还是远程，都遵守相同协议和状态语义。
+Workflow 中的 Agent/Delegation 节点只产出委派意图并交给 Runtime；Runtime 创建 Delegation 与 Child Run 后必须通过 A2A Client 调用目标 Agent 的 A2A Gateway。目标 Agent 无论本地还是远程，都执行自己的 Eino Graph，并遵守相同协议、鉴权、Message 与状态语义。
 
 ### 12.3 Replay 链路
 
@@ -453,7 +453,14 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - 幂等与去重
 - HTTP / SSE / Kafka / Worker 优雅关闭
 
-### 14.2 需要重写/扩展
+### 14.2 当前新增实现
+
+- AG-UI Gateway 已使用官方 Go SDK 完成首版接入
+- AG-UI 请求先映射到协议无关 Runtime，再原子创建或复用 Thread、持久化 Message 并触发 Run
+- RunStep 与 Result Message 可通过官方 SSE 事件回传
+- 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放，后者由后续 A2A 协作链路实现
+
+### 14.3 需要重写/扩展
 
 - 从“Run-only 主线”升级到“Thread / Message / Delegation / Run 主线”
 - 从“chat 调试接口”升级到“AG-UI Gateway”

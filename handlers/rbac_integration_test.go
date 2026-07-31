@@ -1,10 +1,6 @@
 package handlers_test
 
 import (
-	"GoAI/config"
-	"GoAI/db"
-	"GoAI/middlewares"
-	"GoAI/models"
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -12,16 +8,17 @@ import (
 	"strconv"
 	"testing"
 
-	"gorm.io/driver/sqlite"
+	"GoAI/config"
+	"GoAI/db"
+	"GoAI/middlewares"
+	"GoAI/models"
+
 	"gorm.io/gorm"
 )
 
 func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	gdb := openSQLiteTestDB(t)
 	if err := gdb.AutoMigrate(
 		&models.User{},
 		&models.Role{},
@@ -30,14 +27,113 @@ func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 		&models.RolePermission{},
 		&models.Agent{},
 		&models.Workflow{},
+		&models.Thread{},
+		&models.Message{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunIdempotency{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	return gdb
 }
 
+func TestAGUIRouteEnforcesJWTAndRBACBeforeHandler(t *testing.T) {
+	gdb := setupRBACIntegrationDB(t)
+	member := models.User{Username: "agui-member", Email: "agui-member@example.com", Password: "x"}
+	if err := gdb.Create(&member).Error; err != nil {
+		t.Fatalf("create member failed: %v", err)
+	}
+	config.AppConfig = &config.Config{
+		JWTSecret:            "agui-rbac-test-secret",
+		RBACEnable:           true,
+		ModelProviders:       map[string]config.ModelProviderConfig{},
+		ModelProviderDefault: "",
+	}
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
+		t.Fatalf("seed RBAC failed: %v", err)
+	}
+	outsider := models.User{Username: "agui-outsider", Email: "agui-outsider@example.com", Password: "x"}
+	if err := gdb.Create(&outsider).Error; err != nil {
+		t.Fatalf("create outsider failed: %v", err)
+	}
+	memberToken, err := middlewares.GenerateToken(member.ID)
+	if err != nil {
+		t.Fatalf("generate member token failed: %v", err)
+	}
+	outsiderToken, err := middlewares.GenerateToken(outsider.ID)
+	if err != nil {
+		t.Fatalf("generate outsider token failed: %v", err)
+	}
+	router := newTestRouter(t, gdb, nil)
+
+	tests := []struct {
+		name       string
+		token      string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "missing token", wantStatus: http.StatusUnauthorized, wantCode: "AUTH_MISSING_TOKEN"},
+		{name: "missing permission", token: outsiderToken, wantStatus: http.StatusForbidden, wantCode: "AUTH_FORBIDDEN"},
+		{name: "authorized invalid payload reaches handler", token: memberToken, wantStatus: http.StatusBadRequest, wantCode: "VALIDATION_FAILED"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/agents/planner/agui", bytes.NewBufferString(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			if test.token != "" {
+				req.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			if response.Code != test.wantStatus {
+				t.Fatalf("unexpected status: got=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			envelope := decodeEnvelope(t, response)
+			if envelope.Code != test.wantCode {
+				t.Fatalf("unexpected code: got=%s want=%s body=%s", envelope.Code, test.wantCode, response.Body.String())
+			}
+		})
+	}
+}
+func TestCreateRunMissingAgentReturnsStableError(t *testing.T) {
+	gdb := setupRBACIntegrationDB(t)
+	member := models.User{Username: "missing-agent-member", Email: "missing-agent-member@example.com", Password: "x"}
+	if err := gdb.Create(&member).Error; err != nil {
+		t.Fatalf("create member failed: %v", err)
+	}
+	config.AppConfig = &config.Config{
+		JWTSecret:            "missing-agent-test-secret",
+		RBACEnable:           true,
+		ModelProviders:       map[string]config.ModelProviderConfig{},
+		ModelProviderDefault: "",
+	}
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
+		t.Fatalf("seed RBAC failed: %v", err)
+	}
+	token, err := middlewares.GenerateToken(member.ID)
+	if err != nil {
+		t.Fatalf("generate member token failed: %v", err)
+	}
+	router := newTestRouter(t, gdb, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewBufferString(`{"agent_code":"missing","input":{"prompt":"hello"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, req)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status: got=%d want=%d body=%s", response.Code, http.StatusNotFound, response.Body.String())
+	}
+	envelope := decodeEnvelope(t, response)
+	if envelope.Code != middlewares.CodeAgentNotFound {
+		t.Fatalf("unexpected code: got=%s want=%s body=%s", envelope.Code, middlewares.CodeAgentNotFound, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("record not found")) {
+		t.Fatalf("database error leaked to client: %s", response.Body.String())
+	}
+}
 func TestRBACMemberAndAdminAccess(t *testing.T) {
 	gdb := setupRBACIntegrationDB(t)
 

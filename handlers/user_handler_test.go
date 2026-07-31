@@ -5,8 +5,6 @@ import (
 	"GoAI/models"
 	"bytes"
 	"encoding/json"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,10 +12,7 @@ import (
 
 // TestUserAuthAndEnvelope 验证 register/login 与缺 token 场景都会走统一响应结构。
 func TestUserAuthAndEnvelope(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	gdb := openSQLiteTestDB(t)
 	if err := gdb.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
@@ -79,10 +74,7 @@ func TestUserAuthAndEnvelope(t *testing.T) {
 
 // TestRegisterValidationError 验证用户注册时邮箱和密码格式错误会被明确拦截。
 func TestRegisterValidationError(t *testing.T) {
-	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	gdb := openSQLiteTestDB(t)
 	if err := gdb.AutoMigrate(&models.User{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

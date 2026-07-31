@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"errors"
 	"net/http"
 
 	"GoAI/middlewares"
@@ -47,15 +46,7 @@ func (h *RunHandler) CreateRun(c *gin.Context) {
 
 	result, err := h.service.CreateRun(c.Request.Context(), userID, req)
 	if err != nil {
-		if errors.Is(err, services.ErrIdempotencyKeyReused()) {
-			middlewares.AbortWithError(c, middlewares.WrapError(err))
-			return
-		}
-		if errors.Is(err, services.ErrRunDispatchFailed()) {
-			middlewares.AbortWithError(c, middlewares.WrapError(err))
-			return
-		}
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
 

@@ -1,9 +1,10 @@
 package routers
 
 import (
-	"GoAI/services"
 	"context"
 	"testing"
+
+	"GoAI/services"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -20,6 +21,13 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	if _, err := New(Dependencies{Database: gdb}); err == nil {
 		t.Fatal("expected nil run service error")
 	}
+	service, err := services.NewRunService(gdb, services.RunEventPublisherFunc(func(context.Context, string) error { return nil }))
+	if err != nil {
+		t.Fatalf("create run service failed: %v", err)
+	}
+	if _, err := New(Dependencies{Database: gdb, RunService: service}); err == nil {
+		t.Fatal("expected nil runtime error")
+	}
 }
 
 func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
@@ -31,7 +39,11 @@ func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run service failed: %v", err)
 	}
-	router, err := New(Dependencies{Database: gdb, RunService: service})
+	runtimeService, err := services.NewRuntimeService(gdb, service)
+	if err != nil {
+		t.Fatalf("create runtime service failed: %v", err)
+	}
+	router, err := New(Dependencies{Database: gdb, RunService: service, Runtime: runtimeService})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)
 	}
