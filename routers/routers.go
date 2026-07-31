@@ -17,6 +17,7 @@ import (
 type Dependencies struct {
 	Database   *gorm.DB
 	RunService *services.RunService
+	Runtime    services.Runtime
 }
 
 // New 使用显式依赖创建完整 API 路由。
@@ -27,9 +28,16 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	if deps.RunService == nil {
 		return nil, fmt.Errorf("creating router: run service is nil")
 	}
+	if deps.Runtime == nil {
+		return nil, fmt.Errorf("creating router: runtime is nil")
+	}
 
 	userHandler := handlers.NewUserHandler(deps.Database)
 	runHandler := handlers.NewRunHandler(deps.RunService)
+	aguiHandler, err := handlers.NewAGUIHandler(deps.Runtime)
+	if err != nil {
+		return nil, fmt.Errorf("creating AG-UI handler: %w", err)
+	}
 
 	router := gin.New()
 	router.Use(
@@ -63,6 +71,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 			}, "success")
 		})
 		apiGroup.POST("/chat", middlewares.RequirePermission(models.PermissionChatUse), handlers.Chat)
+		apiGroup.POST("/agents/:agent_code/agui", middlewares.RequirePermission(models.PermissionRunCreate), aguiHandler.RunAgent)
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)

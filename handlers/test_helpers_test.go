@@ -1,14 +1,17 @@
 package handlers_test
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+
 	"GoAI/models"
 	"GoAI/routers"
 	"GoAI/services"
-	"context"
-	"encoding/json"
-	"net/http/httptest"
-	"strings"
-	"testing"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
@@ -35,21 +38,35 @@ func decodeEnvelope(t *testing.T, w *httptest.ResponseRecorder) apiEnvelope {
 	return env
 }
 
-// uniqueSQLiteDSN 为每个测试生成独立的内存库 DSN，避免整包执行时相互污染。
-func uniqueSQLiteDSN(t *testing.T) string {
+var sqliteTestSequence atomic.Uint64
+
+// openSQLiteTestDB 为每次测试建立独立的 SQLite 内存库，并在测试结束时释放连接。
+func openSQLiteTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
+
 	name := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
-	return "file:" + name + "?mode=memory&cache=shared"
+	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared", name, sqliteTestSequence.Add(1))
+	database, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("get sqlite connection failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close sqlite connection failed: %v", err)
+		}
+	})
+	return database
 }
 
 func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher) *gin.Engine {
 	t.Helper()
 	if database == nil {
-		var err error
-		database, err = gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
-		if err != nil {
-			t.Fatalf("open sqlite failed: %v", err)
-		}
+		database = openSQLiteTestDB(t)
 		if err := database.AutoMigrate(
 			&models.User{},
 			&models.Role{},
@@ -58,6 +75,8 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 			&models.RolePermission{},
 			&models.Agent{},
 			&models.Workflow{},
+			&models.Thread{},
+			&models.Message{},
 			&models.Run{},
 			&models.RunStep{},
 			&models.RunIdempotency{},
@@ -72,7 +91,11 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 	if err != nil {
 		t.Fatalf("create run service failed: %v", err)
 	}
-	router, err := routers.New(routers.Dependencies{Database: database, RunService: runService})
+	runtimeService, err := services.NewRuntimeService(database, runService)
+	if err != nil {
+		t.Fatalf("create runtime service failed: %v", err)
+	}
+	router, err := routers.New(routers.Dependencies{Database: database, RunService: runService, Runtime: runtimeService})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)
 	}

@@ -1,12 +1,13 @@
 package middlewares
 
 import (
-	"GoAI/ai"
-	"GoAI/requestctx"
-	"GoAI/services"
 	"errors"
 	"log"
 	"net/http"
+
+	"GoAI/ai"
+	"GoAI/requestctx"
+	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -24,6 +25,11 @@ const (
 	CodeUserNotFound           = "USER_NOT_FOUND"
 	CodeUserAlreadyExists      = "USER_ALREADY_EXISTS"
 	CodeRunNotFound            = "RUN_NOT_FOUND"
+	CodeRunAlreadyExists       = "RUN_ALREADY_EXISTS"
+	CodeThreadUnavailable      = "THREAD_UNAVAILABLE"
+	CodeMessageConflict        = "MESSAGE_CONFLICT"
+	CodeAgentNotFound          = "AGENT_NOT_FOUND"
+	CodeWorkflowNotFound       = "WORKFLOW_NOT_FOUND"
 	CodeProviderNotFound       = "PROVIDER_NOT_FOUND"
 	CodeProviderDriverNotFound = "PROVIDER_DRIVER_NOT_FOUND"
 	CodeProviderInvalidConfig  = "PROVIDER_INVALID_CONFIG"
@@ -159,9 +165,34 @@ func RunNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeRunNotFound, Message: "run not found"}
 }
 
+// AgentNotFoundError 构造 Agent 不存在或未启用错误。
+func AgentNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeAgentNotFound, Message: "agent not found"}
+}
+
+// WorkflowNotFoundError 构造 Workflow 不存在错误。
+func WorkflowNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeWorkflowNotFound, Message: "workflow not found"}
+}
+
 // IdempotencyKeyReusedError 构造幂等键冲突错误。
 func IdempotencyKeyReusedError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeIdempotencyKeyReused, Message: "idempotency key reused with different request"}
+}
+
+// RunAlreadyExistsError 构造协议 RunID 冲突错误。
+func RunAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeRunAlreadyExists, Message: "run id already exists with different request"}
+}
+
+// ThreadUnavailableError 构造 Thread 已关闭或归档错误。
+func ThreadUnavailableError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeThreadUnavailable, Message: "thread is not active"}
+}
+
+// MessageConflictError 构造 MessageID 内容冲突错误。
+func MessageConflictError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeMessageConflict, Message: "message id already exists with different content"}
 }
 
 // RbacPermissionLoadFailed 构造 RBAC 查询失败错误。
@@ -202,6 +233,16 @@ func WrapError(err error) *AppError {
 		return KafkaPublishFailed(err)
 	case errors.Is(err, services.ErrIdempotencyKeyReused()):
 		return IdempotencyKeyReusedError()
+	case errors.Is(err, services.ErrRunAlreadyExists()):
+		return RunAlreadyExistsError()
+	case errors.Is(err, services.ErrThreadUnavailable()):
+		return ThreadUnavailableError()
+	case errors.Is(err, services.ErrMessageConflict()):
+		return MessageConflictError()
+	case errors.Is(err, services.ErrAgentNotFound()):
+		return AgentNotFoundError()
+	case errors.Is(err, services.ErrWorkflowNotFound()):
+		return WorkflowNotFoundError()
 	case errors.Is(err, ai.ErrProviderNotFound):
 		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeProviderNotFound, Message: "provider not found", Err: err}
 	case errors.Is(err, ai.ErrDriverNotFound):
