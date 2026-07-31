@@ -46,7 +46,7 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 - `Run`：一次完整业务回合，可由 AG-UI、A2A 或系统调度触发
 - `RunStep`：Run 内部一个可观测执行步骤
 - `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录，关联 Parent Run 与唯一 Child Run
-- `AgentEndpoint`：Agent 的 A2A 协议入口，通过 `local / https` transport 区分本地与远程传输
+- `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约与鉴权
 - `AgentCapability`：Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力
 - `Workflow / Graph`：某个 Agent 的执行模板或能力，不代表整个平台
 - `Loop`：用于 Trace、Replay、Eval 和成本分析的执行片段
@@ -69,7 +69,7 @@ AG-UI / A2A Request
 A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只是异步基础设施。
 
 - 远程 Agent 通过 HTTPS A2A transport 通信
-- 本地 Agent 可以使用进程内 transport adapter，避免无意义的网络回环
+- 本地 Agent 通过 loopback HTTP 访问同一 A2A Gateway，不提供进程内 transport adapter 或 Service 直调旁路
 - 本地与远程 transport 必须使用相同的 A2A 请求、状态和结果契约
 - 每次跨 Agent 调用都必须形成 `Message + Delegation + Child Run + Trace`
 - Workflow 的 Agent 节点必须交给 Runtime 发起 Delegation，不能直接调用另一个 Agent 的 service
@@ -107,21 +107,75 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - 旧 Task 模型、空包和误导性文件名清理
 - db / redis / kafka 显式依赖装配
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
+- 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
 
 ### 在建
-- AG-UI Gateway
-- A2A Gateway 与 transport
+- A2A Gateway、loopback HTTP / remote HTTPS transport 与 Agent Card
 - 多 Agent Runtime、父子 Run 与结果聚合
 - Eino Graph 能力化接入
 - Loop / Trace / Replay / Eval / Cost
 
 文档中的“在建”能力不能视为当前已经可用。
 
+
+## AG-UI Gateway
+
+当前协议入口：
+
+```text
+POST /api/agents/:agent_code/agui
+```
+
+该入口需要 JWT 和 `run:create` 权限，接收官方 `RunAgentInput` JSON。V1 只接受 `user / assistant / system / developer` 普通文本消息；多模态内容、`tool / activity / reasoning` 消息、ToolCall/加密/命名消息字段，以及非空 `state / tools / context / forwardedProps`、`parentRunId` 与 `resume` 都会在进入流式阶段前返回参数错误。SDK 默认产生的空对象或空数组允许传入，但不会渗透到内部 Run 输入。AG-UI `parentRunId` 表示同一 Thread 的分支 lineage，A2A Delegation 的 Parent/Child Run 表示 Agent 委派关系，二者不共用语义；V1 暂不开放分支与恢复能力，也不会静默降级。
+
+最小请求示例：
+
+```json
+{
+  "threadId": "thread-demo",
+  "runId": "run-demo",
+  "state": {},
+  "messages": [
+    {
+      "id": "message-demo",
+      "role": "user",
+      "content": "请执行当前 Agent 的工作流"
+    }
+  ],
+  "tools": [],
+  "context": []
+}
+```
+
+`threadId` 为空时由 Runtime 创建新 Thread；传入本人 active Thread 时复用。`runId` 为空时由 Runtime 生成；相同 `runId` 与相同请求可安全复用，不同请求会返回冲突。
+
+成功进入执行阶段后响应为 `text/event-stream`。官方 SDK 当前通过每个 SSE frame 的 `data:` JSON 中的 `type` 区分事件：
+
+```text
+data: {"type":"RUN_STARTED","threadId":"thread-demo","runId":"run-demo"}
+
+data: {"type":"STEP_STARTED","stepName":"prepare"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"message-result","delta":"执行结果"}
+
+data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
+```
+
+当前可回传事件包括：
+
+- `RUN_STARTED`
+- `STEP_STARTED` / `STEP_FINISHED`
+- `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END`
+- `RUN_FINISHED` / `RUN_ERROR`
+
+协议 Gateway 只负责协议解析、内部命令映射和事件编码；Thread、Message、Run 的一致性由 Runtime 保证，Workflow 执行由 Run Worker 负责。当前尚未实现 A2A 委派，因此 Workflow 的 `agent` 节点会明确失败，不会通过本地 service 直调或 Kafka 投递伪造多 Agent 成功。后续即使目标 Agent 与 Runtime 同进程，也必须经过 A2A Gateway 的 loopback HTTP；远程 Agent 则使用 HTTPS。
+
 ## 当前 HTTP API
 
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /api/chat`：单 Agent / Provider 流式调试入口
+- `POST /api/agents/:agent_code/agui`：AG-UI 标准协议入口
 - `POST /api/runs`
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
