@@ -47,6 +47,9 @@ func Chat(c *gin.Context) {
 				log.Printf("sse chunk write failed trace_id=%s err=%v", middlewares.TraceID(c), err)
 				return
 			}
+		case <-c.Request.Context().Done():
+			log.Printf("sse stream stopped trace_id=%s reason=%v", middlewares.TraceID(c), c.Request.Context().Err())
+			return
 		case streamErr, ok := <-errs:
 			if !ok {
 				errs = nil

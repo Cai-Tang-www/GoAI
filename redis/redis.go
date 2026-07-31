@@ -28,3 +28,11 @@ func InitRedis() {
 
 	log.Println("Redis connected successfully!")
 }
+
+// Close 关闭 Redis 客户端连接。
+func Close() error {
+	if Rdb == nil {
+		return nil
+	}
+	return Rdb.Close()
+}

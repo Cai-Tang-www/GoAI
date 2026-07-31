@@ -76,6 +76,7 @@ DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)�
 - `event: chunk`：`data.content` 为增量文本
 - `event: done`：`data.done=true`
 - `event: error`：返回统一 envelope 的错误事件
+- 客户端断开或服务关闭时，请求 context 会取消上游 Provider 流，handler 不再继续等待 chunk
 
 ### 示例
 
@@ -106,7 +107,7 @@ DeepSeek 推荐配置可参考 [`F:/GoAI/.env.example`](/F:/GoAI/.env.example)�
 
 - MySQL：`MYSQL_HOST` `MYSQL_PORT` `MYSQL_USER` `MYSQL_DATABASE`
 - Redis：`REDIS_HOST` `REDIS_PORT`
-- Server：`SERVER_PORT`
+- Server：`SERVER_PORT` `SERVER_SHUTDOWN_TIMEOUT_SECONDS`（必须大于 0，默认 15 秒）
 - Kafka：`KAFKA_BOOTSTRAP_SERVERS` `KAFKA_RUN_TOPIC` `KAFKA_RUN_GROUP_ID`
 - JWT：`JWT_SECRET`
 - Provider：当存在 provider profile 时，必须有 `MODEL_PROVIDER_DEFAULT`，且默认 provider 的 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME_DEFAULT` 完整可用
@@ -122,6 +123,7 @@ MYSQL_DATABASE=goai_db
 REDIS_HOST=localhost
 REDIS_PORT=6379
 SERVER_PORT=8080
+SERVER_SHUTDOWN_TIMEOUT_SECONDS=15
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 KAFKA_RUN_TOPIC=run_execute
 KAFKA_RUN_GROUP_ID=run-worker-group
@@ -136,6 +138,16 @@ MODEL_NAME_DEFAULT_DEEPSEEK=deepseek-chat
 - 参数不合法：返回 `400` + `VALIDATION_FAILED`
 - 用户路径参数非法：返回 `400` + `INVALID_ID`
 - 启动缺配置：进程直接报错退出，不延迟到运行期再暴露
+
+## 服务生命周期与优雅关闭
+
+进程通过标准 `http.Server` 提供服务，并监听 `SIGINT` / `SIGTERM`。收到关闭信号后按以下顺序收口资源：
+
+1. HTTP Server 停止接收新连接，并在 `SERVER_SHUTDOWN_TIMEOUT_SECONDS` 窗口内等待普通请求和 SSE 流结束
+2. HTTP drain 超时后调用 `Server.Close` 强制关闭仍存活的连接
+3. 取消 Kafka worker context，并关闭 consumer 解除阻塞中的消息读取
+4. 等待 worker 退出后，依次关闭 Kafka producer、Redis 和数据库连接池
+5. 任一关闭阶段发生错误都会被聚合返回，并输出带 phase/resource/status 的关闭日志
 
 ## 当前后端架构（Run 编排主线）
 

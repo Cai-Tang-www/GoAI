@@ -1,52 +1,61 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"GoAI/config"
 	"GoAI/db"
 	"GoAI/kafka"
 	"GoAI/redis"
-	routers "GoAI/routers"
+	"GoAI/routers"
 	"GoAI/worker"
-	"context"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
 )
 
 func main() {
-	// 加载配置
-	err := config.LoadConfig()
-	if err != nil {
-		log.Fatalf("Error loading configuration: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		log.Printf("application exited with error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	if err := config.LoadConfig(); err != nil {
+		return fmt.Errorf("loading configuration: %w", err)
 	}
 
 	db.InitDB()
 	redis.InitRedis()
-
 	kafka.InitProducer()
-	defer kafka.CloseProducer()
-
 	kafka.InitConsumer()
-	defer kafka.CloseConsumer()
 	worker.RegisterKafkaRunWorker()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go kafka.StartConsumer(ctx)
+	server := &http.Server{
+		Addr:              ":" + config.AppConfig.ServerPort,
+		Handler:           routers.InitRouter(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	r := routers.InitRouter()
-	go func() {
-		if err := r.Run(":" + config.AppConfig.ServerPort); err != nil {
-			log.Fatalf("Failed to run server: %v", err)
-		}
-	}()
-
-	log.Printf("Server started on :%s", config.AppConfig.ServerPort)
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
-	cancel()
-	log.Println("Server exited")
+	runtime := runtimeLifecycle{
+		server:          server,
+		address:         server.Addr,
+		shutdownTimeout: config.AppConfig.ServerShutdownTimeout,
+		runWorker:       kafka.StartConsumer,
+		closeConsumer:   kafka.CloseConsumer,
+		closeProducer:   kafka.CloseProducer,
+		closeRedis:      redis.Close,
+		closeDB:         db.Close,
+		logger:          log.Default(),
+	}
+	return runtime.Run(ctx)
 }
