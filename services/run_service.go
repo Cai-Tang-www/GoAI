@@ -8,6 +8,7 @@ import (
 	"GoAI/models"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ var (
 	errRunNotFound           = errors.New("run not found")
 	errRunForbidden          = errors.New("run does not belong to current user")
 	errRunDispatchFailed     = errors.New("run execute event publish failed")
+	errIdempotencyKeyReused  = errors.New("idempotency key reused with different request")
 	errInvalidRunTransition  = errors.New("invalid run status transition")
 	errInvalidStepTransition = errors.New("invalid step status transition")
 	publishRunExecuteEvent   = func(ctx context.Context, runID string) error {
@@ -29,6 +31,14 @@ var (
 	}
 	stepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 )
+
+var allowedRunTriggerTypes = map[string]struct{}{
+	"api":      {},
+	"manual":   {},
+	"replay":   {},
+	"schedule": {},
+	"webhook":  {},
+}
 
 func ErrRunNotFound() error {
 	return errRunNotFound
@@ -41,6 +51,11 @@ func ErrRunForbidden() error {
 // ErrRunDispatchFailed 返回 Run 入队失败的统一 sentinel error。
 func ErrRunDispatchFailed() error {
 	return errRunDispatchFailed
+}
+
+// ErrIdempotencyKeyReused 返回幂等键复用冲突的统一 sentinel error。
+func ErrIdempotencyKeyReused() error {
+	return errIdempotencyKeyReused
 }
 
 // SetPublishRunExecuteEventForTest 允许测试替换 Kafka 投递函数。
@@ -70,6 +85,7 @@ type CreateRunRequest struct {
 	Input           json.RawMessage `json:"input"`
 	Provider        string          `json:"provider"`
 	Model           string          `json:"model"`
+	IdempotencyKey  string          `json:"-"`
 }
 
 type CreateRunResponse struct {
@@ -77,28 +93,64 @@ type CreateRunResponse struct {
 	Status string `json:"status"`
 }
 
-func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*models.Run, error) {
+// RunMutationResult 描述创建或回放 Run 的返回结果以及是否命中幂等。
+type RunMutationResult struct {
+	Run           *models.Run
+	IdempotentHit bool
+}
+
+// ValidateCreateRunRequest 校验 Run 创建请求的关键字段，避免非法输入进入执行主链路。
+func ValidateCreateRunRequest(req CreateRunRequest) error {
 	agentCode := strings.TrimSpace(req.AgentCode)
 	if agentCode == "" {
-		return nil, errors.New("agent_code is required")
+		return errors.New("agent_code is required")
 	}
-
-	var agent models.Agent
-	if err := db.DB.WithContext(ctx).
-		Where("agent_code = ? AND status = ?", agentCode, models.AgentStatusActive).
-		First(&agent).Error; err != nil {
-		return nil, fmt.Errorf("find active agent by code: %w", err)
+	if len(agentCode) > 64 {
+		return errors.New("agent_code must be at most 64 characters")
 	}
-
-	workflow, err := resolveWorkflow(ctx, agent.ID, req.WorkflowVersion)
-	if err != nil {
-		return nil, err
+	if req.WorkflowVersion < 0 {
+		return errors.New("workflow_version must be greater than or equal to 0")
 	}
-	if _, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON); err != nil {
-		return nil, err
+	if len(strings.TrimSpace(req.ThreadID)) > 128 {
+		return errors.New("thread_id must be at most 128 characters")
 	}
-
+	triggerType := strings.TrimSpace(req.TriggerType)
+	if triggerType != "" {
+		if _, ok := allowedRunTriggerTypes[triggerType]; !ok {
+			return errors.New("trigger_type must be one of api,manual,replay,schedule,webhook")
+		}
+	}
+	if len(strings.TrimSpace(req.Provider)) > 64 {
+		return errors.New("provider must be at most 64 characters")
+	}
+	if len(strings.TrimSpace(req.Model)) > 128 {
+		return errors.New("model must be at most 128 characters")
+	}
 	inputJSON := strings.TrimSpace(string(req.Input))
+	if inputJSON != "" && !json.Valid(req.Input) {
+		return errors.New("input must be valid JSON")
+	}
+	return nil
+}
+
+// normalizedCreateRunRequest 保存经过规范化的 Run 创建参数，便于做稳定哈希。
+type normalizedCreateRunRequest struct {
+	AgentCode       string
+	WorkflowVersion int
+	ThreadID        string
+	TriggerType     string
+	InputJSON       string
+	Provider        string
+	Model           string
+	IdempotencyKey  string
+}
+
+// normalizeCreateRunRequest 对创建请求进行 trim 和默认值规范化。
+func normalizeCreateRunRequest(req CreateRunRequest) (normalizedCreateRunRequest, error) {
+	inputJSON, err := canonicalizeJSON(req.Input)
+	if err != nil {
+		return normalizedCreateRunRequest{}, err
+	}
 	if inputJSON == "" {
 		inputJSON = "{}"
 	}
@@ -106,35 +158,250 @@ func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*model
 	if triggerType == "" {
 		triggerType = "api"
 	}
+	return normalizedCreateRunRequest{
+		AgentCode:       strings.TrimSpace(req.AgentCode),
+		WorkflowVersion: req.WorkflowVersion,
+		ThreadID:        strings.TrimSpace(req.ThreadID),
+		TriggerType:     triggerType,
+		InputJSON:       inputJSON,
+		Provider:        strings.TrimSpace(req.Provider),
+		Model:           strings.TrimSpace(req.Model),
+		IdempotencyKey:  strings.TrimSpace(req.IdempotencyKey),
+	}, nil
+}
 
-	run := &models.Run{
-		RunID:       newRunID(),
-		ThreadID:    strings.TrimSpace(req.ThreadID),
-		AgentID:     agent.ID,
-		WorkflowID:  workflow.ID,
-		UserID:      userID,
-		TriggerType: triggerType,
-		InputJSON:   inputJSON,
-		Status:      models.RunStatusPending,
-		Provider:    strings.TrimSpace(req.Provider),
-		Model:       strings.TrimSpace(req.Model),
+// canonicalizeJSON 将任意合法 JSON 归一化为稳定文本，便于请求哈希计算。
+func canonicalizeJSON(raw json.RawMessage) (string, error) {
+	inputJSON := strings.TrimSpace(string(raw))
+	if inputJSON == "" {
+		return "", nil
 	}
+	var payload any
+	if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil {
+		return "", err
+	}
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(normalized), nil
+}
 
-	if err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+// buildCreateRunRequestHash 使用规范化后的请求构造稳定哈希。
+func buildCreateRunRequestHash(userID uint64, req normalizedCreateRunRequest) (string, error) {
+	return hashPayload(map[string]any{
+		"operation":        models.RunIdempotencyOperationCreate,
+		"owner_user_id":    userID,
+		"agent_code":       req.AgentCode,
+		"workflow_version": req.WorkflowVersion,
+		"thread_id":        req.ThreadID,
+		"trigger_type":     req.TriggerType,
+		"input":            req.InputJSON,
+		"provider":         req.Provider,
+		"model":            req.Model,
+	})
+}
+
+// buildReplayRunRequestHash 使用 replay 源 run 构造稳定哈希。
+func buildReplayRunRequestHash(userID uint64, sourceRunID string) (string, error) {
+	return hashPayload(map[string]any{
+		"operation":     models.RunIdempotencyOperationReplay,
+		"owner_user_id": userID,
+		"source_run_id": sourceRunID,
+	})
+}
+
+// hashPayload 将任意结构体或 map 计算为 sha256 十六进制摘要。
+func hashPayload(payload any) (string, error) {
+	bs, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(bs)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// loadRunByRunID 在指定 DB 上按 run_id 读取 Run。
+func loadRunByRunID(tx *gorm.DB, runID string) (*models.Run, error) {
+	var run models.Run
+	if err := tx.Where("run_id = ?", strings.TrimSpace(runID)).First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errRunNotFound
+		}
+		return nil, err
+	}
+	return &run, nil
+}
+
+// loadRunIdempotency 在指定 DB 上按幂等键读取映射记录。
+func loadRunIdempotency(tx *gorm.DB, ownerUserID uint64, operation, idempotencyKey string) (*models.RunIdempotency, error) {
+	var record models.RunIdempotency
+	if err := tx.Where(
+		"owner_user_id = ? AND operation = ? AND idempotency_key = ?",
+		ownerUserID,
+		operation,
+		idempotencyKey,
+	).First(&record).Error; err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+// isUniqueConstraintError 判断是否命中了数据库唯一约束冲突。
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") || strings.Contains(msg, "unique constraint failed") || strings.Contains(msg, "unique violation")
+}
+
+// createQueuedRunWithIdempotency 在事务中创建 Run、回填幂等记录并推进到 queued。
+func createQueuedRunWithIdempotency(ctx context.Context, run *models.Run, idempotency *models.RunIdempotency) (*RunMutationResult, error) {
+	result := &RunMutationResult{}
+	err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if idempotency != nil {
+			if err := tx.Create(idempotency).Error; err != nil {
+				if !isUniqueConstraintError(err) {
+					return err
+				}
+				existing, loadErr := loadRunIdempotency(tx, idempotency.OwnerUserID, idempotency.Operation, idempotency.IdempotencyKey)
+				if loadErr != nil {
+					return loadErr
+				}
+				if existing.RequestHash != idempotency.RequestHash {
+					return errIdempotencyKeyReused
+				}
+				if strings.TrimSpace(existing.RunID) == "" {
+					return fmt.Errorf("idempotency record has empty run_id")
+				}
+				existingRun, loadErr := loadRunByRunID(tx, existing.RunID)
+				if loadErr != nil {
+					return loadErr
+				}
+				result.Run = existingRun
+				result.IdempotentHit = true
+				return nil
+			}
+		}
+
 		if err := tx.Create(run).Error; err != nil {
 			return err
 		}
-		return transitionRunStatus(ctx, tx, run, models.RunStatusQueued, "")
-	}); err != nil {
+		if err := transitionRunStatus(ctx, tx, run, models.RunStatusQueued, ""); err != nil {
+			return err
+		}
+		if idempotency != nil {
+			idempotency.RunID = run.RunID
+			if err := tx.Model(&models.RunIdempotency{}).Where("id = ?", idempotency.ID).Update("run_id", run.RunID).Error; err != nil {
+				return err
+			}
+		}
+		result.Run = run
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// claimRunForExecution 将 queued 状态的 Run 原子推进到 running。
+func claimRunForExecution(ctx context.Context, runID string) (*models.Run, bool, error) {
+	now := time.Now()
+	result := db.DB.WithContext(ctx).Model(&models.Run{}).
+		Where("run_id = ? AND status = ?", strings.TrimSpace(runID), models.RunStatusQueued).
+		Updates(map[string]any{
+			"status":        models.RunStatusRunning,
+			"started_at":    &now,
+			"error_message": "",
+		})
+	if result.Error != nil {
+		return nil, false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		run, err := fetchRunByRunID(ctx, runID)
+		if err != nil {
+			return nil, false, err
+		}
+		return run, false, nil
+	}
+	run, err := fetchRunByRunID(ctx, runID)
+	if err != nil {
+		return nil, false, err
+	}
+	run.Status = models.RunStatusRunning
+	run.StartedAt = &now
+	run.ErrorMessage = ""
+	return run, true, nil
+}
+
+func CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMutationResult, error) {
+	if err := ValidateCreateRunRequest(req); err != nil {
 		return nil, err
 	}
 
-	if err := publishRunExecuteEvent(ctx, run.RunID); err != nil {
-		_ = failRunWithMessage(ctx, run.RunID, fmt.Sprintf("dispatch run message failed: %v", err))
-		return run, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
+	normalized, err := normalizeCreateRunRequest(req)
+	if err != nil {
+		return nil, err
 	}
 
-	return run, nil
+	var agent models.Agent
+	if err := db.DB.WithContext(ctx).
+		Where("agent_code = ? AND status = ?", normalized.AgentCode, models.AgentStatusActive).
+		First(&agent).Error; err != nil {
+		return nil, fmt.Errorf("find active agent by code: %w", err)
+	}
+
+	workflow, err := resolveWorkflow(ctx, agent.ID, normalized.WorkflowVersion)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON); err != nil {
+		return nil, err
+	}
+
+	run := &models.Run{
+		RunID:       newRunID(),
+		ThreadID:    normalized.ThreadID,
+		AgentID:     agent.ID,
+		WorkflowID:  workflow.ID,
+		UserID:      userID,
+		TriggerType: normalized.TriggerType,
+		InputJSON:   normalized.InputJSON,
+		Status:      models.RunStatusPending,
+		Provider:    normalized.Provider,
+		Model:       normalized.Model,
+	}
+
+	var idempotency *models.RunIdempotency
+	if normalized.IdempotencyKey != "" {
+		requestHash, hashErr := buildCreateRunRequestHash(userID, normalized)
+		if hashErr != nil {
+			return nil, hashErr
+		}
+		idempotency = &models.RunIdempotency{
+			OwnerUserID:    userID,
+			Operation:      models.RunIdempotencyOperationCreate,
+			IdempotencyKey: normalized.IdempotencyKey,
+			RequestHash:    requestHash,
+		}
+	}
+
+	result, err := createQueuedRunWithIdempotency(ctx, run, idempotency)
+	if err != nil {
+		return nil, err
+	}
+	if result.IdempotentHit {
+		return result, nil
+	}
+
+	if err := publishRunExecuteEvent(ctx, result.Run.RunID); err != nil {
+		_ = failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch run message failed: %v", err))
+		return result, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
+	}
+
+	return result, nil
 }
 
 func GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
@@ -168,65 +435,71 @@ func GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID 
 	return steps, nil
 }
 
-func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
+func ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, idempotencyKey string) (*RunMutationResult, error) {
 	origin, err := GetRunByRunID(ctx, userID, isAdmin, runID)
 	if err != nil {
 		return nil, err
 	}
-	req := CreateRunRequest{
-		AgentCode:       "",
-		WorkflowVersion: 0,
-		ThreadID:        origin.ThreadID,
-		TriggerType:     "replay",
-		Input:           json.RawMessage(origin.InputJSON),
-		Provider:        origin.Provider,
-		Model:           origin.Model,
-	}
 
-	// 回放走 agent_id + workflow_id 直建，避免 workflow 版本漂移影响重放。
 	clone := &models.Run{
 		RunID:       newRunID(),
-		ThreadID:    req.ThreadID,
+		ThreadID:    origin.ThreadID,
 		AgentID:     origin.AgentID,
 		WorkflowID:  origin.WorkflowID,
 		UserID:      userID,
-		TriggerType: req.TriggerType,
-		InputJSON:   strings.TrimSpace(string(req.Input)),
+		TriggerType: "replay",
+		InputJSON:   strings.TrimSpace(origin.InputJSON),
 		Status:      models.RunStatusPending,
-		Provider:    req.Provider,
-		Model:       req.Model,
+		Provider:    origin.Provider,
+		Model:       origin.Model,
 	}
-
 	if clone.InputJSON == "" {
 		clone.InputJSON = "{}"
 	}
 
-	if err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(clone).Error; err != nil {
-			return err
+	var idempotency *models.RunIdempotency
+	trimmedKey := strings.TrimSpace(idempotencyKey)
+	if trimmedKey != "" {
+		requestHash, hashErr := buildReplayRunRequestHash(userID, origin.RunID)
+		if hashErr != nil {
+			return nil, hashErr
 		}
-		return transitionRunStatus(ctx, tx, clone, models.RunStatusQueued, "")
-	}); err != nil {
+		idempotency = &models.RunIdempotency{
+			OwnerUserID:    userID,
+			Operation:      models.RunIdempotencyOperationReplay,
+			IdempotencyKey: trimmedKey,
+			RequestHash:    requestHash,
+			SourceRunID:    origin.RunID,
+		}
+	}
+
+	result, err := createQueuedRunWithIdempotency(ctx, clone, idempotency)
+	if err != nil {
 		return nil, err
 	}
-	if err := publishRunExecuteEvent(ctx, clone.RunID); err != nil {
-		_ = failRunWithMessage(ctx, clone.RunID, fmt.Sprintf("dispatch replay message failed: %v", err))
-		return clone, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
+	if result.IdempotentHit {
+		return result, nil
 	}
-	return clone, nil
+
+	if err := publishRunExecuteEvent(ctx, result.Run.RunID); err != nil {
+		_ = failRunWithMessage(ctx, result.Run.RunID, fmt.Sprintf("dispatch replay message failed: %v", err))
+		return result, fmt.Errorf("%w: %v", errRunDispatchFailed, err)
+	}
+	return result, nil
 }
 
 func HandleRunExecuteMessage(ctx context.Context, msg kafka.RunExecuteMessage) error {
-	run, err := fetchRunByRunID(ctx, msg.RunID)
+	run, claimed, err := claimRunForExecution(ctx, msg.RunID)
 	if err != nil {
 		return err
 	}
-	if run.Status != models.RunStatusQueued {
+	if !claimed {
 		return nil
 	}
 
 	var workflow models.Workflow
 	if err := db.DB.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
+		_ = failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 
@@ -243,9 +516,6 @@ func HandleRunExecuteMessage(ctx context.Context, msg kafka.RunExecuteMessage) e
 	}
 
 	if err := db.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := transitionRunStatus(ctx, tx, run, models.RunStatusRunning, ""); err != nil {
-			return err
-		}
 		for _, node := range order {
 			if err := tx.Model(&models.Run{}).
 				Where("run_id = ?", run.RunID).
@@ -258,6 +528,7 @@ func HandleRunExecuteMessage(ctx context.Context, msg kafka.RunExecuteMessage) e
 		}
 		return transitionRunStatus(ctx, tx, run, models.RunStatusSuccess, "")
 	}); err != nil {
+		_ = failRunWithMessage(ctx, run.RunID, err.Error())
 		return err
 	}
 	return nil
@@ -486,14 +757,7 @@ func resolveWorkflow(ctx context.Context, agentID uint64, version int) (*models.
 }
 
 func fetchRunByRunID(ctx context.Context, runID string) (*models.Run, error) {
-	var run models.Run
-	if err := db.DB.WithContext(ctx).Where("run_id = ?", strings.TrimSpace(runID)).First(&run).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errRunNotFound
-		}
-		return nil, err
-	}
-	return &run, nil
+	return loadRunByRunID(db.DB.WithContext(ctx), runID)
 }
 
 func failRunWithMessage(ctx context.Context, runID, msg string) error {

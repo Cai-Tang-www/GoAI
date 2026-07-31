@@ -26,3 +26,10 @@ func decodeEnvelope(t *testing.T, w *httptest.ResponseRecorder) apiEnvelope {
 	}
 	return env
 }
+
+// uniqueSQLiteDSN 为每个测试生成独立的内存库 DSN，避免整包执行时相互污染。
+func uniqueSQLiteDSN(t *testing.T) string {
+	t.Helper()
+	name := strings.NewReplacer("/", "_", " ", "_", ":", "_").Replace(t.Name())
+	return "file:" + name + "?mode=memory&cache=shared"
+}

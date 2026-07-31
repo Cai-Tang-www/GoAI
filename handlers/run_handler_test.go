@@ -21,11 +21,11 @@ import (
 
 func setupRunIntegrationDB(t *testing.T) {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open("file:run_handler_test?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(uniqueSQLiteDSN(t)), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	db.DB = gdb
@@ -149,5 +149,159 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	forbiddenEnv := decodeEnvelope(t, forbiddenW)
 	if forbiddenEnv.Code != "AUTH_FORBIDDEN" {
 		t.Fatalf("unexpected forbidden code: %s body=%s", forbiddenEnv.Code, forbiddenW.Body.String())
+	}
+}
+
+func TestCreateRunValidationError(t *testing.T) {
+	setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token failed: %v", err)
+	}
+
+	router := routers.InitRouter()
+	invalidBody := map[string]any{
+		"agent_code":       "",
+		"trigger_type":     "bad-trigger",
+		"workflow_version": -1,
+	}
+	raw, _ := json.Marshal(invalidBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w)
+	if env.Code != "VALIDATION_FAILED" {
+		t.Fatalf("unexpected code: %s body=%s", env.Code, w.Body.String())
+	}
+}
+
+func TestRunPathValidationError(t *testing.T) {
+	setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token failed: %v", err)
+	}
+
+	router := routers.InitRouter()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/%20", nil)
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	env := decodeEnvelope(t, w)
+	if env.Code != "VALIDATION_FAILED" {
+		t.Fatalf("unexpected code: %s body=%s", env.Code, w.Body.String())
+	}
+}
+
+func TestRunIdempotencyCreateAndReplay(t *testing.T) {
+	setupRunIntegrationDB(t)
+	user1, _, _, _ := seedRunIntegrationData(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
+
+	services.SetPublishRunExecuteEventForTest(func(ctx context.Context, runID string) error { return nil })
+	defer services.SetPublishRunExecuteEventForTest(nil)
+
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token failed: %v", err)
+	}
+	router := routers.InitRouter()
+
+	createBody := map[string]any{
+		"agent_code":   "agent_api",
+		"trigger_type": "api",
+		"input": map[string]any{
+			"prompt": "hello",
+		},
+	}
+	raw, _ := json.Marshal(createBody)
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstReq.Header.Set("Authorization", "Bearer "+token1)
+	firstReq.Header.Set("Idempotency-Key", "create-key-1")
+	firstW := httptest.NewRecorder()
+	router.ServeHTTP(firstW, firstReq)
+	if firstW.Code != http.StatusAccepted {
+		t.Fatalf("first create expected 202, got %d body=%s", firstW.Code, firstW.Body.String())
+	}
+	firstEnv := decodeEnvelope(t, firstW)
+	var firstResp map[string]any
+	if err := json.Unmarshal(firstEnv.Data, &firstResp); err != nil {
+		t.Fatalf("parse first create data failed: %v", err)
+	}
+	runID, _ := firstResp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("first create run_id empty")
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	secondReq.Header.Set("Content-Type", "application/json")
+	secondReq.Header.Set("Authorization", "Bearer "+token1)
+	secondReq.Header.Set("Idempotency-Key", "create-key-1")
+	secondW := httptest.NewRecorder()
+	router.ServeHTTP(secondW, secondReq)
+	if secondW.Code != http.StatusOK {
+		t.Fatalf("second create expected 200, got %d body=%s", secondW.Code, secondW.Body.String())
+	}
+	secondEnv := decodeEnvelope(t, secondW)
+	if secondEnv.Code != "OK" {
+		t.Fatalf("unexpected second create code: %s body=%s", secondEnv.Code, secondW.Body.String())
+	}
+	var secondResp map[string]any
+	if err := json.Unmarshal(secondEnv.Data, &secondResp); err != nil {
+		t.Fatalf("parse second create data failed: %v", err)
+	}
+	if secondResp["run_id"] != runID {
+		t.Fatalf("expected same run_id, got %v and %v", runID, secondResp["run_id"])
+	}
+
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/replay", nil)
+	replayReq.Header.Set("Authorization", "Bearer "+token1)
+	replayReq.Header.Set("Idempotency-Key", "replay-key-1")
+	replayW := httptest.NewRecorder()
+	router.ServeHTTP(replayW, replayReq)
+	if replayW.Code != http.StatusAccepted {
+		t.Fatalf("first replay expected 202, got %d body=%s", replayW.Code, replayW.Body.String())
+	}
+	replayEnv := decodeEnvelope(t, replayW)
+	var replayResp map[string]any
+	if err := json.Unmarshal(replayEnv.Data, &replayResp); err != nil {
+		t.Fatalf("parse replay data failed: %v", err)
+	}
+	replayRunID, _ := replayResp["run_id"].(string)
+	if replayRunID == "" {
+		t.Fatal("first replay run_id empty")
+	}
+
+	replayReq2 := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/replay", nil)
+	replayReq2.Header.Set("Authorization", "Bearer "+token1)
+	replayReq2.Header.Set("Idempotency-Key", "replay-key-1")
+	replayW2 := httptest.NewRecorder()
+	router.ServeHTTP(replayW2, replayReq2)
+	if replayW2.Code != http.StatusOK {
+		t.Fatalf("second replay expected 200, got %d body=%s", replayW2.Code, replayW2.Body.String())
+	}
+	replayEnv2 := decodeEnvelope(t, replayW2)
+	var replayResp2 map[string]any
+	if err := json.Unmarshal(replayEnv2.Data, &replayResp2); err != nil {
+		t.Fatalf("parse second replay data failed: %v", err)
+	}
+	if replayResp2["run_id"] != replayRunID {
+		t.Fatalf("expected same replay run_id, got %v and %v", replayRunID, replayResp2["run_id"])
 	}
 }

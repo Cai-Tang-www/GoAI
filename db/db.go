@@ -14,21 +14,21 @@ import (
 // DB 全局数据库连接实例
 var DB *gorm.DB
 
-// InitDB 初始化MySQL数据库连接
+// InitDB 初始化 MySQL 数据库连接并执行表迁移。
 func InitDB() {
-	dsn := fmt.Sprintf("%s:%s@tcp(localhost:3306)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		"root", // 你的 MySQL 用户名
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		config.AppConfig.MySQLUser,
 		config.AppConfig.MySQLRootPassword,
+		config.AppConfig.MySQLHost,
+		config.AppConfig.MySQLPort,
 		config.AppConfig.MySQLDatabase,
 	)
 	var err error
-	//打开gorm连接
 	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// 自动迁移数据库表结构（Task 体系已替换为 Runs 体系）
 	err = DB.AutoMigrate(
 		&models.User{},
 		&models.Role{},
@@ -39,6 +39,7 @@ func InitDB() {
 		&models.Workflow{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunIdempotency{},
 	)
 	if err != nil {
 		log.Fatalf("Failed to auto migrate database: %v", err)

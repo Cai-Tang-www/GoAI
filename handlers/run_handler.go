@@ -10,10 +10,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const idempotencyKeyHeader = "Idempotency-Key"
+
+// CreateRun 处理创建 Run 请求，并在进入 service 前完成基础参数校验。
 func CreateRun(c *gin.Context) {
 	var req services.CreateRunRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid run payload", nil))
+		return
+	}
+	req.IdempotencyKey = c.GetHeader(idempotencyKeyHeader)
+	if appErr := validateIdempotencyKey(req.IdempotencyKey); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	if appErr := validateCreateRunRequest(&req); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
 		return
 	}
 
@@ -23,8 +35,12 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	run, err := services.CreateRun(c.Request.Context(), userID, req)
+	result, err := services.CreateRun(c.Request.Context(), userID, req)
 	if err != nil {
+		if errors.Is(err, services.ErrIdempotencyKeyReused()) {
+			middlewares.AbortWithError(c, middlewares.WrapError(err))
+			return
+		}
 		if errors.Is(err, services.ErrRunDispatchFailed()) {
 			middlewares.AbortWithError(c, middlewares.WrapError(err))
 			return
@@ -33,12 +49,17 @@ func CreateRun(c *gin.Context) {
 		return
 	}
 
-	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
-		RunID:  run.RunID,
-		Status: run.Status,
+	status := http.StatusAccepted
+	if result.IdempotentHit {
+		status = http.StatusOK
+	}
+	middlewares.Success(c, status, services.CreateRunResponse{
+		RunID:  result.Run.RunID,
+		Status: result.Run.Status,
 	}, "success")
 }
 
+// GetRun 处理 Run 详情查询并映射 service 层返回的统一错误。
 func GetRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
@@ -46,6 +67,10 @@ func GetRun(c *gin.Context) {
 		return
 	}
 	runID := c.Param("run_id")
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
 	run, err := services.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
@@ -54,6 +79,7 @@ func GetRun(c *gin.Context) {
 	middlewares.Success(c, http.StatusOK, run, "success")
 }
 
+// ListRunSteps 处理 Run 步骤查询并保证 owner 与 admin 的访问语义一致。
 func ListRunSteps(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
@@ -61,6 +87,10 @@ func ListRunSteps(c *gin.Context) {
 		return
 	}
 	runID := c.Param("run_id")
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
 	steps, err := services.GetRunStepsByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
@@ -69,6 +99,7 @@ func ListRunSteps(c *gin.Context) {
 	middlewares.Success(c, http.StatusOK, steps, "success")
 }
 
+// ReplayRun 处理 Run 回放请求，并复用 service 层的稳定回放逻辑。
 func ReplayRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
 	if !ok {
@@ -76,14 +107,27 @@ func ReplayRun(c *gin.Context) {
 		return
 	}
 	runID := c.Param("run_id")
-	newRun, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID)
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	idempotencyKey := c.GetHeader(idempotencyKeyHeader)
+	if appErr := validateIdempotencyKey(idempotencyKey); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	result, err := services.ReplayRun(c.Request.Context(), userID, isAdmin, runID, idempotencyKey)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return
 	}
-	middlewares.Success(c, http.StatusAccepted, services.CreateRunResponse{
-		RunID:  newRun.RunID,
-		Status: newRun.Status,
+	status := http.StatusAccepted
+	if result.IdempotentHit {
+		status = http.StatusOK
+	}
+	middlewares.Success(c, status, services.CreateRunResponse{
+		RunID:  result.Run.RunID,
+		Status: result.Run.Status,
 	}, "success")
 }
 

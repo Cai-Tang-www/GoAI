@@ -21,7 +21,7 @@ func setupRunTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	db.DB = gdb
@@ -65,7 +65,7 @@ func TestCreateRunSuccessAndQueued(t *testing.T) {
 		return nil
 	}
 
-	run, err := CreateRun(context.Background(), 1, CreateRunRequest{
+	result, err := CreateRun(context.Background(), 1, CreateRunRequest{
 		AgentCode:   "agent_test",
 		TriggerType: "api",
 		Input:       []byte(`{"prompt":"hello"}`),
@@ -73,11 +73,37 @@ func TestCreateRunSuccessAndQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run failed: %v", err)
 	}
-	if run.Status != models.RunStatusQueued {
-		t.Fatalf("expected queued status, got %s", run.Status)
+	if result.IdempotentHit {
+		t.Fatal("expected first create to miss idempotency")
 	}
-	if run.RunID == "" || publishedRunID != run.RunID {
-		t.Fatalf("publisher not called with expected run id: run=%s published=%s", run.RunID, publishedRunID)
+	if result.Run.Status != models.RunStatusQueued {
+		t.Fatalf("expected queued status, got %s", result.Run.Status)
+	}
+	if result.Run.RunID == "" || publishedRunID != result.Run.RunID {
+		t.Fatalf("publisher not called with expected run id: run=%s published=%s", result.Run.RunID, publishedRunID)
+	}
+}
+
+func TestCreateRunValidation(t *testing.T) {
+	if err := ValidateCreateRunRequest(CreateRunRequest{AgentCode: "", WorkflowVersion: -1, TriggerType: "bad"}); err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if err := ValidateCreateRunRequest(CreateRunRequest{AgentCode: "agent", TriggerType: "api", Input: []byte(`{"prompt":"ok"}`)}); err != nil {
+		t.Fatalf("expected validation success, got %v", err)
+	}
+}
+
+func TestCreateRunRejectsInvalidInputJSON(t *testing.T) {
+	setupRunTestDB(t)
+	seedAgentWorkflow(t)
+
+	_, err := CreateRun(context.Background(), 1, CreateRunRequest{
+		AgentCode:   "agent_test",
+		TriggerType: "api",
+		Input:       []byte(`{"prompt":`),
+	})
+	if err == nil {
+		t.Fatal("expected invalid json error, got nil")
 	}
 }
 
@@ -91,7 +117,7 @@ func TestCreateRunDispatchFailMarksRunFailed(t *testing.T) {
 		return errors.New("kafka down")
 	}
 
-	run, err := CreateRun(context.Background(), 1, CreateRunRequest{
+	result, err := CreateRun(context.Background(), 1, CreateRunRequest{
 		AgentCode:   "agent_test",
 		TriggerType: "api",
 		Input:       []byte(`{"prompt":"hello"}`),
@@ -100,11 +126,73 @@ func TestCreateRunDispatchFailMarksRunFailed(t *testing.T) {
 		t.Fatal("expected dispatch error but got nil")
 	}
 	var saved models.Run
-	if dbErr := db.DB.Where("run_id = ?", run.RunID).First(&saved).Error; dbErr != nil {
+	if dbErr := db.DB.Where("run_id = ?", result.Run.RunID).First(&saved).Error; dbErr != nil {
 		t.Fatalf("query run failed: %v", dbErr)
 	}
 	if saved.Status != models.RunStatusFailed {
 		t.Fatalf("expected run failed status, got %s", saved.Status)
+	}
+}
+
+func TestCreateRunIdempotencyReturnsSameRun(t *testing.T) {
+	setupRunTestDB(t)
+	seedAgentWorkflow(t)
+
+	origPublisher := publishRunExecuteEvent
+	defer func() { publishRunExecuteEvent = origPublisher }()
+	publishRunExecuteEvent = func(ctx context.Context, runID string) error {
+		return nil
+	}
+
+	req := CreateRunRequest{
+		AgentCode:      "agent_test",
+		TriggerType:    "api",
+		Input:          []byte(`{"prompt":"hello"}`),
+		IdempotencyKey: "create-key-1",
+	}
+	first, err := CreateRun(context.Background(), 1, req)
+	if err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+	second, err := CreateRun(context.Background(), 1, req)
+	if err != nil {
+		t.Fatalf("second create failed: %v", err)
+	}
+	if !second.IdempotentHit {
+		t.Fatal("expected second create to hit idempotency")
+	}
+	if second.Run.RunID != first.Run.RunID {
+		t.Fatalf("expected same run id, got %s and %s", first.Run.RunID, second.Run.RunID)
+	}
+}
+
+func TestCreateRunIdempotencyRejectsDifferentRequest(t *testing.T) {
+	setupRunTestDB(t)
+	seedAgentWorkflow(t)
+
+	origPublisher := publishRunExecuteEvent
+	defer func() { publishRunExecuteEvent = origPublisher }()
+	publishRunExecuteEvent = func(ctx context.Context, runID string) error {
+		return nil
+	}
+
+	firstReq := CreateRunRequest{
+		AgentCode:      "agent_test",
+		TriggerType:    "api",
+		Input:          []byte(`{"prompt":"hello"}`),
+		IdempotencyKey: "create-key-2",
+	}
+	if _, err := CreateRun(context.Background(), 1, firstReq); err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+	secondReq := firstReq
+	secondReq.Input = []byte(`{"prompt":"changed"}`)
+	_, err := CreateRun(context.Background(), 1, secondReq)
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+	if !errors.Is(err, ErrIdempotencyKeyReused()) {
+		t.Fatalf("expected idempotency reuse error, got %v", err)
 	}
 }
 
@@ -148,5 +236,145 @@ func TestHandleRunExecuteMessageSuccess(t *testing.T) {
 	}
 	if len(steps) != 2 {
 		t.Fatalf("expected 2 steps, got %d", len(steps))
+	}
+}
+
+func TestClaimRunForExecutionIsAtomic(t *testing.T) {
+	setupRunTestDB(t)
+	agent, workflow := seedAgentWorkflow(t)
+
+	run := models.Run{
+		RunID:       "run_claim_atomic",
+		ThreadID:    "thread-claim",
+		AgentID:     agent.ID,
+		WorkflowID:  workflow.ID,
+		UserID:      1,
+		TriggerType: "api",
+		InputJSON:   `{"prompt":"hello"}`,
+		Status:      models.RunStatusQueued,
+	}
+	if err := db.DB.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	first, claimed, err := claimRunForExecution(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("first claim failed: %v", err)
+	}
+	if !claimed || first.Status != models.RunStatusRunning {
+		t.Fatalf("expected first claim to succeed, got claimed=%v status=%s", claimed, first.Status)
+	}
+
+	second, claimed, err := claimRunForExecution(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("second claim failed: %v", err)
+	}
+	if claimed {
+		t.Fatalf("expected second claim to fail, got run=%+v", second)
+	}
+	if second.Status != models.RunStatusRunning {
+		t.Fatalf("expected claimed run to remain running, got %s", second.Status)
+	}
+}
+
+func TestHandleRunExecuteMessageDuplicateIsNoop(t *testing.T) {
+	setupRunTestDB(t)
+	agent, workflow := seedAgentWorkflow(t)
+
+	run := models.Run{
+		RunID:       "run_duplicate_noop",
+		ThreadID:    "thread-dup",
+		AgentID:     agent.ID,
+		WorkflowID:  workflow.ID,
+		UserID:      1,
+		TriggerType: "api",
+		InputJSON:   `{"prompt":"hello"}`,
+		Status:      models.RunStatusQueued,
+	}
+	if err := db.DB.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	origBackoffs := stepRetryBackoffs
+	stepRetryBackoffs = []time.Duration{0, 0, 0}
+	defer func() { stepRetryBackoffs = origBackoffs }()
+
+	if err := HandleRunExecuteMessage(context.Background(), kafka.RunExecuteMessage{RunID: run.RunID}); err != nil {
+		t.Fatalf("first handle failed: %v", err)
+	}
+	if err := HandleRunExecuteMessage(context.Background(), kafka.RunExecuteMessage{RunID: run.RunID}); err != nil {
+		t.Fatalf("second handle should be noop, got %v", err)
+	}
+
+	var steps []models.RunStep
+	if err := db.DB.Where("run_id = ?", run.RunID).Find(&steps).Error; err != nil {
+		t.Fatalf("query steps failed: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("expected duplicate consume to keep single execution, got %d steps", len(steps))
+	}
+}
+
+func TestHandleRunExecuteMessageFailsRunWhenTransactionErrorsAfterClaim(t *testing.T) {
+	setupRunTestDB(t)
+	agent, workflow := seedAgentWorkflow(t)
+
+	run := models.Run{
+		RunID:       "run_claim_tx_error",
+		ThreadID:    "thread-tx-error",
+		AgentID:     agent.ID,
+		WorkflowID:  workflow.ID,
+		UserID:      1,
+		TriggerType: "api",
+		InputJSON:   `{"prompt":"hello"}`,
+		Status:      models.RunStatusQueued,
+	}
+	if err := db.DB.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+
+	callbackName := "test:run-current-step-update-error"
+	injectOnce := true
+	if err := db.DB.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if !injectOnce || tx.Statement == nil || tx.Statement.Schema == nil {
+			return
+		}
+		if tx.Statement.Schema.Name != "Run" {
+			return
+		}
+		updates, ok := tx.Statement.Dest.(map[string]any)
+		if !ok {
+			return
+		}
+		if _, exists := updates["current_step"]; !exists {
+			return
+		}
+		injectOnce = false
+		tx.AddError(errors.New("forced current_step update failure"))
+	}); err != nil {
+		t.Fatalf("register callback failed: %v", err)
+	}
+	defer func() {
+		_ = db.DB.Callback().Update().Remove(callbackName)
+	}()
+
+	origBackoffs := stepRetryBackoffs
+	stepRetryBackoffs = []time.Duration{0, 0, 0}
+	defer func() { stepRetryBackoffs = origBackoffs }()
+
+	err := HandleRunExecuteMessage(context.Background(), kafka.RunExecuteMessage{RunID: run.RunID})
+	if err == nil {
+		t.Fatal("expected transaction error, got nil")
+	}
+
+	var saved models.Run
+	if err := db.DB.Where("run_id = ?", run.RunID).First(&saved).Error; err != nil {
+		t.Fatalf("query run failed: %v", err)
+	}
+	if saved.Status != models.RunStatusFailed {
+		t.Fatalf("expected run failed after transaction error, got %s", saved.Status)
+	}
+	if !strings.Contains(saved.ErrorMessage, "forced current_step update failure") {
+		t.Fatalf("expected error message to be persisted, got %q", saved.ErrorMessage)
 	}
 }
