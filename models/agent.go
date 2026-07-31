@@ -7,7 +7,7 @@ const (
 	AgentStatusInactive = "inactive"
 )
 
-// Agent 代表一个可执行编排实体。
+// Agent 表示可注册、可发现并通过协议参与协作的执行主体。
 type Agent struct {
 	ID          uint64    `gorm:"primaryKey;autoIncrement"`
 	AgentCode   string    `gorm:"size:64;uniqueIndex;not null"`

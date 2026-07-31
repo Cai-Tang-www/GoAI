@@ -45,12 +45,13 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 - `Message`：Thread 内的用户、Agent、Tool 或系统通信单元
 - `Run`：一次完整业务回合，可由 AG-UI、A2A 或系统调度触发
 - `RunStep`：Run 内部一个可观测执行步骤
-- `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录
+- `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录，关联 Parent Run 与唯一 Child Run
+- `AgentEndpoint`：Agent 的 A2A 协议入口，通过 `local / https` transport 区分本地与远程传输
+- `AgentCapability`：Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力
 - `Workflow / Graph`：某个 Agent 的执行模板或能力，不代表整个平台
 - `Loop`：用于 Trace、Replay、Eval 和成本分析的执行片段
 
 ## 目标主链路
-
 ```text
 AG-UI / A2A Request
         -> Protocol Gateway
@@ -105,9 +106,9 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - HTTP / SSE / Kafka / Worker 优雅关闭
 - 旧 Task 模型、空包和误导性文件名清理
 - db / redis / kafka 显式依赖装配
+- `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
 
 ### 在建
-- `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 领域模型
 - AG-UI Gateway
 - A2A Gateway 与 transport
 - 多 Agent Runtime、父子 Run 与结果聚合

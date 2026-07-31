@@ -290,62 +290,73 @@ A2A 的约束：
 
 ### 11.2 agent_endpoints
 
-表示 Agent 的协议入口或回调地址。
+表示 Agent 对平台暴露的协议入口。V1 的 Agent 协作协议固定为 `a2a`，传输方式通过独立字段区分，避免把进程内调用误建模成另一套协议。
 
-关键字段建议：
+关键字段：
 - `agent_id`
-- `protocol` (`agui` / `a2a` / `mcp` / `internal`)
-- `base_url`
-- `path`
+- `endpoint_code`，在同一 Agent 内唯一
+- `protocol`，V1 为 `a2a`
+- `transport` (`local` / `https`)
+- `address`
 - `auth_type`
-- `auth_config_json`
-- `timeout_ms`
-- `is_active`
+- `credential_ref`，只保存凭据引用，不保存真实密钥
+- `config_json`
+- `status`
+- `last_healthy_at`
 
 ### 11.3 agent_capabilities
 
-表示 Agent 支持的能力，例如 graph、tool、llm、delegation。
+表示 Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力。能力可以由 Workflow、Tool 或自定义执行器实现，但 Provider 不作为平台主能力对外暴露。
 
-关键字段建议：
+关键字段：
 - `agent_id`
-- `capability_code`
-- `capability_type`
+- `capability_code`，在同一 Agent 内唯一
+- `name` / `description`
+- `capability_type` (`workflow` / `tool` / `custom`)
+- `workflow_id`，Workflow 类型能力可选关联具体编排定义
+- `version`
+- `input_schema_json` / `output_schema_json`
 - `config_json`
-- `is_active`
+- `status`
 
 ### 11.4 threads
 
-一次会话或协作上下文。
+一次用户会话或多 Agent 协作上下文，是 Message、Run 与 Delegation 的顶层容器。
 
-关键字段建议：
+关键字段：
 - `thread_id`
-- `user_id`
-- `source_protocol`
+- `owner_user_id`
+- `title`
 - `status`
 - `metadata_json`
-- `last_run_id`
+
+Thread 不直接保存 AG-UI/A2A 的协议字段；协议来源由 Gateway 映射为内部命令，必要的扩展信息进入 metadata。
 
 ### 11.5 messages
 
-Thread 内的消息单元。
+Thread 内的稳定通信单元，可以表示用户输入、Agent 委派、Agent 结果、工具结果、状态更新或系统事件。
 
-关键字段建议：
+关键字段：
 - `message_id`
 - `thread_id`
 - `run_id`
-- `sender_type`
-- `sender_agent_id`
-- `receiver_agent_id`
-- `protocol`
+- `delegation_id`
+- `parent_message_id`
+- `sender_type` / `sender_id`
+- `receiver_type` / `receiver_id`
+- `sender_id / receiver_id` 的标识符命名空间由对应 type 决定
 - `message_type`
-- `content_json`
+- `content_type` / `content_json`
+- `metadata_json`
 - `status`
+
+Message 不直接复制外部 AG-UI/A2A 消息结构，协议层需要先完成输入与事件映射。
 
 ### 11.6 runs
 
-一次完整业务回合。
+一次完整业务回合，可由 AG-UI 用户请求、A2A 委派或系统调度触发，不等价于一次 Workflow 节点调用。
 
-关键字段建议：
+关键字段：
 - `run_id`
 - `thread_id`
 - `agent_id`
@@ -360,25 +371,40 @@ Thread 内的消息单元。
 
 ### 11.7 run_steps
 
-Run 中每个执行步骤的记录。
+Run 中每个可观测执行步骤及其重试 attempt。RunStep 可以记录 Workflow 节点、Tool、LLM 或 Delegation 等执行片段，但不能替代 Child Run。
 
 ### 11.8 delegations
 
-一个 Agent 把任务交给另一个 Agent 的协作记录。
+一个 Agent 通过 Runtime 把子任务交给另一个 Agent 的协作记录。每条 Delegation 必须连接一个 Parent Run 与唯一 Child Run，并关联请求 Message；完成后再关联结果 Message。
 
-关键字段建议：
+关键字段：
 - `delegation_id`
 - `thread_id`
 - `parent_run_id`
+- `child_run_id`
 - `source_agent_id`
 - `target_agent_id`
-- `trigger_message_id`
+- `capability_code`
+- `request_message_id`
+- `result_message_id`
 - `status`
-- `input_json`
-- `output_json`
+- `input_json` / `output_json`
 - `error_message`
+- `started_at` / `finished_at`
 
-### 11.9 loop_records / loop_eval（后续）
+### 11.9 实体关系
+
+- `Agent 1:N Workflow / AgentEndpoint / AgentCapability / Run`
+- `Thread 1:N Message / Run / Delegation`
+- `Workflow 1:N Run`，Workflow 类型的 AgentCapability 可通过 `workflow_id` 指向其执行定义
+- `Run 1:N RunStep`
+- `Delegation N:1 Thread`，并通过 `parent_run_id -> child_run_id` 表达一次跨 Agent 协作
+- `Delegation N:1 SourceAgent / TargetAgent`，请求和结果分别通过 Message 形成可回放通信记录
+- `Message` 可关联 Run、Delegation 和父 Message，用于还原用户、Agent、Tool 与 Runtime 的通信顺序
+
+首版使用稳定公开 ID、索引和唯一约束表达关联，不启用级联删除。Runtime/Service 层负责跨对象一致性与状态迁移，避免数据库迁移承担业务协调。
+
+### 11.10 loop_records / loop_eval（后续）
 
 用于 Trace、Replay、Eval、Prompt 快照和成本观测。
 

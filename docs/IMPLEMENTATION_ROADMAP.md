@@ -25,12 +25,11 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - `db / redis / kafka` 已从全局可变单例收口为构造实例并由 `main` 显式装配
 - 已为协议 gateway 与 runtime 演进建立可测试的依赖边界
 
-### 4. 内部统一领域模型
-- `threads`
-- `messages`
-- `delegations`
-- `agent_endpoints`
-- `agent_capabilities`
+### 4. 内部统一领域模型（已完成，Issue #18）
+- `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 已建模并纳入迁移
+- Delegation 明确关联 Parent Run、唯一 Child Run、请求 Message 与结果 Message
+- Endpoint 使用统一 A2A 协议语义，通过 `local / https` transport 区分传输方式
+- 内部模型不直接复制 AG-UI/A2A 外部协议字段
 
 ### 5. AG-UI Gateway
 - 基础协议接入
