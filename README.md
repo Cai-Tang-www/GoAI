@@ -153,3 +153,23 @@ MODEL_NAME_DEFAULT_DEEPSEEK=deepseek-chat
 2. `worker` 消费消息后执行工作流节点，逐步写入 `run_steps`
 3. 节点执行完成后更新 `runs` 终态（`success/failed`）
 4. `GET /api/runs/:run_id` 与 `GET /api/runs/:run_id/steps` 提供查询与回放支撑
+
+## 开发质量门禁
+
+所有提交到 `main` 的 Pull Request 都会执行 GitHub Actions CI，包含以下检查：
+
+- `go test -count=1 ./...`：运行全量 Go 测试并禁用测试缓存
+- `go vet ./...`：执行 Go 静态检查
+- `go build ./...`：验证所有包可构建
+- `docker build .`：验证生产镜像能够完成多阶段构建
+
+提交前应先对本次修改过的 Go 文件执行 `gofmt -w`，再运行：
+
+```bash
+go test -count=1 ./...
+go vet ./...
+go build ./...
+docker build -t goai:local .
+```
+
+CI 任一检查失败都不应合并。Docker 镜像使用 Go 1.24.2 构建，并以非 root 用户运行；运行时配置继续通过环境变量注入，镜像内不包含本地 `.env` 或密钥。
