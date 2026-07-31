@@ -112,10 +112,10 @@ func TestUnifiedDomainModelUniqueConstraints(t *testing.T) {
 
 	t.Run("agent endpoint code", func(t *testing.T) {
 		assertDuplicateRejected(t,
-			&models.AgentEndpoint{AgentID: 1, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportLocal, Address: "local://agent-1", Status: models.AgentEndpointStatusActive},
+			&models.AgentEndpoint{AgentID: 1, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:8080/api/a2a", Status: models.AgentEndpointStatusActive},
 			&models.AgentEndpoint{AgentID: 1, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTPS, Address: "https://agent.example/a2a", Status: models.AgentEndpointStatusActive},
 		)
-		if err := database.Create(&models.AgentEndpoint{AgentID: 2, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportLocal, Address: "local://agent-2", Status: models.AgentEndpointStatusActive}).Error; err != nil {
+		if err := database.Create(&models.AgentEndpoint{AgentID: 2, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:8081/api/a2a", Status: models.AgentEndpointStatusActive}).Error; err != nil {
 			t.Fatalf("same endpoint code on another agent should be allowed: %v", err)
 		}
 	})
