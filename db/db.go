@@ -51,3 +51,15 @@ func InitDB() {
 
 	log.Println("Database connected successfully!")
 }
+
+// Close 关闭 GORM 底层的数据库连接池。
+func Close() error {
+	if DB == nil {
+		return nil
+	}
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return fmt.Errorf("getting database connection pool: %w", err)
+	}
+	return sqlDB.Close()
+}

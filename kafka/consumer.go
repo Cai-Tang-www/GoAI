@@ -44,6 +44,10 @@ func StartConsumer(ctx context.Context) {
 		default:
 			message, err := Consumer.ReadMessage(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					log.Printf("Kafka 消费者停止消费 reason=%v", ctx.Err())
+					return
+				}
 				log.Printf("kafka read failed trace_id=%s err=%v", requestctx.TraceIDFromContext(ctx), err)
 				continue
 			}
@@ -72,12 +76,10 @@ func StartConsumer(ctx context.Context) {
 	}
 }
 
-// CloseConsumer 关闭 Kafka 消费者
-func CloseConsumer() {
-	if Consumer != nil {
-		if err := Consumer.Close(); err != nil {
-			log.Printf("关闭 Kafka 消费者失败: %v", err)
-		}
-		log.Println("Kafka 消费者已关闭")
+// CloseConsumer 关闭 Kafka 消费者，并把关闭错误交给生命周期协调器处理。
+func CloseConsumer() error {
+	if Consumer == nil {
+		return nil
 	}
+	return Consumer.Close()
 }

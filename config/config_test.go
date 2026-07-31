@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidateStartupSuccess 验证完整关键配置可以通过启动期校验。
@@ -15,6 +16,7 @@ func TestValidateStartupSuccess(t *testing.T) {
 		RedisHost:             "localhost",
 		RedisPort:             6379,
 		ServerPort:            "8080",
+		ServerShutdownTimeout: 15 * time.Second,
 		KafkaBootstrapServers: "localhost:9092",
 		KafkaRunTopic:         "run_execute",
 		KafkaRunGroupID:       "run-worker-group",
@@ -33,7 +35,7 @@ func TestValidateStartupReportsMissingCriticalFields(t *testing.T) {
 		t.Fatal("expected validation error, got nil")
 	}
 	message := err.Error()
-	for _, want := range []string{"MYSQL_DATABASE", "REDIS_PORT", "KAFKA_BOOTSTRAP_SERVERS", "JWT_SECRET"} {
+	for _, want := range []string{"MYSQL_DATABASE", "REDIS_PORT", "SERVER_SHUTDOWN_TIMEOUT_SECONDS", "KAFKA_BOOTSTRAP_SERVERS", "JWT_SECRET"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("expected error message contains %s, got %s", want, message)
 		}
@@ -50,6 +52,7 @@ func TestValidateStartupRequiresDefaultProviderProfile(t *testing.T) {
 		RedisHost:             "localhost",
 		RedisPort:             6379,
 		ServerPort:            "8080",
+		ServerShutdownTimeout: 15 * time.Second,
 		KafkaBootstrapServers: "localhost:9092",
 		KafkaRunTopic:         "run_execute",
 		KafkaRunGroupID:       "run-worker-group",
@@ -94,5 +97,53 @@ func TestLoadConfigRejectsInvalidPortEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "REDIS_PORT") {
 		t.Fatalf("expected REDIS_PORT error, got %v", err)
+	}
+}
+
+// TestValidateStartupRejectsNonPositiveShutdownTimeout 验证关闭超时必须为正数。
+func TestValidateStartupRejectsNonPositiveShutdownTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		cfg := &Config{
+			MySQLHost:             "localhost",
+			MySQLPort:             3306,
+			MySQLUser:             "root",
+			MySQLDatabase:         "goai",
+			RedisHost:             "localhost",
+			RedisPort:             6379,
+			ServerPort:            "8080",
+			ServerShutdownTimeout: timeout,
+			KafkaBootstrapServers: "localhost:9092",
+			KafkaRunTopic:         "run_execute",
+			KafkaRunGroupID:       "run-worker-group",
+			JWTSecret:             "test-secret",
+		}
+		err := cfg.ValidateStartup()
+		if err == nil || !strings.Contains(err.Error(), "SERVER_SHUTDOWN_TIMEOUT_SECONDS") {
+			t.Fatalf("timeout %s: expected shutdown timeout validation error, got %v", timeout, err)
+		}
+	}
+}
+
+// TestLoadConfigDefaultsShutdownTimeout 验证未配置关闭超时时采用 15 秒默认值。
+func TestLoadConfigDefaultsShutdownTimeout(t *testing.T) {
+	t.Setenv("MYSQL_HOST", "localhost")
+	t.Setenv("MYSQL_PORT", "3306")
+	t.Setenv("MYSQL_USER", "root")
+	t.Setenv("MYSQL_DATABASE", "goai")
+	t.Setenv("REDIS_HOST", "localhost")
+	t.Setenv("REDIS_PORT", "6379")
+	t.Setenv("SERVER_PORT", "8080")
+	t.Setenv("SERVER_SHUTDOWN_TIMEOUT_SECONDS", "")
+	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+	t.Setenv("KAFKA_RUN_TOPIC", "run_execute")
+	t.Setenv("KAFKA_RUN_GROUP_ID", "run-worker-group")
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("MODEL_PROVIDER_DEFAULT", "")
+
+	if err := LoadConfig(); err != nil {
+		t.Fatalf("load config failed: %v", err)
+	}
+	if AppConfig.ServerShutdownTimeout != 15*time.Second {
+		t.Fatalf("expected 15s shutdown timeout, got %s", AppConfig.ServerShutdownTimeout)
 	}
 }

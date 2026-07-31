@@ -75,12 +75,10 @@ func newRunExecuteMessage(ctx context.Context, runID string) RunExecuteMessage {
 	}
 }
 
-// CloseProducer 关闭 Kafka 生产者
-func CloseProducer() {
-	if Producer != nil {
-		if err := Producer.Close(); err != nil {
-			log.Printf("关闭 Kafka 生产者失败: %v", err)
-		}
-		log.Println("Kafka 生产者已关闭")
+// CloseProducer 关闭 Kafka 生产者，并把关闭错误交给生命周期协调器处理。
+func CloseProducer() error {
+	if Producer == nil {
+		return nil
 	}
+	return Producer.Close()
 }

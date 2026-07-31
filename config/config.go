@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -28,6 +29,7 @@ type Config struct {
 	RedisPassword              string
 	RedisPort                  int
 	ServerPort                 string
+	ServerShutdownTimeout      time.Duration
 	KafkaPort                  int
 	KafkaJMXPort               int
 	KafkaClusterID             string
@@ -44,6 +46,8 @@ type Config struct {
 	ModelProviderDefault       string
 	ModelProviders             map[string]ModelProviderConfig
 }
+
+const defaultShutdownTimeout = 15 * time.Second
 
 // AppConfig 全局配置
 var AppConfig *Config
@@ -82,6 +86,11 @@ func LoadConfig() error {
 	if appConfig.RedisPort, err = loadIntEnv("REDIS_PORT", 6379); err != nil {
 		return err
 	}
+	shutdownTimeoutSeconds, err := loadIntEnv("SERVER_SHUTDOWN_TIMEOUT_SECONDS", int(defaultShutdownTimeout/time.Second))
+	if err != nil {
+		return err
+	}
+	appConfig.ServerShutdownTimeout = time.Duration(shutdownTimeoutSeconds) * time.Second
 	if appConfig.KafkaPort, err = loadIntEnv("KAFKA_PORT", 9092); err != nil {
 		return err
 	}
@@ -180,6 +189,9 @@ func (c *Config) ValidateStartup() error {
 	}
 	if strings.TrimSpace(c.ServerPort) == "" {
 		problems = append(problems, "SERVER_PORT is required")
+	}
+	if c.ServerShutdownTimeout <= 0 {
+		problems = append(problems, "SERVER_SHUTDOWN_TIMEOUT_SECONDS must be greater than 0")
 	}
 	if strings.TrimSpace(c.KafkaBootstrapServers) == "" {
 		problems = append(problems, "KAFKA_BOOTSTRAP_SERVERS is required")
