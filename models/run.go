@@ -11,7 +11,7 @@ const (
 	RunStatusCancelled = "cancelled"
 )
 
-// Run 代表一次工作流执行实例。
+// Run 表示一次完整业务回合，可由 AG-UI、A2A 委派或系统调度触发。
 type Run struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	RunID        string `gorm:"size:64;uniqueIndex;not null"`
