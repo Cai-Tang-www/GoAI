@@ -15,6 +15,7 @@ import (
 	"GoAI/ai"
 	"GoAI/domain/runstate"
 	"GoAI/models"
+	"GoAI/requestctx"
 
 	"gorm.io/gorm"
 )
@@ -61,6 +62,7 @@ type RunService struct {
 	database          *gorm.DB
 	publisher         RunEventPublisher
 	agentInvoker      AgentInvoker
+	loopService       *LoopService
 	executeNode       workflowNodeExecutor
 	stepRetryBackoffs []time.Duration
 }
@@ -478,6 +480,9 @@ func (s *RunService) createQueuedRunWithIdempotency(
 			result.IdempotentHit = true
 			return nil
 		}
+		if err := s.startRunLoopTx(ctx, tx, run); err != nil {
+			return err
+		}
 		if hook != nil {
 			if err := hook(tx, run, agent); err != nil {
 				return err
@@ -604,6 +609,9 @@ func (s *RunService) createRun(ctx context.Context, userID uint64, req CreateRun
 		Provider:    normalized.Provider,
 		Model:       normalized.Model,
 	}
+	loopID := newPrefixedID("loop")
+	run.LoopID = &loopID
+	run.TraceID = requestctx.TraceIDFromContext(ctx)
 
 	var idempotency *models.RunIdempotency
 	if normalized.IdempotencyKey != "" {
@@ -696,6 +704,9 @@ func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool,
 		Provider:    origin.Provider,
 		Model:       origin.Model,
 	}
+	loopID := newPrefixedID("loop")
+	clone.LoopID = &loopID
+	clone.TraceID = requestctx.TraceIDFromContext(ctx)
 	if clone.InputJSON == "" {
 		clone.InputJSON = "{}"
 	}
@@ -807,7 +818,10 @@ func (s *RunService) updateCurrentStep(ctx context.Context, runID, stepKey strin
 // transitionRun 使用短事务推进 Run 状态。
 func (s *RunService) transitionRun(ctx context.Context, run *models.Run, nextStatus, errMsg string) error {
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return transitionRunStatus(ctx, tx, run, nextStatus, errMsg)
+		if err := transitionRunStatus(ctx, tx, run, nextStatus, errMsg); err != nil {
+			return err
+		}
+		return s.finishRunLoopTx(ctx, tx, run, nextStatus, errMsg)
 	})
 }
 
@@ -890,10 +904,64 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 	return lastErr
 }
 
+func (s *RunService) startRunLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run) error {
+	if s.loopService == nil || run == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
+		return nil
+	}
+	return func() error {
+		_, err := s.loopService.startTx(ctx, tx, LoopStartRequest{
+			LoopID:            *run.LoopID,
+			TraceID:           run.TraceID,
+			ThreadID:          run.ThreadID,
+			RunID:             run.RunID,
+			AgentID:           run.AgentID,
+			WorkflowID:        run.WorkflowID,
+			LoopType:          models.LoopTypeRun,
+			InputSnapshotJSON: run.InputJSON,
+			Provider:          run.Provider,
+			Model:             run.Model,
+		})
+		return err
+	}()
+}
+
+func (s *RunService) finishRunLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run, status, errMsg string) error {
+	if s.loopService == nil || run == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
+		return nil
+	}
+	loopStatus, ok := loopStatusForRun(status)
+	if !ok {
+		return nil
+	}
+	return s.loopService.finishTx(ctx, tx, LoopFinishRequest{
+		LoopID:             *run.LoopID,
+		Status:             loopStatus,
+		OutputSnapshotJSON: fmt.Sprintf(`{"status":%q}`, status),
+		ErrorMessage:       errMsg,
+	})
+}
+
+func loopStatusForRun(status string) (string, bool) {
+	switch status {
+	case models.RunStatusSuccess:
+		return models.LoopStatusSuccess, true
+	case models.RunStatusFailed:
+		return models.LoopStatusFailed, true
+	case models.RunStatusCancelled:
+		return models.LoopStatusCancelled, true
+	default:
+		return "", false
+	}
+}
+
+// startRunStep 创建 RunStep，并在同一事务中创建对应的 Step Loop。
 func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (*models.RunStep, error) {
 	startedAt := time.Now()
+	loopID := newPrefixedID("loop")
 	step := &models.RunStep{
 		RunID:      run.RunID,
+		TraceID:    run.TraceID,
+		LoopID:     loopID,
 		StepKey:    strings.TrimSpace(node.Key),
 		StepType:   strings.TrimSpace(node.Type),
 		Attempt:    attempt,
@@ -904,7 +972,29 @@ func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node Wor
 		Model:      run.Model,
 		StartedAt:  &startedAt,
 	}
-	if err := s.database.WithContext(ctx).Create(step).Error; err != nil {
+	if err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(step).Error; err != nil {
+			return err
+		}
+		if s.loopService == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
+			return nil
+		}
+		_, err := s.loopService.startTx(ctx, tx, LoopStartRequest{
+			LoopID:            loopID,
+			TraceID:           run.TraceID,
+			ThreadID:          run.ThreadID,
+			RunID:             run.RunID,
+			ParentLoopID:      *run.LoopID,
+			AgentID:           run.AgentID,
+			WorkflowID:        run.WorkflowID,
+			RunStepID:         step.ID,
+			LoopType:          models.LoopTypeStep,
+			InputSnapshotJSON: run.InputJSON,
+			Provider:          run.Provider,
+			Model:             run.Model,
+		})
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return step, nil
@@ -916,7 +1006,10 @@ func (s *RunService) finishRunStep(ctx context.Context, step *models.RunStep, st
 		return err
 	}
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return transitionStepStatus(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt)
+		if err := transitionStepStatus(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt); err != nil {
+			return err
+		}
+		return s.finishRunStepLoopTx(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt)
 	})
 }
 
@@ -931,12 +1024,44 @@ func (s *RunService) completeRunStep(ctx context.Context, run *models.Run, step 
 		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
 			return err
 		}
+		if err := s.finishRunStepLoopTx(ctx, tx, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
+			return err
+		}
 		return s.persistResultMessage(ctx, tx, run, step, normalizedOutput)
 	})
 	if err != nil {
 		*step = previousStep
 	}
 	return err
+}
+
+func (s *RunService) finishRunStepLoopTx(ctx context.Context, tx *gorm.DB, step *models.RunStep, status, outputJSON, errMsg string, latencyMS int64, finishedAt *time.Time) error {
+	if s.loopService == nil || step == nil || strings.TrimSpace(step.LoopID) == "" {
+		return nil
+	}
+	loopStatus, ok := loopStatusForStep(status)
+	if !ok {
+		return nil
+	}
+	return s.loopService.finishTx(ctx, tx, LoopFinishRequest{
+		LoopID:             step.LoopID,
+		Status:             loopStatus,
+		OutputSnapshotJSON: outputJSON,
+		ErrorMessage:       errMsg,
+		LatencyMS:          latencyMS,
+		FinishedAt:         finishedAt,
+	})
+}
+
+func loopStatusForStep(status string) (string, bool) {
+	switch status {
+	case models.RunStepStatusSuccess:
+		return models.LoopStatusSuccess, true
+	case models.RunStepStatusFailed, models.RunStepStatusSkipped:
+		return models.LoopStatusFailed, true
+	default:
+		return "", false
+	}
 }
 
 func normalizeNodeOutput(outputJSON string) (string, error) {
@@ -1374,7 +1499,10 @@ func (s *RunService) failRunWithMessage(ctx context.Context, runID, msg string) 
 			return nil
 		}
 		if run.Status == models.RunStatusQueued || run.Status == models.RunStatusRunning {
-			return transitionRunStatus(ctx, tx, &run, models.RunStatusFailed, msg)
+			if err := transitionRunStatus(ctx, tx, &run, models.RunStatusFailed, msg); err != nil {
+				return err
+			}
+			return s.finishRunLoopTx(ctx, tx, &run, models.RunStatusFailed, msg)
 		}
 		return fmt.Errorf("%w: %s -> %s", errInvalidRunTransition, run.Status, models.RunStatusFailed)
 	})

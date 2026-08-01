@@ -14,6 +14,8 @@ const (
 type RunStep struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	RunID        string `gorm:"size:64;not null;index:idx_run_steps_run_key_attempt,priority:1"`
+	TraceID      string `gorm:"size:128;index"`
+	LoopID       string `gorm:"size:64;index"`
 	StepKey      string `gorm:"size:128;not null;index:idx_run_steps_run_key_attempt,priority:2"`
 	StepType     string `gorm:"size:64;not null"`
 	Attempt      int    `gorm:"not null;index:idx_run_steps_run_key_attempt,priority:3"`

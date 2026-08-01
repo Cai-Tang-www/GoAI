@@ -16,6 +16,9 @@ type Run struct {
 	ID           uint64 `gorm:"primaryKey;autoIncrement"`
 	RunID        string `gorm:"size:64;uniqueIndex;not null"`
 	ThreadID     string `gorm:"size:64;index"`
+	TraceID      string `gorm:"size:128;index"`
+	// LoopID 允许历史或测试数据暂时为空；正式创建路径会始终写入根 Loop ID。
+	LoopID       *string `gorm:"size:64;uniqueIndex"`
 	AgentID      uint64 `gorm:"not null;index"`
 	WorkflowID   uint64 `gorm:"not null;index"`
 	UserID       uint64 `gorm:"not null;index"`
