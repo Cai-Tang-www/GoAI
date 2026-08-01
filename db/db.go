@@ -50,6 +50,8 @@ func Migrate(database *gorm.DB) error {
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},
+		&models.LoopRecord{},
+		&models.LoopEvaluation{},
 	); err != nil {
 		return fmt.Errorf("auto migrating database: %w", err)
 	}

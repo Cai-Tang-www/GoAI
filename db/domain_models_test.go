@@ -45,6 +45,8 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		"delegations",
 		"agent_endpoints",
 		"agent_capabilities",
+		"loop_records",
+		"loop_evaluations",
 	} {
 		if !database.Migrator().HasTable(table) {
 			t.Errorf("expected table %s", table)
@@ -61,6 +63,8 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		{&models.Delegation{}, "idx_delegations_child_run_id"},
 		{&models.AgentEndpoint{}, "idx_agent_endpoint_unique"},
 		{&models.AgentCapability{}, "idx_agent_capability_unique"},
+		{&models.LoopRecord{}, "idx_loop_records_loop_id"},
+		{&models.LoopEvaluation{}, "idx_loop_evaluation_unique"},
 	}
 	for _, index := range indexes {
 		if !database.Migrator().HasIndex(index.model, index.name) {
@@ -128,6 +132,17 @@ func TestUnifiedDomainModelUniqueConstraints(t *testing.T) {
 		if err := database.Create(&models.AgentCapability{AgentID: 2, CapabilityCode: "summarize", Name: "Summarize", CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "v1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
 			t.Fatalf("same capability code on another agent should be allowed: %v", err)
 		}
+	})
+
+	t.Run("loop record id and evaluation pair", func(t *testing.T) {
+		assertDuplicateRejected(t,
+			&models.LoopRecord{LoopID: "loop-1", RunID: "run-1", AgentID: 1, LoopType: models.LoopTypeRun, Status: models.LoopStatusRunning, InputSnapshotJSON: `{}`, OutputSnapshotJSON: `{}`},
+			&models.LoopRecord{LoopID: "loop-1", RunID: "run-2", AgentID: 1, LoopType: models.LoopTypeRun, Status: models.LoopStatusRunning, InputSnapshotJSON: `{}`, OutputSnapshotJSON: `{}`},
+		)
+		assertDuplicateRejected(t,
+			&models.LoopEvaluation{LoopID: "loop-1", EvaluatorCode: "quality-v1", Status: models.EvaluationStatusPending},
+			&models.LoopEvaluation{LoopID: "loop-1", EvaluatorCode: "quality-v1", Status: models.EvaluationStatusPending},
+		)
 	})
 }
 

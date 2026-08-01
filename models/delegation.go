@@ -18,6 +18,8 @@ type Delegation struct {
 	ThreadID         string `gorm:"size:64;not null;index"`
 	ParentRunID      string `gorm:"size:64;not null;index"`
 	ChildRunID       string `gorm:"size:64;uniqueIndex;not null"`
+	TraceID          string `gorm:"size:128;index"`
+	LoopID           string `gorm:"size:64;index"`
 	SourceAgentID    uint64 `gorm:"not null;index"`
 	TargetAgentID    uint64 `gorm:"not null;index"`
 	CapabilityCode   string `gorm:"size:64;not null;index"`

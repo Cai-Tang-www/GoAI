@@ -66,7 +66,14 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	runService, err := services.NewRunService(database, producer, services.WithAgentInvoker(agentInvoker))
+	loopService, err := services.NewLoopService(database)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	runService, err := services.NewRunService(database, producer,
+		services.WithAgentInvoker(agentInvoker),
+		services.WithLoopService(loopService),
+	)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}

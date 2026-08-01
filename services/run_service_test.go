@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"GoAI/models"
+	"GoAI/requestctx"
 
 	"gorm.io/gorm"
 )
@@ -1201,5 +1202,125 @@ func TestHandleRunExecuteAgentNodeDoesNotInvokeWithoutInvoker(t *testing.T) {
 	}
 	if err := service.HandleRunExecute(context.Background(), run.RunID); err == nil || !strings.Contains(err.Error(), "A2A agent invoker") {
 		t.Fatalf("expected missing invoker error, got %v", err)
+	}
+}
+
+func setupRunLoopTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRunPublisher) {
+	t.Helper()
+	gdb := openSQLiteTestDB(t)
+	if err := gdb.AutoMigrate(
+		&models.User{},
+		&models.Agent{},
+		&models.AgentCapability{},
+		&models.AgentEndpoint{},
+		&models.Workflow{},
+		&models.Run{},
+		&models.RunStep{},
+		&models.RunIdempotency{},
+		&models.Message{},
+		&models.LoopRecord{},
+		&models.LoopEvaluation{},
+	); err != nil {
+		t.Fatalf("auto migrate run loop models failed: %v", err)
+	}
+	publisher := &recordingRunPublisher{}
+	loopService, err := NewLoopService(gdb)
+	if err != nil {
+		t.Fatalf("create loop service failed: %v", err)
+	}
+	service, err := NewRunService(gdb, publisher, WithLoopService(loopService))
+	if err != nil {
+		t.Fatalf("create run service failed: %v", err)
+	}
+	return gdb, service, publisher
+}
+
+func TestRunExecutionPersistsRootAndStepLoops(t *testing.T) {
+	gdb, service, _ := setupRunLoopTestService(t)
+	seedAgentWorkflow(t, gdb)
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+
+	ctx := requestctx.WithTraceID(context.Background(), "trace-run-loop")
+	result, err := service.CreateRun(ctx, 1, CreateRunRequest{
+		AgentCode:   "agent_test",
+		TriggerType: "api",
+		Input:       []byte(`{"prompt":"hello"}`),
+	})
+	if err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if result.Run.LoopID == nil || *result.Run.LoopID == "" {
+		t.Fatal("create run did not assign root loop")
+	}
+
+	var root models.LoopRecord
+	if err := gdb.Where("loop_id = ?", *result.Run.LoopID).First(&root).Error; err != nil {
+		t.Fatalf("load root loop failed: %v", err)
+	}
+	if root.Status != models.LoopStatusRunning || root.TraceID != "trace-run-loop" || root.LoopType != models.LoopTypeRun {
+		t.Fatalf("unexpected root loop before execution: %+v", root)
+	}
+
+	if err := service.HandleRunExecute(ctx, result.Run.RunID); err != nil {
+		t.Fatalf("execute run failed: %v", err)
+	}
+
+	if err := gdb.Where("loop_id = ?", *result.Run.LoopID).First(&root).Error; err != nil {
+		t.Fatalf("reload root loop failed: %v", err)
+	}
+	if root.Status != models.LoopStatusSuccess || root.FinishedAt == nil {
+		t.Fatalf("root loop did not finish successfully: %+v", root)
+	}
+
+	var steps []models.RunStep
+	if err := gdb.Where("run_id = ?", result.Run.RunID).Order("id ASC").Find(&steps).Error; err != nil {
+		t.Fatalf("load steps failed: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("expected two run steps, got %d", len(steps))
+	}
+	for _, step := range steps {
+		if step.LoopID == "" {
+			t.Fatalf("step %s has no loop id", step.StepKey)
+		}
+		var loop models.LoopRecord
+		if err := gdb.Where("loop_id = ?", step.LoopID).First(&loop).Error; err != nil {
+			t.Fatalf("load step loop %s failed: %v", step.StepKey, err)
+		}
+		if loop.ParentLoopID != *result.Run.LoopID || loop.Status != models.LoopStatusSuccess || loop.LoopType != models.LoopTypeStep {
+			t.Fatalf("unexpected step loop for %s: %+v", step.StepKey, loop)
+		}
+	}
+}
+
+func TestReplayRunCreatesIndependentRootLoop(t *testing.T) {
+	gdb, service, _ := setupRunLoopTestService(t)
+	seedAgentWorkflow(t, gdb)
+	ctx := requestctx.WithTraceID(context.Background(), "trace-replay")
+
+	origin, err := service.CreateRun(ctx, 1, CreateRunRequest{
+		AgentCode:   "agent_test",
+		TriggerType: "api",
+		Input:       []byte(`{"prompt":"original"}`),
+	})
+	if err != nil {
+		t.Fatalf("create origin run failed: %v", err)
+	}
+	replay, err := service.ReplayRun(ctx, 1, false, origin.Run.RunID, "")
+	if err != nil {
+		t.Fatalf("replay run failed: %v", err)
+	}
+	if replay.Run.RunID == origin.Run.RunID || replay.Run.LoopID == nil || origin.Run.LoopID == nil || *replay.Run.LoopID == *origin.Run.LoopID {
+		t.Fatalf("replay did not create an independent root loop: origin=%+v replay=%+v", origin.Run, replay.Run)
+	}
+	if replay.Run.InputJSON != origin.Run.InputJSON || replay.Run.WorkflowID != origin.Run.WorkflowID {
+		t.Fatalf("replay did not preserve execution source: origin=%+v replay=%+v", origin.Run, replay.Run)
+	}
+	var replayLoop models.LoopRecord
+	if err := gdb.Where("loop_id = ?", *replay.Run.LoopID).First(&replayLoop).Error; err != nil {
+		t.Fatalf("load replay root loop failed: %v", err)
+	}
+	if replayLoop.TraceID != "trace-replay" || replayLoop.RunID != replay.Run.RunID {
+		t.Fatalf("replay loop metadata is incorrect: %+v", replayLoop)
 	}
 }
