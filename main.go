@@ -16,6 +16,7 @@ import (
 	"GoAI/config"
 	"GoAI/db"
 	"GoAI/kafka"
+	"GoAI/observability"
 	redisinfra "GoAI/redis"
 	"GoAI/routers"
 	"GoAI/services"
@@ -38,6 +39,18 @@ func run(ctx context.Context) error {
 	}
 	cfg := config.AppConfig
 
+	telemetry, err := observability.New("goai", os.Stderr)
+	if err != nil {
+		return fmt.Errorf("initializing observability: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := telemetry.Shutdown(shutdownCtx); shutdownErr != nil {
+			log.Printf("observability shutdown failed: %v", shutdownErr)
+		}
+	}()
+
 	database, err := db.New(cfg)
 	if err != nil {
 		return err
@@ -56,28 +69,29 @@ func run(ctx context.Context) error {
 	}
 	log.Println("Redis initialized")
 
-	producer, err := kafka.NewProducer(ctx, cfg)
+	producer, err := kafka.NewProducer(ctx, cfg, kafka.WithProducerObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, redisinfra.Close(redisClient), db.Close(database))
 	}
 	log.Println("Kafka producer initialized")
 
-	agentInvoker, err := a2aclient.New(&http.Client{}, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval)
+	agentInvoker, err := a2aclient.New(&http.Client{}, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval, a2aclient.WithObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	loopService, err := services.NewLoopService(database)
+	loopService, err := services.NewLoopService(database, services.WithLoopObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
 	runService, err := services.NewRunService(database, producer,
 		services.WithAgentInvoker(agentInvoker),
 		services.WithLoopService(loopService),
+		services.WithRunObservability(telemetry),
 	)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	runtimeService, err := services.NewRuntimeService(database, runService)
+	runtimeService, err := services.NewRuntimeService(database, runService, services.WithRuntimeObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
@@ -89,17 +103,18 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	consumer, err := kafka.NewConsumer(cfg, runWorker.HandleRunExecuteMessage)
+	consumer, err := kafka.NewConsumer(cfg, runWorker.HandleRunExecuteMessage, kafka.WithConsumerObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
 	log.Println("Kafka consumer initialized")
 
 	router, err := routers.New(routers.Dependencies{
-		Database:   database,
-		RunService: runService,
-		Runtime:    runtimeService,
-		A2AGateway: a2aGateway,
+		Database:      database,
+		RunService:    runService,
+		Runtime:       runtimeService,
+		A2AGateway:    a2aGateway,
+		Observability: telemetry,
 	})
 	if err != nil {
 		return errors.Join(err, consumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))

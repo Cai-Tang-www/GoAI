@@ -15,6 +15,7 @@ import (
 	"GoAI/ai"
 	"GoAI/domain/runstate"
 	"GoAI/models"
+	"GoAI/observability"
 	"GoAI/requestctx"
 
 	"gorm.io/gorm"
@@ -63,6 +64,7 @@ type RunService struct {
 	publisher         RunEventPublisher
 	agentInvoker      AgentInvoker
 	loopService       *LoopService
+	observability     *observability.Bundle
 	executeNode       workflowNodeExecutor
 	stepRetryBackoffs []time.Duration
 }
@@ -650,10 +652,26 @@ func (s *RunService) createRun(ctx context.Context, userID uint64, req CreateRun
 }
 
 // CreateRun 创建并投递一个普通 API Run。
-func (s *RunService) CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (*RunMutationResult, error) {
-	return s.createRun(ctx, userID, req, nil)
+// CreateRun 创建并投递一个普通 API Run。
+func (s *RunService) CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (result *RunMutationResult, err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "run.create", "", req.ThreadID, "")
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		runID, threadID, triggerType := "", req.ThreadID, req.TriggerType
+		if result != nil && result.Run != nil {
+			runID = result.Run.RunID
+			threadID = result.Run.ThreadID
+			triggerType = result.Run.TriggerType
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "create_run", status, startedAt, runID, threadID, "", func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveRun(triggerType, status, elapsed)
+		}, err)
+	}()
+	return s.createRun(observedCtx, userID, req, nil)
 }
-
 func (s *RunService) GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
 	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
@@ -686,8 +704,25 @@ func (s *RunService) GetRunStepsByRunID(ctx context.Context, userID uint64, isAd
 	return steps, nil
 }
 
-func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, idempotencyKey string) (*RunMutationResult, error) {
-	origin, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
+func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool, runID string, idempotencyKey string) (result *RunMutationResult, err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "run.replay", runID, "", "")
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		observedRunID := runID
+		threadID := ""
+		if result != nil && result.Run != nil {
+			observedRunID = result.Run.RunID
+			threadID = result.Run.ThreadID
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "replay_run", status, startedAt, observedRunID, threadID, "", func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveRun("replay", status, elapsed)
+		}, err)
+	}()
+
+	origin, err := s.GetRunByRunID(observedCtx, userID, isAdmin, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -706,7 +741,7 @@ func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool,
 	}
 	loopID := newPrefixedID("loop")
 	clone.LoopID = &loopID
-	clone.TraceID = requestctx.TraceIDFromContext(ctx)
+	clone.TraceID = requestctx.TraceIDFromContext(observedCtx)
 	if clone.InputJSON == "" {
 		clone.InputJSON = "{}"
 	}
@@ -727,7 +762,7 @@ func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool,
 		}
 	}
 
-	result, err := s.createQueuedRunWithIdempotency(ctx, clone, nil, idempotency, nil, false)
+	result, err = s.createQueuedRunWithIdempotency(observedCtx, clone, nil, idempotency, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -735,12 +770,11 @@ func (s *RunService) ReplayRun(ctx context.Context, userID uint64, isAdmin bool,
 		return result, nil
 	}
 
-	if err := s.publishRunExecute(ctx, result.Run.RunID); err != nil {
-		return result, s.handleRunDispatchFailure(ctx, result.Run.RunID, "replay", err)
+	if err := s.publishRunExecute(observedCtx, result.Run.RunID); err != nil {
+		return result, s.handleRunDispatchFailure(observedCtx, result.Run.RunID, "replay", err)
 	}
 	return result, nil
 }
-
 func (s *RunService) publishRunExecute(ctx context.Context, runID string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -761,41 +795,60 @@ func (s *RunService) handleRunDispatchFailure(ctx context.Context, runID, operat
 }
 
 // HandleRunExecute 原子 claim Run，并以短事务逐步执行 Workflow。
-func (s *RunService) HandleRunExecute(ctx context.Context, runID string) error {
-	run, claimed, err := s.claimRunForExecution(ctx, runID)
+func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "run.execute", runID, "", "")
+	status := "success"
+	var observedRun *models.Run
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		observedRunID, threadID, triggerType := runID, "", ""
+		if observedRun != nil {
+			observedRunID = observedRun.RunID
+			threadID = observedRun.ThreadID
+			triggerType = observedRun.TriggerType
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "execute_run", status, startedAt, observedRunID, threadID, "", func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveRun(triggerType, status, elapsed)
+		}, err)
+	}()
+
+	run, claimed, err := s.claimRunForExecution(observedCtx, runID)
 	if err != nil {
 		return err
 	}
+	observedRun = run
 	if !claimed {
 		return nil
 	}
 
 	var workflow models.Workflow
-	if err := s.database.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
-		return s.failClaimedRun(ctx, run.RunID, err)
+	if err := s.database.WithContext(observedCtx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
+		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 
 	def, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON)
 	if err != nil {
-		return s.failClaimedRun(ctx, run.RunID, err)
+		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 
 	order, err := ResolveExecutionOrder(def)
 	if err != nil {
-		return s.failClaimedRun(ctx, run.RunID, err)
+		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 
 	for _, node := range order {
-		if err := s.updateCurrentStep(ctx, run.RunID, node.Key); err != nil {
-			return s.failClaimedRun(ctx, run.RunID, err)
+		if err := s.updateCurrentStep(observedCtx, run.RunID, node.Key); err != nil {
+			return s.failClaimedRun(observedCtx, run.RunID, err)
 		}
-		if err := s.executeNodeWithRetry(ctx, run, node); err != nil {
-			return s.failClaimedRun(ctx, run.RunID, err)
+		if err := s.executeNodeWithRetry(observedCtx, run, node); err != nil {
+			return s.failClaimedRun(observedCtx, run.RunID, err)
 		}
 	}
 
-	if err := s.transitionRun(ctx, run, models.RunStatusSuccess, ""); err != nil {
-		return s.failClaimedRun(ctx, run.RunID, err)
+	if err := s.transitionRun(observedCtx, run, models.RunStatusSuccess, ""); err != nil {
+		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 	return nil
 }
@@ -852,7 +905,7 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 		if execErr != nil {
 			lastErr = execErr
 			persistCtx, cancel := runFailurePersistenceContext(ctx)
-			finishErr := s.finishRunStep(persistCtx, step, models.RunStepStatusFailed, "{}", execErr.Error(), latencyMS, &finishedAt)
+			finishErr := s.finishRunStep(persistCtx, run, step, models.RunStepStatusFailed, "{}", execErr.Error(), latencyMS, &finishedAt)
 			cancel()
 			if finishErr != nil {
 				return errors.Join(execErr, fmt.Errorf("persisting failed run step: %w", finishErr))
@@ -889,7 +942,7 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 		cancel()
 		if finishErr != nil {
 			failureCtx, failureCancel := runFailurePersistenceContext(ctx)
-			markErr := s.finishRunStep(failureCtx, step, models.RunStepStatusFailed, "{}", finishErr.Error(), latencyMS, &finishedAt)
+			markErr := s.finishRunStep(failureCtx, run, step, models.RunStepStatusFailed, "{}", finishErr.Error(), latencyMS, &finishedAt)
 			failureCancel()
 			if markErr != nil {
 				return errors.Join(finishErr, fmt.Errorf("persisting failed run step after completion error: %w", markErr))
@@ -909,7 +962,7 @@ func (s *RunService) startRunLoopTx(ctx context.Context, tx *gorm.DB, run *model
 		return nil
 	}
 	return func() error {
-		_, err := s.loopService.startTx(ctx, tx, LoopStartRequest{
+		_, err := s.loopService.startObservedTx(ctx, tx, LoopStartRequest{
 			LoopID:            *run.LoopID,
 			TraceID:           run.TraceID,
 			ThreadID:          run.ThreadID,
@@ -933,7 +986,7 @@ func (s *RunService) finishRunLoopTx(ctx context.Context, tx *gorm.DB, run *mode
 	if !ok {
 		return nil
 	}
-	return s.loopService.finishTx(ctx, tx, LoopFinishRequest{
+	return s.loopService.finishObservedTx(ctx, tx, LoopFinishRequest{
 		LoopID:             *run.LoopID,
 		Status:             loopStatus,
 		OutputSnapshotJSON: fmt.Sprintf(`{"status":%q}`, status),
@@ -979,7 +1032,7 @@ func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node Wor
 		if s.loopService == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
 			return nil
 		}
-		_, err := s.loopService.startTx(ctx, tx, LoopStartRequest{
+		_, err := s.loopService.startObservedTx(ctx, tx, LoopStartRequest{
 			LoopID:            loopID,
 			TraceID:           run.TraceID,
 			ThreadID:          run.ThreadID,
@@ -1000,7 +1053,7 @@ func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node Wor
 	return step, nil
 }
 
-func (s *RunService) finishRunStep(ctx context.Context, step *models.RunStep, status, outputJSON, errMsg string, latencyMS int64, finishedAt *time.Time) error {
+func (s *RunService) finishRunStep(ctx context.Context, run *models.Run, step *models.RunStep, status, outputJSON, errMsg string, latencyMS int64, finishedAt *time.Time) error {
 	normalizedOutput, err := normalizeNodeOutput(outputJSON)
 	if err != nil {
 		return err
@@ -1009,7 +1062,7 @@ func (s *RunService) finishRunStep(ctx context.Context, step *models.RunStep, st
 		if err := transitionStepStatus(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt); err != nil {
 			return err
 		}
-		return s.finishRunStepLoopTx(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt)
+		return s.finishRunStepLoopTx(ctx, tx, run, step, status, normalizedOutput, errMsg, latencyMS, finishedAt)
 	})
 }
 
@@ -1024,7 +1077,7 @@ func (s *RunService) completeRunStep(ctx context.Context, run *models.Run, step 
 		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
 			return err
 		}
-		if err := s.finishRunStepLoopTx(ctx, tx, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
+		if err := s.finishRunStepLoopTx(ctx, tx, run, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
 			return err
 		}
 		return s.persistResultMessage(ctx, tx, run, step, normalizedOutput)
@@ -1035,7 +1088,7 @@ func (s *RunService) completeRunStep(ctx context.Context, run *models.Run, step 
 	return err
 }
 
-func (s *RunService) finishRunStepLoopTx(ctx context.Context, tx *gorm.DB, step *models.RunStep, status, outputJSON, errMsg string, latencyMS int64, finishedAt *time.Time) error {
+func (s *RunService) finishRunStepLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run, step *models.RunStep, status, outputJSON, errMsg string, latencyMS int64, finishedAt *time.Time) error {
 	if s.loopService == nil || step == nil || strings.TrimSpace(step.LoopID) == "" {
 		return nil
 	}
@@ -1043,7 +1096,7 @@ func (s *RunService) finishRunStepLoopTx(ctx context.Context, tx *gorm.DB, step 
 	if !ok {
 		return nil
 	}
-	return s.loopService.finishTx(ctx, tx, LoopFinishRequest{
+	return s.loopService.finishObservedTx(ctx, tx, LoopFinishRequest{
 		LoopID:             step.LoopID,
 		Status:             loopStatus,
 		OutputSnapshotJSON: outputJSON,

@@ -7,6 +7,7 @@ import (
 	"GoAI/handlers"
 	"GoAI/middlewares"
 	"GoAI/models"
+	"GoAI/observability"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
@@ -15,10 +16,11 @@ import (
 
 // Dependencies 是 HTTP 路由装配所需的显式应用依赖。
 type Dependencies struct {
-	Database   *gorm.DB
-	RunService *services.RunService
-	Runtime    services.Runtime
-	A2AGateway http.Handler
+	Database      *gorm.DB
+	RunService    *services.RunService
+	Runtime       services.Runtime
+	A2AGateway    http.Handler
+	Observability *observability.Bundle
 }
 
 // New 使用显式依赖创建完整 API 路由。
@@ -35,6 +37,9 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	if deps.A2AGateway == nil {
 		return nil, fmt.Errorf("creating router: A2A gateway is nil")
 	}
+	if deps.Observability == nil {
+		deps.Observability = observability.NewNoop()
+	}
 
 	userHandler := handlers.NewUserHandler(deps.Database)
 	runHandler := handlers.NewRunHandler(deps.RunService)
@@ -46,10 +51,11 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	router := gin.New()
 	router.Use(
 		middlewares.TraceMiddleware(),
-		middlewares.RequestLogMiddleware(),
 		middlewares.ErrorHandlingMiddleware(),
+		observability.HTTPMiddleware(deps.Observability),
 	)
 
+	router.GET("/metrics", gin.WrapH(deps.Observability.Metrics.Handler()))
 	router.Any("/a2a/agents/:agent_code/*a2a_path", gin.WrapH(deps.A2AGateway))
 
 	router.GET("/ping", func(c *gin.Context) {

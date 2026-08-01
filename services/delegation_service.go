@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"GoAI/domain/runstate"
 	"GoAI/models"
+	"GoAI/observability"
 
 	"gorm.io/gorm"
 )
@@ -171,7 +174,7 @@ func (s *RuntimeService) DescribeAgent(ctx context.Context, agentCode string) (*
 }
 
 // AcceptDelegation 原子创建请求 Message、Delegation 与目标 Child Run，并在提交后投递执行消息。
-func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDelegationCommand) (*DelegationResult, error) {
+func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDelegationCommand) (delegationResult *DelegationResult, err error) {
 	sourceCode := strings.TrimSpace(command.SourceAgentCode)
 	targetCode := strings.TrimSpace(command.TargetAgentCode)
 	capabilityCode := strings.TrimSpace(command.CapabilityCode)
@@ -179,6 +182,32 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	childRunID := strings.TrimSpace(command.RequestedChildRunID)
 	messageID := strings.TrimSpace(command.RequestMessageID)
 	threadID := strings.TrimSpace(command.ThreadID)
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.accept", parentRunID, threadID, "")
+	ctx = observedCtx
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		observedRunID := parentRunID
+		delegationID := ""
+		if delegationResult != nil {
+			if delegationResult.Run != nil && strings.TrimSpace(delegationResult.Run.RunID) != "" {
+				observedRunID = delegationResult.Run.RunID
+			}
+			if delegationResult.Delegation != nil {
+				delegationID = delegationResult.Delegation.DelegationID
+			}
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "accept_delegation", status, startedAt, observedRunID, threadID, delegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveDelegation(status)
+		}, err,
+			slog.String("parent_run_id", parentRunID),
+			slog.String("child_run_id", childRunID),
+			slog.String("source_agent_code", sourceCode),
+			slog.String("target_agent_code", targetCode),
+		)
+	}()
 	if sourceCode == "" || targetCode == "" || capabilityCode == "" || parentRunID == "" || childRunID == "" || messageID == "" || threadID == "" {
 		return nil, fmt.Errorf("%w: source_agent_code, target_agent_code, capability_code, parent_run_id, child_run_id, message_id and thread_id are required", errInvalidDelegation)
 	}
@@ -332,12 +361,38 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 		}
 		createdDelegation = &existing
 	}
-	return &DelegationResult{Delegation: createdDelegation, Run: result.Run, Reused: result.IdempotentHit}, nil
+	delegationResult = &DelegationResult{Delegation: createdDelegation, Run: result.Run, Reused: result.IdempotentHit}
+	return delegationResult, nil
 }
 
 // DelegationSnapshot 返回指定目标 Agent 可见的 A2A Child Run 与协作消息快照。
-func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode, childRunID string) (*DelegationSnapshot, error) {
-	if err := s.ReconcileDelegation(ctx, childRunID); err != nil {
+func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode, childRunID string) (snapshotResult *DelegationSnapshot, err error) {
+	targetCode := strings.TrimSpace(targetAgentCode)
+	childID := strings.TrimSpace(childRunID)
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.snapshot", childID, "", "")
+	ctx = observedCtx
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		delegationID := ""
+		threadID := ""
+		parentRunID := ""
+		if snapshotResult != nil {
+			delegationID = snapshotResult.Delegation.DelegationID
+			threadID = snapshotResult.Delegation.ThreadID
+			parentRunID = snapshotResult.Delegation.ParentRunID
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "snapshot_delegation", status, startedAt, childID, threadID, delegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveDelegation(status)
+		}, err,
+			slog.String("parent_run_id", parentRunID),
+			slog.String("child_run_id", childID),
+			slog.String("target_agent_code", targetCode),
+		)
+	}()
+	if err := s.ReconcileDelegation(ctx, childID); err != nil {
 		return nil, err
 	}
 	var snapshot DelegationSnapshot
@@ -345,7 +400,7 @@ func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode
 		Table("delegations").
 		Select("delegations.*").
 		Joins("JOIN agents target_agents ON target_agents.id = delegations.target_agent_id").
-		Where("delegations.child_run_id = ? AND target_agents.agent_code = ?", strings.TrimSpace(childRunID), strings.TrimSpace(targetAgentCode)).
+		Where("delegations.child_run_id = ? AND target_agents.agent_code = ?", childID, targetCode).
 		First(&snapshot.Delegation)
 	if errors.Is(query.Error, gorm.ErrRecordNotFound) {
 		return nil, errDelegationNotFound
@@ -368,19 +423,41 @@ func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode
 		Find(&snapshot.Messages).Error; err != nil {
 		return nil, fmt.Errorf("loading delegation messages: %w", err)
 	}
-	return &snapshot, nil
+	snapshotResult = &snapshot
+	return snapshotResult, nil
 }
 
 // ReconcileDelegation 将 Child Run 终态收敛为 Delegation 终态，并持久化结果或失败消息。
-func (s *RuntimeService) ReconcileDelegation(ctx context.Context, childRunID string) error {
+func (s *RuntimeService) ReconcileDelegation(ctx context.Context, childRunID string) (err error) {
+	childID := strings.TrimSpace(childRunID)
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.reconcile", childID, "", "")
+	ctx = observedCtx
+	status := "success"
+	delegationID := ""
+	threadID := ""
+	parentRunID := ""
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "reconcile_delegation", status, startedAt, childID, threadID, delegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveDelegation(status)
+		}, err,
+			slog.String("parent_run_id", parentRunID),
+			slog.String("child_run_id", childID),
+		)
+	}()
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var delegation models.Delegation
-		if err := tx.Where("child_run_id = ?", strings.TrimSpace(childRunID)).First(&delegation).Error; err != nil {
+		if err := tx.Where("child_run_id = ?", childID).First(&delegation).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
 			return err
 		}
+		delegationID = delegation.DelegationID
+		threadID = delegation.ThreadID
+		parentRunID = delegation.ParentRunID
 		var run models.Run
 		if err := tx.Where("run_id = ?", delegation.ChildRunID).First(&run).Error; err != nil {
 			return err
