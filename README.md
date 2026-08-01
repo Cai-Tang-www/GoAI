@@ -313,6 +313,7 @@ Provider 调试配置：
 
 - [产品设计提案](docs/PRODUCT_PROPOSAL.md)
 - [实施路线图](docs/IMPLEMENTATION_ROADMAP.md)
+- [统一响应契约](docs/RESPONSE_CONTRACT.md)
 
 ## 启动与验证
 
