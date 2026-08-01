@@ -2,6 +2,7 @@ package routers
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"GoAI/services"
@@ -43,7 +44,12 @@ func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create runtime service failed: %v", err)
 	}
-	router, err := New(Dependencies{Database: gdb, RunService: service, Runtime: runtimeService})
+	router, err := New(Dependencies{
+		Database:   gdb,
+		RunService: service,
+		Runtime:    runtimeService,
+		A2AGateway: http.NotFoundHandler(),
+	})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)
 	}

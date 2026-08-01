@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	github.com/a2aproject/a2a-go/v2 v2.4.0
 	github.com/ag-ui-protocol/ag-ui/sdks/community/go v0.0.0-20260730140106-bb1c2afddb48
 	github.com/gin-gonic/gin v1.11.0
 	github.com/go-redis/redis/v8 v8.11.5
@@ -44,7 +45,7 @@ require (
 	golang.org/x/arch v0.20.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	google.golang.org/protobuf v1.36.9 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
 
 require (
@@ -57,5 +58,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 )

@@ -18,6 +18,7 @@ type Dependencies struct {
 	Database   *gorm.DB
 	RunService *services.RunService
 	Runtime    services.Runtime
+	A2AGateway http.Handler
 }
 
 // New 使用显式依赖创建完整 API 路由。
@@ -30,6 +31,9 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	}
 	if deps.Runtime == nil {
 		return nil, fmt.Errorf("creating router: runtime is nil")
+	}
+	if deps.A2AGateway == nil {
+		return nil, fmt.Errorf("creating router: A2A gateway is nil")
 	}
 
 	userHandler := handlers.NewUserHandler(deps.Database)
@@ -45,6 +49,8 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		middlewares.RequestLogMiddleware(),
 		middlewares.ErrorHandlingMiddleware(),
 	)
+
+	router.Any("/a2a/agents/:agent_code/*a2a_path", gin.WrapH(deps.A2AGateway))
 
 	router.GET("/ping", func(c *gin.Context) {
 		middlewares.Success(c, http.StatusOK, gin.H{"message": "ping success"}, "success")
