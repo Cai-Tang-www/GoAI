@@ -81,6 +81,14 @@ graph LR
 - 目标 Task 的非完成终态会传播为当前 Agent 节点失败；不可重试的协议错误不会被重复发送。
 - Parent Run replay 会生成新的 Parent RunID，因此会自然生成新的 Child TaskID/MessageID。
 
+## 运行时去重契约
+
+- `POST /api/runs` 和 replay 使用 `Idempotency-Key` 时，由 `owner_user_id + operation + idempotency_key` 唯一绑定请求哈希和 Run；相同请求返回原 Run，不同请求返回冲突。
+- Kafka 使用至少一次投递语义；Worker 通过数据库条件更新原子 claim `queued -> running`，只有成功 claim 的 Worker 才能执行 Workflow，重复消息对已 claim 或终态 Run 做 no-op。
+- A2A 入站委派使用稳定的 Child Run ID、请求 Message ID 和 Delegation ID；同一个协议重试会复用已有协作记录，不重复创建 Child Run、请求消息或执行事件。
+- Delegation 结果消息由 Child Run 的终态收敛生成，并通过唯一 Message ID 和终态条件更新保证重复 reconciliation 不产生第二条结果消息。
+- Kafka 发布失败会把已落库的 Run/Delegation 保留为失败状态；调用方必须使用新的幂等键或新的协议 Run ID 发起新的业务尝试。
+
 ## 当前限制
 
 - V1 使用 Worker 内阻塞轮询，父 Run 在 A2A Task 完成前不会释放执行线程。
