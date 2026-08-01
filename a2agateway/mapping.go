@@ -17,6 +17,8 @@ type delegationExtension struct {
 	SourceAgentCode string `json:"sourceAgentCode"`
 	CapabilityCode  string `json:"capabilityCode"`
 	ParentRunID     string `json:"parentRunId"`
+	TraceID         string `json:"traceId"`
+	DelegationID    string `json:"delegationId"`
 }
 
 func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (services.AcceptDelegationCommand, error) {
@@ -55,15 +57,17 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 		return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "message metadata is invalid")
 	}
 	return services.AcceptDelegationCommand{
-		SourceAgentCode:     extension.SourceAgentCode,
-		TargetAgentCode:     targetAgent,
-		CapabilityCode:      extension.CapabilityCode,
-		ParentRunID:         extension.ParentRunID,
-		ThreadID:            threadID,
-		RequestedChildRunID: childRunID,
-		RequestMessageID:    message.ID,
-		Input:               input,
-		MetadataJSON:        string(metadata),
+		SourceAgentCode:       extension.SourceAgentCode,
+		TargetAgentCode:       targetAgent,
+		CapabilityCode:        extension.CapabilityCode,
+		ParentRunID:           extension.ParentRunID,
+		TraceID:               extension.TraceID,
+		RequestedDelegationID: extension.DelegationID,
+		ThreadID:              threadID,
+		RequestedChildRunID:   childRunID,
+		RequestMessageID:      message.ID,
+		Input:                 input,
+		MetadataJSON:          string(metadata),
 	}, nil
 }
 
@@ -89,8 +93,16 @@ func parseDelegationExtension(message *a2a.Message, request *a2a.SendMessageRequ
 	extension.SourceAgentCode = strings.TrimSpace(extension.SourceAgentCode)
 	extension.CapabilityCode = strings.TrimSpace(extension.CapabilityCode)
 	extension.ParentRunID = strings.TrimSpace(extension.ParentRunID)
+	extension.TraceID = strings.TrimSpace(extension.TraceID)
+	extension.DelegationID = strings.TrimSpace(extension.DelegationID)
 	if extension.SourceAgentCode == "" || extension.CapabilityCode == "" || extension.ParentRunID == "" {
 		return delegationExtension{}, a2a.NewError(a2a.ErrInvalidParams, "sourceAgentCode, capabilityCode and parentRunId are required")
+	}
+	if len(extension.TraceID) > 128 {
+		return delegationExtension{}, a2a.NewError(a2a.ErrInvalidParams, "traceId is too long")
+	}
+	if len(extension.DelegationID) > 64 {
+		return delegationExtension{}, a2a.NewError(a2a.ErrInvalidParams, "delegationId is too long")
 	}
 	return extension, nil
 }
@@ -261,6 +273,9 @@ func extractText(value any) string {
 	object, ok := value.(map[string]any)
 	if !ok {
 		return ""
+	}
+	if text, ok := object["text"].(string); ok {
+		return text
 	}
 	if text, ok := object["message"].(string); ok {
 		return text

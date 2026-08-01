@@ -196,6 +196,48 @@ func TestAcceptDelegationIdempotencyDetectsMetadataConflict(t *testing.T) {
 	}
 }
 
+func TestAcceptDelegationRejectsCorrelationConflict(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*AcceptDelegationCommand)
+	}{
+		{name: "delegation id", edit: func(command *AcceptDelegationCommand) { command.RequestedDelegationID = "delegation-1" }},
+		{name: "trace id", edit: func(command *AcceptDelegationCommand) { command.TraceID = "trace-1" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := setupDelegationFixture(t)
+			first := delegationCommand()
+			test.edit(&first)
+			if _, err := fixture.runtime.AcceptDelegation(context.Background(), first); err != nil {
+				t.Fatalf("accept first delegation: %v", err)
+			}
+			changed := delegationCommand()
+			if test.name == "delegation id" {
+				changed.RequestedDelegationID = "delegation-2"
+			} else {
+				changed.TraceID = "trace-2"
+			}
+			if _, err := fixture.runtime.AcceptDelegation(context.Background(), changed); !errors.Is(err, ErrDelegationConflict()) {
+				t.Fatalf("expected correlation conflict, got %v", err)
+			}
+		})
+	}
+}
+
+func TestAcceptDelegationValidatesCapabilityInputContract(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	if err := fixture.database.Model(&models.AgentCapability{}).
+		Where("agent_id = ? AND capability_code = ?", fixture.targetAgent.ID, "write").
+		Updates(map[string]any{"input_schema_json": `{"type":"object","required":["prompt"],"properties":{"prompt":{"type":"string"}}}`}).Error; err != nil {
+		t.Fatalf("set capability input schema: %v", err)
+	}
+	command := delegationCommand()
+	command.Input = []byte(`{"wrong":true}`)
+	if _, err := fixture.runtime.AcceptDelegation(context.Background(), command); !errors.Is(err, ErrInvalidDelegation()) {
+		t.Fatalf("expected input contract error, got %v", err)
+	}
+}
+
 func TestAcceptDelegationValidatesAgentsCapabilityAndParent(t *testing.T) {
 	tests := []struct {
 		name string

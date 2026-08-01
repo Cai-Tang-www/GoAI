@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func (p *recordingRunPublisher) PublishRunExecute(_ context.Context, runID strin
 func setupRunTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRunPublisher) {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Message{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}, &models.Message{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	publisher := &recordingRunPublisher{}
@@ -740,6 +741,57 @@ func TestHandleRunExecuteRetriesAndFails(t *testing.T) {
 	}
 }
 
+type wrappedNonRetryableError struct{}
+
+func (wrappedNonRetryableError) Error() string   { return "capability is not supported" }
+func (wrappedNonRetryableError) Retryable() bool { return false }
+
+func TestHandleRunExecuteDoesNotRetryWrappedNonRetryableError(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	agent, workflow := seedAgentWorkflow(t, gdb)
+	run := models.Run{
+		RunID:       "run_non_retryable",
+		ThreadID:    "thread-non-retryable",
+		AgentID:     agent.ID,
+		WorkflowID:  workflow.ID,
+		UserID:      1,
+		TriggerType: "a2a",
+		InputJSON:   `{"prompt":"hello"}`,
+		Status:      models.RunStatusQueued,
+	}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	attempts := 0
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+	service.executeNode = func(context.Context, *models.Run, WorkflowNode, int) (string, error) {
+		attempts++
+		return "", fmt.Errorf("calling target agent: %w", wrappedNonRetryableError{})
+	}
+
+	err := service.HandleRunExecute(context.Background(), run.RunID)
+	if err == nil || !strings.Contains(err.Error(), "capability is not supported") {
+		t.Fatalf("expected wrapped non-retryable error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("non-retryable error executed %d attempts, want 1", attempts)
+	}
+
+	var saved models.Run
+	if err := gdb.Where("run_id = ?", run.RunID).First(&saved).Error; err != nil {
+		t.Fatalf("load failed run: %v", err)
+	}
+	if saved.Status != models.RunStatusFailed || saved.RetryCount != 0 {
+		t.Fatalf("unexpected failed run: status=%s retries=%d", saved.Status, saved.RetryCount)
+	}
+	var stepCount int64
+	if err := gdb.Model(&models.RunStep{}).Where("run_id = ?", run.RunID).Count(&stepCount).Error; err != nil {
+		t.Fatalf("count run steps: %v", err)
+	}
+	if stepCount != 1 {
+		t.Fatalf("run step count=%d, want 1", stepCount)
+	}
+}
 func TestExecuteWorkflowNodeRejectsUnsupportedType(t *testing.T) {
 	_, err := executeWorkflowNode(context.Background(), &models.Run{}, WorkflowNode{Key: "delegate", Type: "agent"}, 1)
 	if err == nil || !strings.Contains(err.Error(), "unsupported workflow node type") {
@@ -1046,7 +1098,7 @@ func TestNewRunServiceRejectsMissingDependencies(t *testing.T) {
 func TestRunServiceInstancesKeepDatabaseAndPublisherIsolated(t *testing.T) {
 	openDatabase := func(suffix string) *gorm.DB {
 		gdb := openSQLiteTestDB(t, suffix)
-		if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
+		if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}, &models.Message{}); err != nil {
 			t.Fatalf("auto migrate %s failed: %v", suffix, err)
 		}
 		return gdb
@@ -1138,7 +1190,7 @@ func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T)
 	if err := gdb.Create(&endpoint).Error; err != nil {
 		t.Fatalf("create endpoint failed: %v", err)
 	}
-	invoker := &recordingAgentInvoker{result: &AgentInvocationResult{TaskID: "child-task", State: "TASK_STATE_COMPLETED", OutputJSON: `{"document":"ok"}`}}
+	invoker := &recordingAgentInvoker{result: &AgentInvocationResult{TaskID: "child-task", State: AgentInvocationStateCompleted, OutputJSON: `{"document":"ok"}`}}
 	service.agentInvoker = invoker
 	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
 
@@ -1214,9 +1266,11 @@ func setupRunLoopTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRun
 		&models.AgentCapability{},
 		&models.AgentEndpoint{},
 		&models.Workflow{},
+		&models.Thread{},
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},
+		&models.Delegation{},
 		&models.Message{},
 		&models.LoopRecord{},
 		&models.LoopEvaluation{},

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"GoAI/a2aprotocol"
+	"GoAI/observability"
 	"GoAI/services"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -34,6 +35,10 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 			}
 			if request.Message == nil || request.Message.Role != a2a.MessageRoleUser {
 				t.Fatalf("unexpected A2A message: %+v", request.Message)
+			}
+			metadata, ok := request.Message.Metadata[a2aprotocol.DelegationExtensionURI].(map[string]any)
+			if !ok || metadata["traceId"] != "trace-parent" || metadata["delegationId"] != "dlg-parent" || metadata["parentRunId"] != "run-parent" {
+				t.Fatalf("A2A delegation metadata not propagated: %#v", request.Message.Metadata)
 			}
 			response := &a2a.StreamResponse{Event: &a2a.Task{
 				ID:        request.Message.TaskID,
@@ -71,6 +76,8 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 		TargetAgentCode: "writer",
 		CapabilityCode:  "write",
 		ParentRunID:     "run-parent",
+		TraceID:         "trace-parent",
+		DelegationID:    "dlg-parent",
 		ThreadID:        "thread-1",
 		TaskID:          "a2a_task_123",
 		MessageID:       "a2a_message_123",
@@ -80,7 +87,7 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke: %v", err)
 	}
-	if result.State != string(a2a.TaskStateCompleted) || result.OutputJSON != `{"answer":"ok"}` {
+	if result.State != services.AgentInvocationStateCompleted || result.OutputJSON != `{"answer":"ok"}` {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	if sendCount.Load() != 1 || pollCount.Load() != 1 {
@@ -329,6 +336,71 @@ func TestClientSupportsHTTPSAgentEndpoint(t *testing.T) {
 	}
 	if result.OutputJSON != `{"answer":"https-ok"}` {
 		t.Fatalf("unexpected HTTPS result: %+v", result)
+	}
+}
+
+func TestClientFallsBackToNextEndpointAndRecordsOverallSuccess(t *testing.T) {
+	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer failingServer.Close()
+
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/a2a/agents/writer/.well-known/agent-card.json":
+			_ = json.NewEncoder(w).Encode(testCard(serverBaseURL(r), "write"))
+		case "/a2a/agents/writer/message:send":
+			var request a2a.SendMessageRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode send request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(&a2a.StreamResponse{Event: &a2a.Message{
+				ID: request.Message.ID, Role: a2a.MessageRoleAgent,
+				Parts: a2a.ContentParts{a2a.NewDataPart(map[string]any{"answer": "fallback-ok"})},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer successServer.Close()
+
+	bundle := observability.NewNoop()
+	client, err := New(successServer.Client(), time.Second, time.Millisecond, WithObservability(bundle))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	result, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
+		SourceAgentCode: "planner", TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "parent",
+		TaskID: "fallback-task", MessageID: "fallback-message", InputJSON: `{}`,
+		Endpoints: []services.AgentInvocationEndpoint{
+			{Address: failingServer.URL + "/a2a/agents/writer", Transport: "http"},
+			{Address: successServer.URL + "/a2a/agents/writer", Transport: "http"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("invoke with endpoint fallback: %v", err)
+	}
+	if result.OutputJSON != `{"answer":"fallback-ok"}` {
+		t.Fatalf("unexpected fallback result: %+v", result)
+	}
+
+	response := httptest.NewRecorder()
+	bundle.Metrics.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics := response.Body.String()
+	if !contains(metrics, `goai_a2a_requests_total{operation="invoke",status="success"} 1`) {
+		t.Fatalf("overall success metric missing:\n%s", metrics)
+	}
+	if contains(metrics, `goai_a2a_requests_total{operation="invoke",status="error"}`) {
+		t.Fatalf("retryable endpoint failure leaked into overall invocation status:\n%s", metrics)
+	}
+}
+
+func TestNilClientInvokeReturnsError(t *testing.T) {
+	var client *Client
+	_, err := client.Invoke(context.Background(), services.AgentInvocationRequest{})
+	if err == nil || !contains(err.Error(), "A2A client is nil") {
+		t.Fatalf("expected nil client error, got %v", err)
 	}
 }
 

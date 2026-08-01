@@ -14,6 +14,7 @@ import (
 
 	"GoAI/ai"
 	"GoAI/domain/runstate"
+	"GoAI/einoexecutor"
 	"GoAI/models"
 	"GoAI/observability"
 	"GoAI/requestctx"
@@ -63,6 +64,7 @@ type RunService struct {
 	database          *gorm.DB
 	publisher         RunEventPublisher
 	agentInvoker      AgentInvoker
+	graphExecutor     *einoexecutor.Executor
 	chatService       *ChatService
 	loopService       *LoopService
 	observability     *observability.Bundle
@@ -81,6 +83,7 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 	service := &RunService{
 		database:          database,
 		publisher:         publisher,
+		graphExecutor:     einoexecutor.New(),
 		stepRetryBackoffs: append([]time.Duration(nil), defaultStepRetryBackoffs...),
 	}
 	service.executeNode = service.executeDefaultNode
@@ -653,7 +656,6 @@ func (s *RunService) createRun(ctx context.Context, userID uint64, req CreateRun
 }
 
 // CreateRun 创建并投递一个普通 API Run。
-// CreateRun 创建并投递一个普通 API Run。
 func (s *RunService) CreateRun(ctx context.Context, userID uint64, req CreateRunRequest) (result *RunMutationResult, err error) {
 	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "run.create", "", req.ThreadID, "")
 	status := "success"
@@ -834,18 +836,20 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 
-	order, err := ResolveExecutionOrder(def)
+	if s.graphExecutor == nil {
+		return s.failClaimedRun(observedCtx, run.RunID, errors.New("run service graph executor is nil"))
+	}
+	outputJSON, err := s.graphExecutor.Execute(observedCtx, def, run.InputJSON, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
+			return "", err
+		}
+		return s.executeNodeWithRetryInput(nodeCtx, run, node, input)
+	})
 	if err != nil {
 		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
-
-	for _, node := range order {
-		if err := s.updateCurrentStep(observedCtx, run.RunID, node.Key); err != nil {
-			return s.failClaimedRun(observedCtx, run.RunID, err)
-		}
-		if err := s.executeNodeWithRetry(observedCtx, run, node); err != nil {
-			return s.failClaimedRun(observedCtx, run.RunID, err)
-		}
+	if err := s.validateRunOutputContract(observedCtx, run, outputJSON); err != nil {
+		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 
 	if err := s.transitionRun(observedCtx, run, models.RunStatusSuccess, ""); err != nil {
@@ -881,20 +885,38 @@ func (s *RunService) transitionRun(ctx context.Context, run *models.Run, nextSta
 
 // executeNodeWithRetry 将每次 attempt 的开始和结束分别提交，节点执行本身不持有数据库事务。
 func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, node WorkflowNode) error {
-	var lastErr error
 	nodeInput, err := s.resolveNodeInput(ctx, run, node)
 	if err != nil {
 		return err
+	}
+	_, err = s.executeNodeWithRetryInput(ctx, run, node, nodeInput)
+	return err
+}
+
+// executeNodeWithRetryInput 执行一个已确定输入的节点，并返回最终输出供 Eino 下游节点使用。
+func (s *RunService) executeNodeWithRetryInput(ctx context.Context, run *models.Run, node WorkflowNode, nodeInput string) (string, error) {
+	var lastErr error
+	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+		config, err := ParseAgentNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		if len(config.InputFrom) > 0 {
+			nodeInput, err = s.resolveNodeInput(ctx, run, node)
+			if err != nil {
+				return "", err
+			}
+		}
 	}
 	for attempt := 1; attempt <= maxNodeRetries+1; attempt++ {
 		nodeRun := *run
 		nodeRun.InputJSON = nodeInput
 		step, err := s.startRunStep(ctx, &nodeRun, node, attempt)
 		if err != nil {
-			return err
+			return "", err
 		}
 
-		outputJSON, execErr := s.executeWorkflowNode(ctx, &nodeRun, node, attempt)
+		outputJSON, execErr := s.executeWorkflowNodeWithInput(ctx, &nodeRun, node, attempt, nodeInput)
 		if execErr == nil {
 			outputJSON, execErr = normalizeNodeOutput(outputJSON)
 		}
@@ -909,22 +931,22 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 			finishErr := s.finishRunStep(persistCtx, run, step, models.RunStepStatusFailed, "{}", execErr.Error(), latencyMS, &finishedAt)
 			cancel()
 			if finishErr != nil {
-				return errors.Join(execErr, fmt.Errorf("persisting failed run step: %w", finishErr))
+				return "", errors.Join(execErr, fmt.Errorf("persisting failed run step: %w", finishErr))
 			}
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return "", ctx.Err()
 			}
 			if errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
-				return execErr
+				return "", execErr
 			}
-			if invocationErr, ok := execErr.(retryableInvocationError); ok && !invocationErr.Retryable() {
-				return execErr
+			if !isRetryableInvocationError(execErr) {
+				return "", execErr
 			}
-			if attempt > maxNodeRetries || !isRetryableInvocationError(execErr) {
-				continue
+			if attempt > maxNodeRetries {
+				break
 			}
 			if err := s.incrementRunRetry(ctx, run.RunID); err != nil {
-				return err
+				return "", err
 			}
 			backoff := time.Duration(0)
 			if attempt-1 < len(s.stepRetryBackoffs) {
@@ -932,7 +954,7 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return "", ctx.Err()
 			case <-time.After(backoff):
 			}
 			continue
@@ -946,18 +968,17 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 			markErr := s.finishRunStep(failureCtx, run, step, models.RunStepStatusFailed, "{}", finishErr.Error(), latencyMS, &finishedAt)
 			failureCancel()
 			if markErr != nil {
-				return errors.Join(finishErr, fmt.Errorf("persisting failed run step after completion error: %w", markErr))
+				return "", errors.Join(finishErr, fmt.Errorf("persisting failed run step after completion error: %w", markErr))
 			}
-			return fmt.Errorf("persisting successful run step: %w", finishErr)
+			return "", fmt.Errorf("persisting successful run step: %w", finishErr)
 		}
-		return nil
+		return outputJSON, nil
 	}
 	if lastErr == nil {
-		return errors.New("node execution failed after retries")
+		return "", errors.New("node execution failed after retries")
 	}
-	return lastErr
+	return "", lastErr
 }
-
 func (s *RunService) startRunLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run) error {
 	if s.loopService == nil || run == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
 		return nil
@@ -1237,6 +1258,15 @@ func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node
 	return string(encoded), nil
 }
 
+// executeWorkflowNodeWithInput executes a node with the value propagated by Eino.
+func (s *RunService) executeWorkflowNodeWithInput(ctx context.Context, run *models.Run, node WorkflowNode, attempt int, input string) (string, error) {
+	nodeRun := *run
+	nodeRun.InputJSON = input
+	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+		return s.executeAgentNode(ctx, &nodeRun, node)
+	}
+	return s.executeNode(ctx, &nodeRun, node, attempt)
+}
 func (s *RunService) executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
 	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
 		return s.executeAgentNode(ctx, run, node)
@@ -1295,6 +1325,8 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 		TargetAgentCode: target.AgentCode,
 		CapabilityCode:  capability.CapabilityCode,
 		ParentRunID:     run.RunID,
+		TraceID:         run.TraceID,
+		DelegationID:    stableA2AID("delegation", run.RunID, node.Key),
 		ThreadID:        run.ThreadID,
 		TaskID:          stableA2AID("task", run.RunID, node.Key),
 		MessageID:       stableA2AID("message", run.RunID, node.Key),
@@ -1308,8 +1340,8 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	if result == nil {
 		return "", errors.New("A2A agent invoker returned an empty result")
 	}
-	if result.State != "" && result.State != "TASK_STATE_COMPLETED" {
-		return "", fmt.Errorf("target agent completed with unsupported state %s", result.State)
+	if result.State != AgentInvocationStateCompleted {
+		return "", fmt.Errorf("target agent returned unsupported invocation state %q", result.State)
 	}
 	var raw json.RawMessage = json.RawMessage(result.OutputJSON)
 	if !json.Valid(raw) {

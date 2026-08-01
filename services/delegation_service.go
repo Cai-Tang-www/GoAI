@@ -13,6 +13,7 @@ import (
 	"GoAI/domain/runstate"
 	"GoAI/models"
 	"GoAI/observability"
+	"GoAI/requestctx"
 
 	"gorm.io/gorm"
 )
@@ -38,15 +39,17 @@ func ErrInvalidDelegation() error { return errInvalidDelegation }
 
 // AcceptDelegationCommand 是 A2A Gateway 映射到 Runtime 的协议无关委派命令。
 type AcceptDelegationCommand struct {
-	SourceAgentCode     string
-	TargetAgentCode     string
-	CapabilityCode      string
-	ParentRunID         string
-	ThreadID            string
-	RequestedChildRunID string
-	RequestMessageID    string
-	Input               json.RawMessage
-	MetadataJSON        string
+	SourceAgentCode       string
+	TargetAgentCode       string
+	CapabilityCode        string
+	ParentRunID           string
+	TraceID               string
+	RequestedDelegationID string
+	ThreadID              string
+	RequestedChildRunID   string
+	RequestMessageID      string
+	Input                 json.RawMessage
+	MetadataJSON          string
 }
 
 // DelegationResult 返回已接受委派及其目标 Child Run。
@@ -179,11 +182,21 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	targetCode := strings.TrimSpace(command.TargetAgentCode)
 	capabilityCode := strings.TrimSpace(command.CapabilityCode)
 	parentRunID := strings.TrimSpace(command.ParentRunID)
+	requestedTraceID := strings.TrimSpace(command.TraceID)
+	traceID := requestedTraceID
+	requestedDelegationID := strings.TrimSpace(command.RequestedDelegationID)
 	childRunID := strings.TrimSpace(command.RequestedChildRunID)
 	messageID := strings.TrimSpace(command.RequestMessageID)
 	threadID := strings.TrimSpace(command.ThreadID)
 	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.accept", parentRunID, threadID, "")
 	ctx = observedCtx
+	if traceID == "" {
+		traceID = requestctx.TraceIDFromContext(ctx)
+	}
+	if traceID == "" {
+		traceID = requestctx.NewTraceID()
+	}
+	ctx = requestctx.WithTraceID(ctx, traceID)
 	status := "success"
 	defer func() {
 		if err != nil {
@@ -211,8 +224,11 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	if sourceCode == "" || targetCode == "" || capabilityCode == "" || parentRunID == "" || childRunID == "" || messageID == "" || threadID == "" {
 		return nil, fmt.Errorf("%w: source_agent_code, target_agent_code, capability_code, parent_run_id, child_run_id, message_id and thread_id are required", errInvalidDelegation)
 	}
-	if len(childRunID) > 64 || len(threadID) > 64 || len(messageID) > 64 || len(parentRunID) > 64 {
+	if len(childRunID) > 64 || len(threadID) > 64 || len(messageID) > 64 || len(parentRunID) > 64 || len(requestedDelegationID) > 64 {
 		return nil, fmt.Errorf("%w: delegation identifiers must be at most 64 characters", errInvalidDelegation)
+	}
+	if len(requestedTraceID) > 128 {
+		return nil, fmt.Errorf("%w: trace_id must be at most 128 characters", errInvalidDelegation)
 	}
 	inputJSON, err := canonicalizeJSON(command.Input)
 	if err != nil {
@@ -271,6 +287,9 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	if capability.Version != "" && capability.Version != strconv.Itoa(workflow.Version) {
 		return nil, fmt.Errorf("%w: target capability workflow version does not match capability version", errInvalidDelegation)
 	}
+	if err := validateCapabilityInput(capability.InputSchemaJSON, inputJSON); err != nil {
+		return nil, fmt.Errorf("%w: capability input contract: %v", errInvalidDelegation, err)
+	}
 
 	ownerUserID := targetAgent.OwnerUserID
 	var parentRun models.Run
@@ -286,7 +305,10 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 		return nil, fmt.Errorf("loading parent run: %w", err)
 	}
 
-	delegationID := newPrefixedID("dlg")
+	delegationID := requestedDelegationID
+	if delegationID == "" {
+		delegationID = newPrefixedID("dlg")
+	}
 	var createdDelegation *models.Delegation
 	hook := func(tx *gorm.DB, run *models.Run, _ *models.Agent) error {
 		if _, err := ensureThread(tx, threadID, ownerUserID); err != nil {
@@ -315,6 +337,7 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 			ThreadID:         threadID,
 			ParentRunID:      parentRunID,
 			ChildRunID:       run.RunID,
+			TraceID:          traceID,
 			SourceAgentID:    sourceAgent.ID,
 			TargetAgentID:    targetAgent.ID,
 			CapabilityCode:   capabilityCode,
@@ -356,7 +379,7 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 			}
 			return nil, fmt.Errorf("loading existing delegation request message: %w", err)
 		}
-		if existing.SourceAgentID != sourceAgent.ID || existing.TargetAgentID != targetAgent.ID || existing.CapabilityCode != capabilityCode || existing.ParentRunID != parentRunID || existing.RequestMessageID != messageID || existing.InputJSON != inputJSON || existingMessage.ThreadID != threadID || existingMessage.SenderID != sourceCode || existingMessage.ReceiverID != targetCode || existingMessage.MessageType != models.MessageTypeDelegation || existingMessage.ContentType != "application/json" || existingMessage.ContentJSON != inputJSON || existingMessage.MetadataJSON != metadataJSON {
+		if existing.SourceAgentID != sourceAgent.ID || existing.TargetAgentID != targetAgent.ID || existing.CapabilityCode != capabilityCode || existing.ParentRunID != parentRunID || existing.RequestMessageID != messageID || existing.InputJSON != inputJSON || existingMessage.ThreadID != threadID || existingMessage.SenderID != sourceCode || existingMessage.ReceiverID != targetCode || existingMessage.MessageType != models.MessageTypeDelegation || existingMessage.ContentType != "application/json" || existingMessage.ContentJSON != inputJSON || existingMessage.MetadataJSON != metadataJSON || (requestedDelegationID != "" && existing.DelegationID != delegationID) || (requestedTraceID != "" && existing.TraceID != traceID) {
 			return nil, errDelegationConflict
 		}
 		createdDelegation = &existing
