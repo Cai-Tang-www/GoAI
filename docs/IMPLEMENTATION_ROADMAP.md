@@ -45,11 +45,11 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - Child Run 终态回写 Delegation，并将成功结果映射为 Result Message 与 A2A Artifact
 - 相同请求支持幂等复用，冲突请求显式拒绝，重复 Kafka 消费不会重复执行或重复生成结果
 - 远程 Agent Endpoint 强制 HTTPS，本地开发 Endpoint 强制 loopback HTTP；两者都访问同一 A2A Gateway，不提供 Service 直调旁路
-- 当前仅完成入站委派；A2A Agent 身份认证、授权与凭据管理尚未实现，路由只适用于受控开发网络
+- 入站/出站 A2A 委派闭环已完成；A2A Agent 身份认证、授权与凭据管理尚未实现，路由只适用于受控开发网络
 
 ## P1：多 Agent 运行时闭环
 
-### 7. 多 Agent 协作运行时（Issue #21，核心闭环进行中）
+### 7. 多 Agent 协作运行时（Issue #37，核心闭环已落地）
 已落地：
 - Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调
 - 官方 A2A Go SDK Client 完成 Agent Card discovery、能力/扩展校验、`message:send`、Task polling 和 Artifact/Message 结果收敛
@@ -61,9 +61,11 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 多 Child Run 并行执行、结果聚合与部分失败策略
 - A2A Agent 身份认证、授权和 Endpoint 凭据管理
 - Supervisor / Router / Worker 协作策略
-### 8. Eino Graph 能力化接入
-- 把 Graph 定位成 Agent 的一种执行能力
-- 保持 Workflow DSL 基础校验与执行顺序解析
+### 8. Eino Graph 能力化接入（Issue #37，V1 已落地）
+- 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制
+- 已使用 Eino Graph 执行单个 Agent 内部的串行/可达 Workflow 节点
+- `agent` 节点必须经由 A2A Client 与目标 Agent Gateway 通信，不允许进程内 Service 直调
+- 后续扩展并行 DAG、条件分支、流式节点和节点级恢复
 
 ### 9. Replay / Loop / Trace
 - Thread Replay
