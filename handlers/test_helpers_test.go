@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"GoAI/config"
 	"GoAI/models"
 	"GoAI/routers"
 	"GoAI/services"
@@ -96,11 +97,20 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 	if err != nil {
 		t.Fatalf("create runtime service failed: %v", err)
 	}
+	appConfig := config.AppConfig
+	if appConfig == nil {
+		appConfig = &config.Config{}
+	}
+	chatService, err := services.NewChatService(appConfig, &http.Client{})
+	if err != nil {
+		t.Fatalf("create chat service failed: %v", err)
+	}
 	router, err := routers.New(routers.Dependencies{
-		Database:   database,
-		RunService: runService,
-		Runtime:    runtimeService,
-		A2AGateway: http.NotFoundHandler(),
+		Database:    database,
+		RunService:  runService,
+		ChatService: chatService,
+		Runtime:     runtimeService,
+		A2AGateway:  http.NotFoundHandler(),
 	})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)

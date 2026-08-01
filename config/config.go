@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -47,6 +48,15 @@ type Config struct {
 	ModelProviders             map[string]ModelProviderConfig
 	A2AClientRequestTimeout    time.Duration
 	A2AClientPollInterval      time.Duration
+	ServiceGovernanceEnabled   bool
+	RateLimitRequestsPerSecond float64
+	RateLimitBurst             int
+	RateLimitMaxKeys           int
+	RateLimitScopes            []string
+	DownstreamRequestTimeout   time.Duration
+	CircuitFailureThreshold    int
+	CircuitOpenTimeout         time.Duration
+	CircuitMaxTargets          int
 }
 
 const defaultShutdownTimeout = 15 * time.Second
@@ -79,6 +89,7 @@ func LoadConfig() error {
 		ModelScopeModel:            strings.TrimSpace(os.Getenv("MODELSCOPE_MODEL")),
 		ModelProviderDefault:       strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
 		ModelProviders:             make(map[string]ModelProviderConfig),
+		ServiceGovernanceEnabled:   true,
 	}
 
 	var err error
@@ -109,6 +120,31 @@ func LoadConfig() error {
 	}
 	appConfig.A2AClientRequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
 	appConfig.A2AClientPollInterval = time.Duration(pollIntervalMilliseconds) * time.Millisecond
+	if appConfig.RateLimitRequestsPerSecond, err = loadFloatEnv("RATE_LIMIT_REQUESTS_PER_SECOND", 20); err != nil {
+		return err
+	}
+	if appConfig.RateLimitBurst, err = loadIntEnv("RATE_LIMIT_BURST", 40); err != nil {
+		return err
+	}
+	if appConfig.RateLimitMaxKeys, err = loadIntEnv("RATE_LIMIT_MAX_KEYS", 10000); err != nil {
+		return err
+	}
+	downstreamTimeoutSeconds, err := loadIntEnv("DOWNSTREAM_REQUEST_TIMEOUT_SECONDS", 30)
+	if err != nil {
+		return err
+	}
+	appConfig.DownstreamRequestTimeout = time.Duration(downstreamTimeoutSeconds) * time.Second
+	if appConfig.CircuitFailureThreshold, err = loadIntEnv("CIRCUIT_FAILURE_THRESHOLD", 3); err != nil {
+		return err
+	}
+	circuitOpenTimeoutSeconds, err := loadIntEnv("CIRCUIT_OPEN_TIMEOUT_SECONDS", 10)
+	if err != nil {
+		return err
+	}
+	appConfig.CircuitOpenTimeout = time.Duration(circuitOpenTimeoutSeconds) * time.Second
+	if appConfig.CircuitMaxTargets, err = loadIntEnv("CIRCUIT_MAX_TARGETS", 1024); err != nil {
+		return err
+	}
 	if appConfig.MySQLHost == "" {
 		appConfig.MySQLHost = "localhost"
 	}
@@ -128,9 +164,24 @@ func LoadConfig() error {
 		appConfig.KafkaRunGroupID = "run-worker-group"
 	}
 	if enableStr := strings.TrimSpace(os.Getenv("RBAC_ENABLE")); enableStr != "" {
-		appConfig.RBACEnable = parseBoolEnv(enableStr)
+		appConfig.RBACEnable, err = parseStrictBoolEnv("RBAC_ENABLE", enableStr)
+		if err != nil {
+			return err
+		}
 	}
-
+	if enableStr := strings.TrimSpace(os.Getenv("SERVICE_GOVERNANCE_ENABLE")); enableStr != "" {
+		appConfig.ServiceGovernanceEnabled, err = parseStrictBoolEnv("SERVICE_GOVERNANCE_ENABLE", enableStr)
+		if err != nil {
+			return err
+		}
+	}
+	rawScopes := os.Getenv("RATE_LIMIT_SCOPES")
+	if strings.TrimSpace(rawScopes) != "" {
+		appConfig.RateLimitScopes, err = parseScopesStrict(rawScopes)
+		if err != nil {
+			return err
+		}
+	}
 	providers := []string{"mimo", "deepseek", "qwen", "modelscope", "openai"}
 	for _, name := range providers {
 		upper := strings.ToUpper(name)
@@ -232,6 +283,10 @@ func (c *Config) ValidateStartup() error {
 		problems = append(problems, "JWT_SECRET is required")
 	}
 
+	if err := validateGovernanceStartup(c); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	if err := validateProviderStartup(c); err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -254,10 +309,69 @@ func loadIntEnv(key string, fallback int) (int, error) {
 	return parsed, nil
 }
 
+// loadFloatEnv 读取浮点型环境变量，空值时回退到默认值，非法值直接报错。
+func loadFloatEnv(key string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("invalid config: %s must be a number", key)
+	}
+	return parsed, nil
+}
+
 // parseBoolEnv 将常见的布尔环境变量写法统一为 true 或 false。
 func parseBoolEnv(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+}
+
+func parseStrictBoolEnv(key, value string) (bool, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid config: %s must be a boolean", key)
+	}
+}
+
+// parseScopesStrict parses and validates comma-separated governance scopes.
+func parseScopesStrict(value string) ([]string, error) {
+	scopes := parseScopes(value)
+	allowed := map[string]struct{}{
+		"api":  {},
+		"a2a":  {},
+		"agui": {},
+	}
+	for _, scope := range scopes {
+		if _, ok := allowed[strings.ToLower(scope)]; !ok {
+			return nil, fmt.Errorf("invalid config: RATE_LIMIT_SCOPES contains unsupported scope %q", scope)
+		}
+	}
+	return scopes, nil
+}
+
+func parseScopes(value string) []string {
+	parts := strings.Split(value, ",")
+	scopes := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		scope := strings.TrimSpace(part)
+		if scope == "" {
+			continue
+		}
+		if _, exists := seen[scope]; exists {
+			continue
+		}
+		seen[scope] = struct{}{}
+		scopes = append(scopes, scope)
+	}
+	return scopes
 }
 
 // validateProviderStartup 校验默认 Provider 及其关键字段在启动时是完整可用的。
@@ -299,4 +413,37 @@ func defaultEndpointPath(providerName string) string {
 	default:
 		return "/chat/completions"
 	}
+}
+
+// validateGovernanceStartup validates the process-local service governance settings.
+func validateGovernanceStartup(c *Config) error {
+	if c == nil || !c.ServiceGovernanceEnabled {
+		return nil
+	}
+	var problems []string
+	if c.RateLimitRequestsPerSecond <= 0 || math.IsNaN(c.RateLimitRequestsPerSecond) || math.IsInf(c.RateLimitRequestsPerSecond, 0) {
+		problems = append(problems, "RATE_LIMIT_REQUESTS_PER_SECOND must be greater than 0")
+	}
+	if c.RateLimitBurst <= 0 {
+		problems = append(problems, "RATE_LIMIT_BURST must be greater than 0")
+	}
+	if c.RateLimitMaxKeys <= 0 {
+		problems = append(problems, "RATE_LIMIT_MAX_KEYS must be greater than 0")
+	}
+	if c.DownstreamRequestTimeout <= 0 {
+		problems = append(problems, "DOWNSTREAM_REQUEST_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.CircuitFailureThreshold <= 0 {
+		problems = append(problems, "CIRCUIT_FAILURE_THRESHOLD must be greater than 0")
+	}
+	if c.CircuitOpenTimeout <= 0 {
+		problems = append(problems, "CIRCUIT_OPEN_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.CircuitMaxTargets <= 0 {
+		problems = append(problems, "CIRCUIT_MAX_TARGETS must be greater than 0")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid governance config: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }

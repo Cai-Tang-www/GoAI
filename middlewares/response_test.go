@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"GoAI/ai"
+	"GoAI/governance"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,8 @@ func TestWrapErrorMapsKnownSentinels(t *testing.T) {
 		{name: "workflow not found", err: services.ErrWorkflowNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeWorkflowNotFound},
 		{name: "provider missing", err: ai.ErrProviderNotFound, wantStatus: http.StatusBadRequest, wantCode: CodeProviderNotFound},
 		{name: "stream interrupted", err: ai.ErrStreamInterrupted, wantStatus: http.StatusInternalServerError, wantCode: CodeStreamInterrupted},
+		{name: "circuit open", err: governance.ErrCircuitOpen, wantStatus: http.StatusServiceUnavailable, wantCode: CodeServiceUnavailable},
+		{name: "downstream timeout", err: governance.ErrDownstreamTimeout, wantStatus: http.StatusGatewayTimeout, wantCode: CodeDownstreamTimeout},
 		{name: "dispatch failed", err: fmt.Errorf("%w: kafka down", services.ErrRunDispatchFailed()), wantStatus: http.StatusInternalServerError, wantCode: CodeKafkaPublishFailed},
 	}
 

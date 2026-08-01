@@ -14,17 +14,18 @@ import (
 type Metrics struct {
 	registry *prometheus.Registry
 
-	httpRequests    *prometheus.CounterVec
-	httpDuration    *prometheus.HistogramVec
-	kafkaEvents     *prometheus.CounterVec
-	runtimeEvents   *prometheus.CounterVec
-	runtimeDuration *prometheus.HistogramVec
-	runEvents       *prometheus.CounterVec
-	runDuration     *prometheus.HistogramVec
-	delegations     *prometheus.CounterVec
-	a2aRequests     *prometheus.CounterVec
-	loopEvents      *prometheus.CounterVec
-	loopDuration    *prometheus.HistogramVec
+	httpRequests     *prometheus.CounterVec
+	httpDuration     *prometheus.HistogramVec
+	kafkaEvents      *prometheus.CounterVec
+	runtimeEvents    *prometheus.CounterVec
+	runtimeDuration  *prometheus.HistogramVec
+	runEvents        *prometheus.CounterVec
+	runDuration      *prometheus.HistogramVec
+	delegations      *prometheus.CounterVec
+	a2aRequests      *prometheus.CounterVec
+	loopEvents       *prometheus.CounterVec
+	loopDuration     *prometheus.HistogramVec
+	governanceEvents *prometheus.CounterVec
 }
 
 // NewMetrics 创建隔离 Registry，避免测试之间污染全局 Prometheus 注册表。
@@ -102,10 +103,16 @@ func NewMetrics() (*Metrics, error) {
 			Help:      "Loop duration in seconds.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"loop_type", "status"}),
+		governanceEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "goai",
+			Subsystem: "governance",
+			Name:      "events_total",
+			Help:      "Service governance events.",
+		}, []string{"type", "scope", "status"}),
 	}
 	collectors := []prometheus.Collector{
 		m.httpRequests, m.httpDuration, m.kafkaEvents, m.runtimeEvents, m.runtimeDuration, m.runEvents, m.runDuration,
-		m.delegations, m.a2aRequests, m.loopEvents, m.loopDuration,
+		m.delegations, m.a2aRequests, m.loopEvents, m.loopDuration, m.governanceEvents,
 	}
 	for _, collector := range collectors {
 		if err := registry.Register(collector); err != nil {
@@ -192,4 +199,21 @@ func (m *Metrics) ObserveLoop(loopType, status string, elapsed time.Duration) {
 	}
 	m.loopEvents.WithLabelValues(loopType, status).Inc()
 	m.loopDuration.WithLabelValues(loopType, status).Observe(elapsed.Seconds())
+}
+
+// ObserveGovernance 记录限流、熔断和下游保护事件。
+func (m *Metrics) ObserveGovernance(eventType, scope, status string) {
+	if m == nil || m.governanceEvents == nil {
+		return
+	}
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	if scope == "" {
+		scope = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	m.governanceEvents.WithLabelValues(eventType, scope, status).Inc()
 }

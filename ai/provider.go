@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -32,6 +33,7 @@ type ProviderProfile struct {
 	APIKey       string
 	DefaultModel string
 	EndpointPath string
+	HTTPClient   *http.Client
 }
 
 type AIProvider interface {

@@ -59,7 +59,11 @@ func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, op
 		httpClient = &http.Client{}
 	}
 	cloned := *httpClient
-	cloned.Timeout = requestTimeout
+	if _, managed := cloned.Transport.(interface{ DownstreamTimeoutManaged() }); !managed {
+		cloned.Timeout = requestTimeout
+	} else {
+		cloned.Timeout = 0
+	}
 	previousRedirectPolicy := cloned.CheckRedirect
 	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := validateURL(req.URL); err != nil {

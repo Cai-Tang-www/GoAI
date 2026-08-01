@@ -43,6 +43,17 @@ type AgentInvoker interface {
 // RunServiceOption 为 RunService 装配可选运行时依赖。
 type RunServiceOption func(*RunService) error
 
+// WithChatService 注入 RunService 使用的 LLM ChatService，避免执行链路依赖包级 Provider 状态。
+func WithChatService(chatService *ChatService) RunServiceOption {
+	return func(service *RunService) error {
+		if chatService == nil {
+			return errors.New("configuring run service: chat service is nil")
+		}
+		service.chatService = chatService
+		return nil
+	}
+}
+
 // WithAgentInvoker 注入通过 A2A 协议执行 Workflow agent 节点的客户端。
 func WithAgentInvoker(invoker AgentInvoker) RunServiceOption {
 	return func(service *RunService) error {

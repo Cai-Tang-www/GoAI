@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"GoAI/ai"
+	"GoAI/governance"
 	"GoAI/requestctx"
 	"GoAI/services"
 
@@ -35,6 +36,9 @@ const (
 	CodeProviderInvalidConfig  = "PROVIDER_INVALID_CONFIG"
 	CodeModelNotConfigured     = "MODEL_NOT_CONFIGURED"
 	CodeStreamInterrupted      = "STREAM_INTERRUPTED"
+	CodeRateLimited            = "RATE_LIMITED"
+	CodeServiceUnavailable     = "SERVICE_UNAVAILABLE"
+	CodeDownstreamTimeout      = "DOWNSTREAM_TIMEOUT"
 	CodeInternalError          = "INTERNAL_ERROR"
 	CodeRBACPermissionLoad     = "RBAC_PERMISSION_LOAD_FAILED"
 	CodeKafkaPublishFailed     = "KAFKA_PUBLISH_FAILED"
@@ -135,6 +139,21 @@ func UnauthorizedInvalidCredentials() *AppError {
 // ForbiddenError 构造统一 403 错误。
 func ForbiddenError() *AppError {
 	return &AppError{HTTPStatus: http.StatusForbidden, Code: CodeAuthForbidden, Message: "forbidden"}
+}
+
+// RateLimitedError 构造统一限流错误。`Retry-After` 由治理中间件写入响应头。
+func RateLimitedError() *AppError {
+	return &AppError{HTTPStatus: http.StatusTooManyRequests, Code: CodeRateLimited, Message: "rate limit exceeded"}
+}
+
+// ServiceUnavailableError 构造下游服务暂时不可用错误。
+func ServiceUnavailableError(err error) *AppError {
+	return &AppError{HTTPStatus: http.StatusServiceUnavailable, Code: CodeServiceUnavailable, Message: "service temporarily unavailable", Err: err}
+}
+
+// DownstreamTimeoutError 构造下游超时错误。
+func DownstreamTimeoutError(err error) *AppError {
+	return &AppError{HTTPStatus: http.StatusGatewayTimeout, Code: CodeDownstreamTimeout, Message: "downstream request timed out", Err: err}
 }
 
 // ValidationFailed 构造请求参数错误。
@@ -253,6 +272,10 @@ func WrapError(err error) *AppError {
 		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeModelNotConfigured, Message: "model is not configured", Err: err}
 	case errors.Is(err, ai.ErrStreamInterrupted):
 		return &AppError{HTTPStatus: http.StatusInternalServerError, Code: CodeStreamInterrupted, Message: "stream interrupted", Err: err}
+	case errors.Is(err, governance.ErrCircuitOpen):
+		return ServiceUnavailableError(err)
+	case errors.Is(err, governance.ErrDownstreamTimeout):
+		return DownstreamTimeoutError(err)
 	default:
 		return InternalError("internal error", err)
 	}

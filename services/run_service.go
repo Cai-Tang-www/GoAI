@@ -63,6 +63,7 @@ type RunService struct {
 	database          *gorm.DB
 	publisher         RunEventPublisher
 	agentInvoker      AgentInvoker
+	chatService       *ChatService
 	loopService       *LoopService
 	observability     *observability.Bundle
 	executeNode       workflowNodeExecutor
@@ -80,9 +81,9 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 	service := &RunService{
 		database:          database,
 		publisher:         publisher,
-		executeNode:       executeWorkflowNode,
 		stepRetryBackoffs: append([]time.Duration(nil), defaultStepRetryBackoffs...),
 	}
+	service.executeNode = service.executeDefaultNode
 	for _, option := range options {
 		if option == nil {
 			continue
@@ -1338,6 +1339,14 @@ func stableA2AID(kind, parentRunID, nodeKey string) string {
 }
 
 func executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
+	return executeWorkflowNodeWithChatService(ctx, run, node, attempt, nil)
+}
+
+func (s *RunService) executeDefaultNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
+	return executeWorkflowNodeWithChatService(ctx, run, node, attempt, s.chatService)
+}
+
+func executeWorkflowNodeWithChatService(ctx context.Context, run *models.Run, node WorkflowNode, attempt int, chatService *ChatService) (string, error) {
 	var conf map[string]any
 	if len(node.Config) > 0 {
 		if err := json.Unmarshal(node.Config, &conf); err != nil {
@@ -1354,7 +1363,7 @@ func executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode
 	nodeType := strings.ToLower(strings.TrimSpace(node.Type))
 	switch nodeType {
 	case "llm":
-		return executeLLMNode(ctx, run)
+		return executeLLMNode(ctx, run, chatService)
 	case "tool", "noop", "planner":
 		resp := map[string]any{
 			"step_key": node.Key,
@@ -1368,7 +1377,7 @@ func executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode
 	}
 }
 
-func executeLLMNode(ctx context.Context, run *models.Run) (string, error) {
+func executeLLMNode(ctx context.Context, run *models.Run, chatService *ChatService) (string, error) {
 	var input struct {
 		Messages []struct {
 			Role    string `json:"role"`
@@ -1393,7 +1402,10 @@ func executeLLMNode(ctx context.Context, run *models.Run) (string, error) {
 		return `{"message":"llm node executed without input messages"}`, nil
 	}
 
-	stream, err := Chat(ctx, messages, run.Provider, run.Model)
+	if chatService == nil {
+		return "", errors.New("llm workflow node requires a chat service")
+	}
+	stream, err := chatService.Chat(ctx, messages, run.Provider, run.Model)
 	if err != nil {
 		return "", err
 	}

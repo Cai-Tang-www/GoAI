@@ -19,6 +19,7 @@ import (
 func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 	var sendCount atomic.Int32
 	var pollCount atomic.Int32
+	var transportCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -54,7 +55,14 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(server.Client(), time.Second, time.Millisecond)
+	serverClient := server.Client()
+	injectedClient := &http.Client{
+		Transport: countingRoundTripper{
+			base:  serverClient.Transport,
+			calls: &transportCount,
+		},
+	}
+	client, err := New(injectedClient, time.Second, time.Millisecond)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -78,6 +86,19 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 	if sendCount.Load() != 1 || pollCount.Load() != 1 {
 		t.Fatalf("unexpected request counts: send=%d poll=%d", sendCount.Load(), pollCount.Load())
 	}
+	if transportCount.Load() != 3 {
+		t.Fatalf("injected transport calls = %d, want 3", transportCount.Load())
+	}
+}
+
+type countingRoundTripper struct {
+	base  http.RoundTripper
+	calls *atomic.Int32
+}
+
+func (t countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.calls.Add(1)
+	return t.base.RoundTrip(req)
 }
 
 func TestClientRejectsRemoteHTTPEndpoint(t *testing.T) {
@@ -310,3 +331,21 @@ func TestClientSupportsHTTPSAgentEndpoint(t *testing.T) {
 		t.Fatalf("unexpected HTTPS result: %+v", result)
 	}
 }
+
+func TestNewDoesNotOverrideManagedTransportTimeout(t *testing.T) {
+	client, err := New(&http.Client{Transport: managedTimeoutRoundTripper{}}, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client.httpClient.Timeout != 0 {
+		t.Fatalf("managed transport client timeout = %s, want 0", client.httpClient.Timeout)
+	}
+}
+
+type managedTimeoutRoundTripper struct{}
+
+func (managedTimeoutRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (managedTimeoutRoundTripper) DownstreamTimeoutManaged() {}

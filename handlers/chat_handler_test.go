@@ -5,7 +5,6 @@ import (
 	"GoAI/config"
 	"GoAI/middlewares"
 	"GoAI/requestctx"
-	"GoAI/services"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,7 +22,6 @@ func TestChatValidationErrorUsesEnvelope(t *testing.T) {
 		RBACEnable:     false,
 		ModelProviders: map[string]config.ModelProviderConfig{},
 	}
-	services.ResetProviderRegistryForTest()
 
 	token, err := middlewares.GenerateToken(1)
 	if err != nil {
@@ -53,7 +51,6 @@ func TestChatMessageValidation(t *testing.T) {
 		RBACEnable:     false,
 		ModelProviders: map[string]config.ModelProviderConfig{},
 	}
-	services.ResetProviderRegistryForTest()
 
 	token, err := middlewares.GenerateToken(1)
 	if err != nil {
@@ -100,7 +97,6 @@ func TestChatSSEUsesUnifiedEnvelope(t *testing.T) {
 			},
 		},
 	}
-	services.ResetProviderRegistryForTest()
 
 	token, err := middlewares.GenerateToken(1)
 	if err != nil {
@@ -155,7 +151,6 @@ func TestChatSSEStreamErrorUsesEnvelope(t *testing.T) {
 			},
 		},
 	}
-	services.ResetProviderRegistryForTest()
 
 	token, err := middlewares.GenerateToken(1)
 	if err != nil {
@@ -211,7 +206,6 @@ func TestChatSSEStopsWhenRequestContextIsCancelled(t *testing.T) {
 			},
 		},
 	}
-	services.ResetProviderRegistryForTest()
 
 	token, err := middlewares.GenerateToken(1)
 	if err != nil {

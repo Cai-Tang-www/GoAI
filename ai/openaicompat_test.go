@@ -105,3 +105,48 @@ func TestOpenAICompatProviderChat(t *testing.T) {
 		t.Fatalf("default model not applied, body: %s", requestBody)
 	}
 }
+
+type providerRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f providerRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestOpenAICompatProviderUsesInjectedHTTPClient(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: providerRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")),
+			Request:    req,
+		}, nil
+	})}
+	provider, err := NewOpenAICompatProvider(ProviderProfile{
+		Name:         "deepseek",
+		Driver:       DriverOpenAICompatible,
+		BaseURL:      "https://provider.example",
+		APIKey:       "secret",
+		DefaultModel: "deepseek-chat",
+		EndpointPath: "/v1/chat/completions",
+		HTTPClient:   client,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	stream, err := provider.Chat(context.Background(), ChatRequest{Messages: []Message{{Role: "user", Content: "hello"}}})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	for range stream.Chunks {
+	}
+	for err := range stream.Errs {
+		if err != nil {
+			t.Fatalf("stream failed: %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("injected HTTP client calls = %d, want 1", calls)
+	}
+}
