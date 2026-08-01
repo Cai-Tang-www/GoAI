@@ -314,6 +314,8 @@ Provider 调试配置：
 - [产品设计提案](docs/PRODUCT_PROPOSAL.md)
 - [实施路线图](docs/IMPLEMENTATION_ROADMAP.md)
 - [统一响应契约](docs/RESPONSE_CONTRACT.md)
+- [HTTP / AG-UI / A2A 协议契约](docs/API_PROTOCOL_CONTRACT.md)
+- [HTTP 压测基线](bench/README.md)
 
 ## 启动与验证
 
