@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"GoAI/observability"
 )
 
 // AgentInvocationEndpoint 描述目标 Agent 可供出站 A2A 客户端访问的协议入口。
@@ -48,6 +50,17 @@ func WithAgentInvoker(invoker AgentInvoker) RunServiceOption {
 			return errors.New("configuring run service: agent invoker is nil")
 		}
 		service.agentInvoker = invoker
+		return nil
+	}
+}
+
+// WithRunObservability 注入 Run 执行的日志、指标和 Trace 能力。
+func WithRunObservability(bundle *observability.Bundle) RunServiceOption {
+	return func(service *RunService) error {
+		if bundle == nil {
+			return errors.New("configuring run service: observability bundle is nil")
+		}
+		service.observability = bundle
 		return nil
 	}
 }

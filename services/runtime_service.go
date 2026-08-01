@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"GoAI/models"
+	"GoAI/observability"
 
 	"gorm.io/gorm"
 )
@@ -61,23 +63,70 @@ type Runtime interface {
 
 // RuntimeService 协调 Thread、Message 与 Run 的原子创建和查询。
 type RuntimeService struct {
-	database   *gorm.DB
-	runService *RunService
+	database      *gorm.DB
+	runService    *RunService
+	observability *observability.Bundle
+}
+
+// RuntimeServiceOption 配置 RuntimeService 的可选运行时依赖。
+type RuntimeServiceOption func(*RuntimeService) error
+
+// WithRuntimeObservability 注入 Runtime 协调的日志、指标和 Trace 能力。
+func WithRuntimeObservability(bundle *observability.Bundle) RuntimeServiceOption {
+	return func(service *RuntimeService) error {
+		if bundle == nil {
+			return errors.New("configuring runtime service: observability bundle is nil")
+		}
+		service.observability = bundle
+		return nil
+	}
 }
 
 // NewRuntimeService 使用显式依赖构造 RuntimeService。
-func NewRuntimeService(database *gorm.DB, runService *RunService) (*RuntimeService, error) {
+func NewRuntimeService(database *gorm.DB, runService *RunService, options ...RuntimeServiceOption) (*RuntimeService, error) {
 	if database == nil {
 		return nil, errors.New("creating runtime service: database is nil")
 	}
 	if runService == nil {
 		return nil, errors.New("creating runtime service: run service is nil")
 	}
-	return &RuntimeService{database: database, runService: runService}, nil
+	service := &RuntimeService{database: database, runService: runService}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if err := option(service); err != nil {
+			return nil, err
+		}
+	}
+	return service, nil
 }
 
 // StartRun 在同一事务中创建或复用 Thread、持久化输入 Message 并创建 Run。
-func (s *RuntimeService) StartRun(ctx context.Context, command StartRunCommand) (*StartRunResult, error) {
+func (s *RuntimeService) StartRun(ctx context.Context, command StartRunCommand) (result *StartRunResult, err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "runtime.start_run", "", command.ThreadID, "")
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		runID, threadID := "", ""
+		if result != nil {
+			if result.Run != nil {
+				runID = result.Run.RunID
+			}
+			if result.Thread != nil {
+				threadID = result.Thread.ThreadID
+			}
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "start_run", status, startedAt, runID, threadID, "", func(metrics *observability.Metrics, operation, status string, elapsed time.Duration) {
+			metrics.ObserveRuntime(operation, status, elapsed)
+		}, err)
+	}()
+	return s.startRun(observedCtx, command)
+}
+
+func (s *RuntimeService) startRun(ctx context.Context, command StartRunCommand) (*StartRunResult, error) {
 	if command.OwnerUserID == 0 {
 		return nil, errors.New("owner_user_id is required")
 	}
@@ -144,7 +193,25 @@ func (s *RuntimeService) StartRun(ctx context.Context, command StartRunCommand) 
 }
 
 // Snapshot 返回当前用户可见的 Run 执行快照。
-func (s *RuntimeService) Snapshot(ctx context.Context, ownerUserID uint64, runID string) (*RunSnapshot, error) {
+func (s *RuntimeService) Snapshot(ctx context.Context, ownerUserID uint64, runID string) (snapshot *RunSnapshot, err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "runtime.snapshot", runID, "", "")
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		threadID := ""
+		if snapshot != nil {
+			threadID = snapshot.Run.ThreadID
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "snapshot", status, startedAt, runID, threadID, "", func(metrics *observability.Metrics, operation, status string, elapsed time.Duration) {
+			metrics.ObserveRuntime(operation, status, elapsed)
+		}, err)
+	}()
+	return s.snapshot(observedCtx, ownerUserID, runID)
+}
+
+func (s *RuntimeService) snapshot(ctx context.Context, ownerUserID uint64, runID string) (*RunSnapshot, error) {
 	run, err := s.runService.GetRunByRunID(ctx, ownerUserID, false, runID)
 	if err != nil {
 		return nil, err

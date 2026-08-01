@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,11 +14,14 @@ import (
 	"time"
 
 	"GoAI/a2aprotocol"
+	"GoAI/observability"
+	"GoAI/requestctx"
 	"GoAI/services"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	sdkclient "github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const defaultRequestTimeout = 30 * time.Second
@@ -26,10 +30,25 @@ const defaultRequestTimeout = 30 * time.Second
 type Client struct {
 	httpClient   *http.Client
 	pollInterval time.Duration
+	telemetry    *observability.Bundle
+}
+
+// Option 配置 A2A 出站客户端的可选依赖。
+type Option func(*Client) error
+
+// WithObservability 注入 A2A 出站调用的日志、指标和 Trace 能力。
+func WithObservability(bundle *observability.Bundle) Option {
+	return func(client *Client) error {
+		if bundle == nil {
+			return errors.New("configuring A2A client: observability bundle is nil")
+		}
+		client.telemetry = bundle
+		return nil
+	}
 }
 
 // New 创建安全的 A2A 出站客户端。HTTP 仅允许 loopback，远程地址必须使用 HTTPS。
-func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration) (*Client, error) {
+func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, options ...Option) (*Client, error) {
 	if requestTimeout <= 0 {
 		requestTimeout = defaultRequestTimeout
 	}
@@ -54,20 +73,64 @@ func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration) (*
 		}
 		return nil
 	}
-	return &Client{httpClient: &cloned, pollInterval: pollInterval}, nil
+	client := &Client{httpClient: &cloned, pollInterval: pollInterval}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if err := option(client); err != nil {
+			return nil, err
+		}
+	}
+	return client, nil
 }
 
 // Invoke 发现目标 Agent、校验能力并等待 A2A Task 进入终态。
 func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationRequest) (*services.AgentInvocationResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := validateRequest(request); err != nil {
 		return nil, invocationError(err, false)
 	}
+
+	startedAt := time.Now()
+	status := "success"
+	var span oteltrace.Span
+	if c != nil && c.telemetry != nil && c.telemetry.Tracer != nil {
+		ctx, span = c.telemetry.Tracer.Start(ctx, "a2a.invoke", observability.SpanAttributes(
+			requestctx.TraceIDFromContext(ctx), request.ParentRunID, request.ThreadID, "")...)
+		defer span.End()
+	}
+	defer func() {
+		if c == nil || c.telemetry == nil {
+			return
+		}
+		if c.telemetry.Metrics != nil {
+			c.telemetry.Metrics.ObserveA2A("invoke", status)
+		}
+		if c.telemetry.Logger != nil {
+			c.telemetry.Logger.InfoContext(ctx, "a2a invocation",
+				slog.String("trace_id", requestctx.TraceIDFromContext(ctx)),
+				slog.String("source_agent", request.SourceAgentCode),
+				slog.String("target_agent", request.TargetAgentCode),
+				slog.String("capability", request.CapabilityCode),
+				slog.String("parent_run_id", request.ParentRunID),
+				slog.String("status", status),
+				slog.Int64("latency_ms", time.Since(startedAt).Milliseconds()),
+			)
+		}
+	}()
 
 	var failures []error
 	for _, endpoint := range request.Endpoints {
 		result, err := c.invokeEndpoint(ctx, request, endpoint)
 		if err == nil {
 			return result, nil
+		}
+		status = "error"
+		if span != nil {
+			observability.MarkSpanError(span, err)
 		}
 		failures = append(failures, err)
 		if ctx.Err() != nil {

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"GoAI/models"
+	"GoAI/observability"
 
 	"gorm.io/gorm"
 )
@@ -59,6 +61,11 @@ type LoopFinishRequest struct {
 	OutputTokens       *int64
 	TotalTokens        *int64
 	FinishedAt         *time.Time
+	TraceID            string
+	ThreadID           string
+	RunID              string
+	DelegationID       string
+	LoopType           string
 }
 
 // LoopEvaluationRequest 描述一次异步 Loop 评估任务。
@@ -85,8 +92,9 @@ type LoopEvaluationDispatcher interface {
 
 // LoopService 统一管理 Loop 生命周期、执行快照和可选异步评估入口。
 type LoopService struct {
-	database   *gorm.DB
-	dispatcher LoopEvaluationDispatcher
+	database      *gorm.DB
+	dispatcher    LoopEvaluationDispatcher
+	observability *observability.Bundle
 }
 
 // LoopServiceOption 配置 LoopService 的可选依赖。
@@ -101,7 +109,20 @@ func WithLoopEvaluationDispatcher(dispatcher LoopEvaluationDispatcher) LoopServi
 		service.dispatcher = dispatcher
 		return nil
 	}
-} // WithLoopService 将 Loop 生命周期服务注入 RunService，统一维护 Run、Step 和 Delegation 的观测记录。
+}
+
+// WithLoopObservability 注入 Loop 生命周期的日志、指标和 Trace 能力。
+func WithLoopObservability(bundle *observability.Bundle) LoopServiceOption {
+	return func(service *LoopService) error {
+		if bundle == nil {
+			return errors.New("configuring loop service: observability bundle is nil")
+		}
+		service.observability = bundle
+		return nil
+	}
+}
+
+// WithLoopService 将 Loop 生命周期服务注入 RunService，统一维护 Run、Step 和 Delegation 的观测记录。
 func WithLoopService(loopService *LoopService) RunServiceOption {
 	return func(service *RunService) error {
 		if loopService == nil {
@@ -134,7 +155,27 @@ func (s *LoopService) Start(ctx context.Context, request LoopStartRequest) (*mod
 	if s == nil || s.database == nil {
 		return nil, errors.New("starting loop: service is not configured")
 	}
-	return s.startTx(ctx, s.database.WithContext(ctx), request)
+	return s.startObservedTx(ctx, s.database.WithContext(ctx), request)
+}
+
+func (s *LoopService) startObservedTx(ctx context.Context, tx *gorm.DB, request LoopStartRequest) (record *models.LoopRecord, err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "loop.start", request.RunID, request.ThreadID, request.DelegationID)
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		loopType := request.LoopType
+		loopID := strings.TrimSpace(request.LoopID)
+		if record != nil {
+			loopType = record.LoopType
+			loopID = record.LoopID
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "start_loop", status, startedAt, request.RunID, request.ThreadID, request.DelegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+			metrics.ObserveLoop(loopType, status, elapsed)
+		}, err, slog.String("loop_id", loopID))
+	}()
+	return s.startTx(observedCtx, tx, request)
 }
 
 // startTx 在调用方事务中创建一个 running Loop。
@@ -190,12 +231,27 @@ func (s *LoopService) Finish(ctx context.Context, request LoopFinishRequest) err
 	if s == nil || s.database == nil {
 		return errors.New("finishing loop: service is not configured")
 	}
-	if err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return s.finishTx(ctx, tx, request)
-	}); err != nil {
-		return err
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return s.finishObservedTx(ctx, tx, request)
+	})
+}
+
+func (s *LoopService) finishObservedTx(ctx context.Context, tx *gorm.DB, request LoopFinishRequest) (err error) {
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "loop.finish", request.RunID, request.ThreadID, request.DelegationID)
+	status := strings.TrimSpace(request.Status)
+	if status == "" {
+		status = "success"
 	}
-	return nil
+	defer func() {
+		observationStatus := status
+		if err != nil {
+			observationStatus = "error"
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "finish_loop", observationStatus, startedAt, request.RunID, request.ThreadID, request.DelegationID, func(metrics *observability.Metrics, _, metricStatus string, elapsed time.Duration) {
+			metrics.ObserveLoop(request.LoopType, metricStatus, elapsed)
+		}, err, slog.String("loop_id", strings.TrimSpace(request.LoopID)))
+	}()
+	return s.finishTx(observedCtx, tx, request)
 }
 
 // finishTx 在调用方事务中推进 Loop 终态。重复收敛到同一终态视为幂等成功。
@@ -260,10 +316,20 @@ func (s *LoopService) finishTx(ctx context.Context, tx *gorm.DB, request LoopFin
 }
 
 // QueueEvaluation 创建 pending 评估记录并将任务异步交给调度器。
-func (s *LoopService) QueueEvaluation(ctx context.Context, request LoopEvaluationRequest) error {
+func (s *LoopService) QueueEvaluation(ctx context.Context, request LoopEvaluationRequest) (err error) {
 	if s == nil || s.database == nil {
 		return errors.New("queueing loop evaluation: service is not configured")
 	}
+	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "loop.queue_evaluation", "", "", "")
+	status := "success"
+	defer func() {
+		if err != nil {
+			status = "error"
+		}
+		finishServiceObservation(s.observability, observedCtx, span, "queue_loop_evaluation", status, startedAt, "", "", "", func(metrics *observability.Metrics, _, metricStatus string, elapsed time.Duration) {
+			metrics.ObserveLoop("evaluation", metricStatus, elapsed)
+		}, err, slog.String("loop_id", strings.TrimSpace(request.LoopID)), slog.String("evaluator_code", strings.TrimSpace(request.EvaluatorCode)))
+	}()
 	request.LoopID = strings.TrimSpace(request.LoopID)
 	request.EvaluatorCode = strings.TrimSpace(request.EvaluatorCode)
 	if request.LoopID == "" || request.EvaluatorCode == "" {
@@ -274,7 +340,7 @@ func (s *LoopService) QueueEvaluation(ctx context.Context, request LoopEvaluatio
 		EvaluatorCode: request.EvaluatorCode,
 		Status:        models.EvaluationStatusPending,
 	}
-	if err := s.database.WithContext(ctx).Create(evaluation).Error; err != nil {
+	if err := s.database.WithContext(observedCtx).Create(evaluation).Error; err != nil {
 		if isUniqueConstraintError(err) {
 			return nil
 		}
@@ -283,7 +349,7 @@ func (s *LoopService) QueueEvaluation(ctx context.Context, request LoopEvaluatio
 	if s.dispatcher == nil {
 		return nil
 	}
-	if err := s.dispatcher.Enqueue(context.Background(), request); err != nil {
+	if err := s.dispatcher.Enqueue(observedCtx, request); err != nil {
 		_ = s.database.WithContext(context.Background()).Model(&models.LoopEvaluation{}).
 			Where("id = ? AND status = ?", evaluation.ID, models.EvaluationStatusPending).
 			Updates(map[string]any{"status": models.EvaluationStatusFailed, "error_message": err.Error()}).Error
