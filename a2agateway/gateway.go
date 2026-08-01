@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"GoAI/a2aprotocol"
 	"GoAI/models"
 	"GoAI/services"
 
@@ -18,8 +19,8 @@ import (
 )
 
 const (
-	// DelegationExtensionURI 标识 GoAI 在 A2A Message metadata 中使用的委派扩展。
-	DelegationExtensionURI = "https://goai.dev/extensions/delegation/v1"
+	// DelegationExtensionURI 保留 Gateway 原有公开常量，并复用共享协议定义。
+	DelegationExtensionURI = a2aprotocol.DelegationExtensionURI
 	gatewayPrefix          = "/a2a/agents/"
 )
 
