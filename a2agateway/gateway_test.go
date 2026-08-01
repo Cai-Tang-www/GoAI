@@ -95,6 +95,7 @@ func validSendRequest() *a2a.SendMessageRequest {
 		Extensions: []string{DelegationExtensionURI},
 		Metadata: map[string]any{DelegationExtensionURI: map[string]any{
 			"sourceAgentCode": "planner", "capabilityCode": "write", "parentRunId": "run_parent",
+			"traceId": "trace_parent", "delegationId": "dlg_1",
 		}},
 		Parts: a2a.ContentParts{a2a.NewTextPart("draft")},
 	}}
@@ -158,6 +159,9 @@ func TestCommandFromRequestMapsDelegationMetadataAndStableIDs(t *testing.T) {
 	if command.SourceAgentCode != "planner" || command.TargetAgentCode != "writer" || command.CapabilityCode != "write" {
 		t.Fatalf("unexpected command routing: %+v", command)
 	}
+	if command.TraceID != "trace_parent" || command.RequestedDelegationID != "dlg_1" {
+		t.Fatalf("unexpected delegation tracing metadata: %+v", command)
+	}
 	if command.RequestedChildRunID != stableID("a2a", "msg_1") || command.ThreadID != stableID("thread", "msg_1") {
 		t.Fatalf("stable IDs mismatch: %+v", command)
 	}
@@ -171,6 +175,28 @@ func TestCommandFromRequestMapsDelegationMetadataAndStableIDs(t *testing.T) {
 	}
 	if again.RequestedChildRunID != command.RequestedChildRunID || again.ThreadID != command.ThreadID {
 		t.Fatalf("same A2A message did not produce stable IDs: first=%+v second=%+v", command, again)
+	}
+}
+
+func TestCommandFromRequestRejectsOversizedCorrelationMetadata(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "trace id", field: "traceId", value: strings.Repeat("t", 129)},
+		{name: "delegation id", field: "delegationId", value: strings.Repeat("d", 65)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := validSendRequest()
+			metadata := request.Message.Metadata[DelegationExtensionURI].(map[string]any)
+			metadata[test.field] = test.value
+
+			if _, err := commandFromRequest("writer", request); !errors.Is(err, a2a.ErrInvalidParams) {
+				t.Fatalf("got %v, want invalid params", err)
+			}
+		})
 	}
 }
 
@@ -230,6 +256,16 @@ func TestCommandFromRequestRequiresDelegationExtension(t *testing.T) {
 	request.Message.Metadata = map[string]any{DelegationExtensionURI: map[string]any{"sourceAgentCode": "planner"}}
 	if _, err := commandFromRequest("writer", request); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Fatalf("got %v, want invalid params", err)
+	}
+}
+
+func TestPartsFromJSONMapsInternalTextMessageToA2ATextPart(t *testing.T) {
+	parts, err := partsFromJSON(`{"text":"release note ready"}`)
+	if err != nil {
+		t.Fatalf("map internal text message: %v", err)
+	}
+	if len(parts) != 1 || parts[0].Text() != "release note ready" {
+		t.Fatalf("unexpected A2A text parts: %+v", parts)
 	}
 }
 

@@ -111,8 +111,9 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
 - 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Child Run、Task 状态查询与结果 Artifact 回流
 - Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、`message:send`、Task polling 和结果收敛
+- Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` 节点统一交给 A2A Client 委派
 - 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路
-- A2A 调用使用稳定的 TaskID/MessageID，节点重试不会重复创建协议任务
+- A2A 调用使用稳定的 TaskID/MessageID/DelegationID，节点重试不会重复创建协议任务，并透传 `traceId` 关联父子 Run
 
 ### 在建
 
@@ -120,7 +121,7 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - callback 驱动的 Parent Run suspend/resume，当前 V1 使用 Worker 内阻塞轮询
 - 多 Child Run 并行执行、结果聚合与部分失败策略
 - 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
-- Eino Graph 能力化接入
+- 更复杂的 Eino Graph 能力扩展：并行 DAG、条件分支、流式节点和节点级恢复
 - Loop / Trace / Replay / Eval / Cost 的完整观测与评估能力
 
 文档中的“在建”能力不能视为当前已经可用。

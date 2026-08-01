@@ -1,6 +1,6 @@
 # GoAI / FORGE 产品设计提案
 
-更新时间：2026-07-31
+更新时间：2026-08-01
 
 ## 1. 背景
 
@@ -459,14 +459,19 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - AG-UI Gateway 已使用官方 Go SDK 完成首版接入
 - AG-UI 请求先映射到协议无关 Runtime，再原子创建或复用 Thread、持久化 Message 并触发 Run
 - RunStep 与 Result Message 可通过官方 SSE 事件回传
-- 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放，后者由后续 A2A 协作链路实现
+- 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放
+- 已引入平台自己的 Eino Graph executor，Runtime 可解析、校验并串行执行 Agent Workflow，将节点输入输出、重试和终态持久化为 RunStep
+- Workflow 的 `agent` 节点通过官方 A2A Go SDK 发起 Agent Card discovery、HTTP+JSON `message:send` 和 Task polling；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
+- A2A Gateway 已将协议请求映射为内部 Thread、Message、Delegation 和 Child Run；目标 Agent 执行自己的 Eino Graph 后，结果通过 A2A Task/Artifact 返回 Parent Run，并继续回流为 AG-UI SSE
+- Agent Card 已发布 capability 版本及输入输出契约；V1 对 capability contract 使用稳定 JSON Schema 子集进行输入和终态输出校验
 
-### 14.3 需要重写/扩展
+### 14.3 仍需扩展
 
-- 从“Run-only 主线”升级到“Thread / Message / Delegation / Run 主线”
-- 从“chat 调试接口”升级到“AG-UI Gateway”
-- 从“单执行链 worker”升级到“多 Agent 协作运行时”
-- 增加协议层与 Agent 端点/能力建模
+- A2A Agent 身份认证、授权和 Endpoint 凭据管理
+- callback 驱动的 Parent Run suspend/resume，替代当前节点内 Task polling
+- 多 Child Run 并行 fan-out/fan-in 与聚合策略
+- MCP、AgentAsTool、多模态消息和远程 Agent 运维管理
+- 完整 Eval、成本分析和管理控制台
 
 ## 15. 交付标准
 

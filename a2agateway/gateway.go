@@ -138,6 +138,7 @@ func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error
 		return nil, errors.New("agent has no active A2A endpoint")
 	}
 	skills := make([]a2a.AgentSkill, 0, len(descriptor.Capabilities))
+	contracts := make(map[string]any, len(descriptor.Capabilities))
 	for _, capability := range descriptor.Capabilities {
 		skills = append(skills, a2a.AgentSkill{
 			ID:          capability.Code,
@@ -147,6 +148,22 @@ func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error
 			InputModes:  []string{"text/plain", "application/json"},
 			OutputModes: []string{"application/json"},
 		})
+		contract := map[string]any{"version": capability.Version}
+		if strings.TrimSpace(capability.InputSchemaJSON) != "" {
+			inputSchema, err := decodeSchema(capability.InputSchemaJSON)
+			if err != nil {
+				return nil, fmt.Errorf("capability %s input schema: %w", capability.Code, err)
+			}
+			contract["inputSchema"] = inputSchema
+		}
+		if strings.TrimSpace(capability.OutputSchemaJSON) != "" {
+			outputSchema, err := decodeSchema(capability.OutputSchemaJSON)
+			if err != nil {
+				return nil, fmt.Errorf("capability %s output schema: %w", capability.Code, err)
+			}
+			contract["outputSchema"] = outputSchema
+		}
+		contracts[capability.Code] = contract
 	}
 	return &a2a.AgentCard{
 		Name:                descriptor.Name,
@@ -155,13 +172,25 @@ func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error
 		SupportedInterfaces: interfaces,
 		Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{
 			URI:         DelegationExtensionURI,
-			Description: "GoAI multi-agent delegation metadata",
+			Description: "GoAI multi-agent delegation metadata and capability contracts",
 			Required:    true,
+			Params:      map[string]any{"capabilities": contracts},
 		}}},
 		DefaultInputModes:  []string{"text/plain", "application/json"},
 		DefaultOutputModes: []string{"application/json"},
 		Skills:             skills,
 	}, nil
+}
+
+func decodeSchema(raw string) (any, error) {
+	var schema any
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		return nil, fmt.Errorf("schema must be valid JSON: %w", err)
+	}
+	if _, ok := schema.(map[string]any); !ok {
+		return nil, errors.New("schema must be a JSON object")
+	}
+	return schema, nil
 }
 
 func validateEndpoint(endpoint services.AgentEndpointDescriptor) error {

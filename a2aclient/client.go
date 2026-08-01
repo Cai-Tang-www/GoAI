@@ -90,24 +90,33 @@ func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, op
 }
 
 // Invoke 发现目标 Agent、校验能力并等待 A2A Task 进入终态。
-func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationRequest) (*services.AgentInvocationResult, error) {
+func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationRequest) (result *services.AgentInvocationResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := validateRequest(request); err != nil {
+	if c == nil {
+		return nil, invocationError(errors.New("A2A client is nil"), false)
+	}
+	if err = validateRequest(request); err != nil {
 		return nil, invocationError(err, false)
 	}
 
 	startedAt := time.Now()
 	status := "success"
 	var span oteltrace.Span
-	if c != nil && c.telemetry != nil && c.telemetry.Tracer != nil {
+	if c.telemetry != nil && c.telemetry.Tracer != nil {
 		ctx, span = c.telemetry.Tracer.Start(ctx, "a2a.invoke", observability.SpanAttributes(
 			requestctx.TraceIDFromContext(ctx), request.ParentRunID, request.ThreadID, "")...)
 		defer span.End()
 	}
 	defer func() {
-		if c == nil || c.telemetry == nil {
+		if err != nil {
+			status = "error"
+			if span != nil {
+				observability.MarkSpanError(span, err)
+			}
+		}
+		if c.telemetry == nil {
 			return
 		}
 		if c.telemetry.Metrics != nil {
@@ -128,13 +137,9 @@ func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationReq
 
 	var failures []error
 	for _, endpoint := range request.Endpoints {
-		result, err := c.invokeEndpoint(ctx, request, endpoint)
+		result, err = c.invokeEndpoint(ctx, request, endpoint)
 		if err == nil {
 			return result, nil
-		}
-		status = "error"
-		if span != nil {
-			observability.MarkSpanError(span, err)
 		}
 		failures = append(failures, err)
 		if ctx.Err() != nil {
@@ -144,7 +149,8 @@ func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationReq
 			return nil, err
 		}
 	}
-	return nil, invocationError(fmt.Errorf("all A2A endpoints failed: %w", errors.Join(failures...)), true)
+	err = invocationError(fmt.Errorf("all A2A endpoints failed: %w", errors.Join(failures...)), true)
+	return nil, err
 }
 
 func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvocationRequest, endpoint services.AgentInvocationEndpoint) (*services.AgentInvocationResult, error) {
@@ -190,6 +196,8 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 				"sourceAgentCode": request.SourceAgentCode,
 				"capabilityCode":  request.CapabilityCode,
 				"parentRunId":     request.ParentRunID,
+				"traceId":         request.TraceID,
+				"delegationId":    request.DelegationID,
 			},
 		},
 	}
@@ -246,7 +254,7 @@ func resultFromTask(task *a2a.Task) (*services.AgentInvocationResult, error) {
 	if err != nil {
 		return nil, invocationError(err, false)
 	}
-	return &services.AgentInvocationResult{TaskID: string(task.ID), State: string(task.Status.State), OutputJSON: output, Message: message}, nil
+	return &services.AgentInvocationResult{TaskID: string(task.ID), State: services.AgentInvocationStateCompleted, OutputJSON: output, Message: message}, nil
 }
 
 func resultFromMessage(taskID string, message *a2a.Message) (*services.AgentInvocationResult, error) {
@@ -254,7 +262,7 @@ func resultFromMessage(taskID string, message *a2a.Message) (*services.AgentInvo
 	if err != nil {
 		return nil, invocationError(err, false)
 	}
-	return &services.AgentInvocationResult{TaskID: taskID, State: string(a2a.TaskStateCompleted), OutputJSON: output, Message: text}, nil
+	return &services.AgentInvocationResult{TaskID: taskID, State: services.AgentInvocationStateCompleted, OutputJSON: output, Message: text}, nil
 }
 
 func taskOutput(task *a2a.Task) (string, string, error) {
