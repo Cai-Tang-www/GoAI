@@ -17,9 +17,13 @@ type OpenAICompatProvider struct {
 }
 
 func NewOpenAICompatProvider(profile ProviderProfile) (AIProvider, error) {
+	client := profile.HTTPClient
+	if client == nil {
+		client = &http.Client{}
+	}
 	return &OpenAICompatProvider{
 		profile: profile,
-		client:  &http.Client{},
+		client:  client,
 	}, nil
 }
 

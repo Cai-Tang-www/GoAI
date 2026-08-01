@@ -6,73 +6,72 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
-	"sync"
 )
 
-var (
-	providerRegistry     *ai.Registry
-	providerRegistryErr  error
-	providerRegistryOnce sync.Once
-)
-
-func initProviderRegistry() (*ai.Registry, error) {
-	providerRegistryOnce.Do(func() {
-		if config.AppConfig == nil {
-			providerRegistryErr = errors.New("app config is not initialized")
-			return
-		}
-
-		reg := ai.NewRegistry()
-		if err := reg.RegisterDriver(ai.DriverOpenAICompatible, ai.NewOpenAICompatProvider); err != nil {
-			providerRegistryErr = err
-			return
-		}
-
-		for name, pc := range config.AppConfig.ModelProviders {
-			profile := ai.ProviderProfile{
-				Name:         strings.ToLower(strings.TrimSpace(name)),
-				Driver:       pc.Driver,
-				BaseURL:      pc.BaseURL,
-				APIKey:       pc.APIKey,
-				DefaultModel: pc.DefaultModel,
-				EndpointPath: pc.EndpointPath,
-			}
-			if err := reg.RegisterProfile(profile); err != nil {
-				providerRegistryErr = fmt.Errorf("register provider %s: %w", name, err)
-				return
-			}
-		}
-
-		reg.SetDefaultProvider(config.AppConfig.ModelProviderDefault)
-		providerRegistry = reg
-	})
-	return providerRegistry, providerRegistryErr
+// ChatService owns the configured LLM provider registry for one application instance.
+// It keeps provider construction explicit so tests and runtimes do not share mutable
+// package-level HTTP client state.
+type ChatService struct {
+	registry *ai.Registry
 }
 
-// ResetProviderRegistryForTest 重置 provider registry，供跨包测试复用。
-func ResetProviderRegistryForTest() {
-	providerRegistry = nil
-	providerRegistryErr = nil
-	providerRegistryOnce = sync.Once{}
+// NewChatService builds a provider registry from the supplied application config and
+// HTTP client. The client is shared with other governed outbound dependencies.
+func NewChatService(appConfig *config.Config, httpClient *http.Client) (*ChatService, error) {
+	if appConfig == nil {
+		return nil, errors.New("creating chat service: app config is nil")
+	}
+
+	registry := ai.NewRegistry()
+	if err := registry.RegisterDriver(ai.DriverOpenAICompatible, ai.NewOpenAICompatProvider); err != nil {
+		return nil, err
+	}
+	for name, providerConfig := range appConfig.ModelProviders {
+		profile := ai.ProviderProfile{
+			Name:         strings.ToLower(strings.TrimSpace(name)),
+			Driver:       providerConfig.Driver,
+			BaseURL:      providerConfig.BaseURL,
+			APIKey:       providerConfig.APIKey,
+			DefaultModel: providerConfig.DefaultModel,
+			EndpointPath: providerConfig.EndpointPath,
+			HTTPClient:   httpClient,
+		}
+		if err := registry.RegisterProfile(profile); err != nil {
+			return nil, fmt.Errorf("register provider %s: %w", name, err)
+		}
+	}
+	registry.SetDefaultProvider(appConfig.ModelProviderDefault)
+	return &ChatService{registry: registry}, nil
 }
 
-// Chat 调用统一 provider 接口
-func Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
-	reg, err := initProviderRegistry()
+// Chat sends a streaming chat request through the service-owned provider registry.
+func (s *ChatService) Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
+	if s == nil || s.registry == nil {
+		return nil, errors.New("chat service is not initialized")
+	}
+	provider, err := s.registry.ResolveProvider(providerName)
 	if err != nil {
 		return nil, err
 	}
-
-	provider, err := reg.ResolveProvider(providerName)
-	if err != nil {
-		return nil, err
-	}
-
-	req := ai.ChatRequest{
+	return provider.Chat(ctx, ai.ChatRequest{
 		Messages: messages,
 		Model:    model,
 		Stream:   true,
-	}
-	return provider.Chat(ctx, req)
+	})
 }
+
+// Chat is a compatibility helper for legacy callers. New code should inject a
+// ChatService so provider dependencies remain explicit.
+func Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
+	service, err := NewChatService(config.AppConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+	return service.Chat(ctx, messages, providerName, model)
+}
+
+// ResetProviderRegistryForTest is retained for source compatibility. Provider
+// registries are now instance-owned, so there is no package state to reset.
+func ResetProviderRegistryForTest() {}

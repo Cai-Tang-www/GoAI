@@ -4,14 +4,30 @@ import (
 	"log"
 	"net/http"
 
+	"GoAI/ai"
 	"GoAI/middlewares"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Chat 处理聊天请求
+// ChatHandler handles the provider debugging endpoint with an injected chat service.
+type ChatHandler struct {
+	service *services.ChatService
+}
+
+// NewChatHandler creates a chat handler bound to one application chat service.
+func NewChatHandler(service *services.ChatService) *ChatHandler {
+	return &ChatHandler{service: service}
+}
+
+// Chat keeps the legacy package-level entrypoint for existing integrations.
 func Chat(c *gin.Context) {
+	NewChatHandler(nil).Serve(c)
+}
+
+// Serve handles the streaming chat debugging endpoint.
+func (h *ChatHandler) Serve(c *gin.Context) {
 	var req chatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid chat payload", nil))
@@ -23,9 +39,15 @@ func Chat(c *gin.Context) {
 		return
 	}
 
-	stream, err := services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
-	if err != nil {
-		middlewares.AbortWithError(c, middlewares.WrapError(err))
+	var streamErr error
+	var stream *ai.ChatStream
+	if h != nil && h.service != nil {
+		stream, streamErr = h.service.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
+	} else {
+		stream, streamErr = services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
+	}
+	if streamErr != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(streamErr))
 		return
 	}
 

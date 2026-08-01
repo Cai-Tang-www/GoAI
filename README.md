@@ -104,6 +104,7 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - Workflow DSL 基础校验与拓扑排序
 - Provider Registry 与 OpenAI-compatible 调试通道
 - HTTP / SSE / Kafka / Worker 优雅关闭
+- 服务治理：进程内限流、下游超时、按 target 熔断、快速失败和恢复观测（见 `docs/SERVICE_GOVERNANCE.md`）
 - 旧 Task 模型、空包和误导性文件名清理
 - db / redis / kafka 显式依赖装配
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
