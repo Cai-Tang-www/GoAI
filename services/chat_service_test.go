@@ -10,10 +10,6 @@ import (
 	"testing"
 )
 
-func resetProviderRegistryForTest() {
-	ResetProviderRegistryForTest()
-}
-
 func TestChatUsesDefaultProvider(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -34,9 +30,12 @@ func TestChatUsesDefaultProvider(t *testing.T) {
 			},
 		},
 	}
-	resetProviderRegistryForTest()
+	chatService, err := NewChatService(config.AppConfig, srv.Client())
+	if err != nil {
+		t.Fatalf("create chat service: %v", err)
+	}
 
-	stream, err := Chat(context.Background(), []ai.Message{{Role: "user", Content: "hello"}}, "", "")
+	stream, err := chatService.Chat(context.Background(), []ai.Message{{Role: "user", Content: "hello"}}, "", "")
 	if err != nil {
 		t.Fatalf("chat should succeed: %v", err)
 	}
@@ -63,9 +62,12 @@ func TestChatUnknownProvider(t *testing.T) {
 			},
 		},
 	}
-	resetProviderRegistryForTest()
+	chatService, err := NewChatService(config.AppConfig, nil)
+	if err != nil {
+		t.Fatalf("create chat service: %v", err)
+	}
 
-	_, err := Chat(context.Background(), []ai.Message{{Role: "user", Content: "hello"}}, "missing", "")
+	_, err = chatService.Chat(context.Background(), []ai.Message{{Role: "user", Content: "hello"}}, "missing", "")
 	if !errors.Is(err, ai.ErrProviderNotFound) {
 		t.Fatalf("expected ErrProviderNotFound, got %v", err)
 	}

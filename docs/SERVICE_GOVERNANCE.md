@@ -30,7 +30,7 @@ API/AG-UI 身份优先级：
 1. 已存在的 `user_id`
 2. 客户端 IP
 
-Agent 只读取 URL 路径参数 `agent_code`，没有路径参数时使用 `-`，不信任客户端自定义 Header；route 优先使用 Gin 注册路径。未配置 scope 时默认保护 `api`、`a2a` 和 `agui`，不会限制 `/ping` 和 `/metrics`。
+Agent 优先读取 URL 路径参数 `agent_code`；`POST /api/runs` 没有路径参数时从 JSON body 提取 `agent_code`，无法解析时使用 `-`，不信任客户端自定义 Header；route 优先使用 Gin 注册路径。未配置 scope 时默认保护 `api`、`a2a` 和 `agui`，不会限制 `/ping` 和 `/metrics`。
 
 当前 limiter 是进程内实现，`RATE_LIMIT_MAX_KEYS` 用于限制内存中的 key 数量；达到上限时淘汰最久未访问的 bucket，让新客户端可以进入，同时保持内存有界。它不是跨实例的分布式限流；多副本部署时应在后续版本增加 Redis 计数或网关级限流，但不需要改变现有中间件契约。
 

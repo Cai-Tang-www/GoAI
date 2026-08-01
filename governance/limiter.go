@@ -31,6 +31,7 @@ type KeyedLimiter struct {
 	mu      sync.Mutex
 	config  RateLimitConfig
 	buckets map[string]tokenBucket
+	now     func() time.Time
 }
 
 // NewKeyedLimiter 创建并校验配置后的按 key 限流器。
@@ -44,13 +45,17 @@ func NewKeyedLimiter(config RateLimitConfig) (*KeyedLimiter, error) {
 	if config.MaxKeys <= 0 {
 		return nil, errors.New("rate limit max keys must be greater than zero")
 	}
-	return &KeyedLimiter{
-		config:  config,
-		buckets: make(map[string]tokenBucket),
-	}, nil
+	return newKeyedLimiter(config, time.Now)
 }
 
-// Allow consumes one token for key and returns a retry delay when rejected.
+func newKeyedLimiter(config RateLimitConfig, now func() time.Time) (*KeyedLimiter, error) {
+	if now == nil {
+		now = time.Now
+	}
+	return &KeyedLimiter{config: config, buckets: make(map[string]tokenBucket), now: now}, nil
+}
+
+// Allow 为指定 key 消耗一个令牌；被拒绝时返回建议重试等待时间。
 func (l *KeyedLimiter) Allow(key string) (allowed bool, retryAfter time.Duration) {
 	if l == nil {
 		return true, 0
@@ -60,7 +65,7 @@ func (l *KeyedLimiter) Allow(key string) (allowed bool, retryAfter time.Duration
 		key = "default"
 	}
 
-	now := time.Now()
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -88,7 +93,7 @@ func (l *KeyedLimiter) Allow(key string) (allowed bool, retryAfter time.Duration
 	return true, 0
 }
 
-// KeyCount reports the number of tracked keys and is intended for tests and diagnostics.
+// KeyCount 返回当前跟踪的 key 数量，用于测试和诊断。
 func (l *KeyedLimiter) KeyCount() int {
 	if l == nil {
 		return 0

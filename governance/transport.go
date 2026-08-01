@@ -30,6 +30,10 @@ type RoundTripper struct {
 	onEvent        EventSink
 }
 
+// DownstreamTimeoutManaged 表示该 Transport 负责共享客户端的下游请求截止时间。
+// 协议客户端可通过该标记避免重复设置 http.Client.Timeout。
+func (t *RoundTripper) DownstreamTimeoutManaged() {}
+
 // NewRoundTripper 创建治理 Transport，并校验下游请求配置。
 func NewRoundTripper(config TransportConfig) (*RoundTripper, error) {
 	if config.RequestTimeout <= 0 {

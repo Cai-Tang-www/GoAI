@@ -1,6 +1,7 @@
 package middlewares
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -131,5 +132,55 @@ func TestRateLimitKeyDoesNotTrustAgentHeaderWithoutRouteParam(t *testing.T) {
 	key := rateLimitKey(ctx, "a2a")
 	if strings.Contains(key, "spoofed") || !strings.Contains(key, "agent:-") {
 		t.Fatalf("header should not influence key: %q", key)
+	}
+}
+
+func TestRateLimitKeyUsesRunBodyAgentAndRestoresBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewBufferString(`{"agent_code":"research-agent","input":{"prompt":"hello"}}`))
+	key := rateLimitKey(context, "api")
+	if !strings.Contains(key, "agent:research-agent") {
+		t.Fatalf("unexpected run rate limit key: %s", key)
+	}
+	var payload struct {
+		AgentCode string `json:"agent_code"`
+	}
+	if err := json.NewDecoder(context.Request.Body).Decode(&payload); err != nil {
+		t.Fatalf("request body was not restored: %v", err)
+	}
+	if payload.AgentCode != "research-agent" {
+		t.Fatalf("restored agent code = %q", payload.AgentCode)
+	}
+}
+
+func TestGovernanceMiddlewareSeparatesRunAgents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service, err := governance.New(governance.Config{
+		Enabled:                    true,
+		RateLimitRequestsPerSecond: 1,
+		RateLimitBurst:             1,
+		RateLimitMaxKeys:           10,
+		DownstreamRequestTimeout:   time.Second,
+		CircuitFailureThreshold:    1,
+		CircuitOpenTimeout:         time.Second,
+		CircuitMaxTargets:          10,
+	})
+	if err != nil {
+		t.Fatalf("create governance service: %v", err)
+	}
+	router := gin.New()
+	router.Use(GovernanceMiddleware(service, []string{"api"}))
+	router.POST("/api/runs", func(c *gin.Context) {
+		Success(c, http.StatusOK, map[string]bool{"ok": true}, "success")
+	})
+
+	for _, agent := range []string{"research-agent", "writer-agent"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewBufferString(`{"agent_code":"`+agent+`"}`))
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("agent %s status = %d, want 200", agent, recorder.Code)
+		}
 	}
 }

@@ -331,3 +331,21 @@ func TestClientSupportsHTTPSAgentEndpoint(t *testing.T) {
 		t.Fatalf("unexpected HTTPS result: %+v", result)
 	}
 }
+
+func TestNewDoesNotOverrideManagedTransportTimeout(t *testing.T) {
+	client, err := New(&http.Client{Transport: managedTimeoutRoundTripper{}}, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client.httpClient.Timeout != 0 {
+		t.Fatalf("managed transport client timeout = %s, want 0", client.httpClient.Timeout)
+	}
+}
+
+type managedTimeoutRoundTripper struct{}
+
+func (managedTimeoutRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (managedTimeoutRoundTripper) DownstreamTimeoutManaged() {}

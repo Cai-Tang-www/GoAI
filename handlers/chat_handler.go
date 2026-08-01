@@ -4,29 +4,28 @@ import (
 	"log"
 	"net/http"
 
-	"GoAI/ai"
 	"GoAI/middlewares"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
 )
 
-// ChatHandler handles the provider debugging endpoint with an injected chat service.
+// ChatHandler 负责处理注入 ChatService 的 Provider 调试流接口。
 type ChatHandler struct {
 	service *services.ChatService
 }
 
-// NewChatHandler creates a chat handler bound to one application chat service.
+// NewChatHandler 创建绑定到单个应用 ChatService 的调试流处理器。
 func NewChatHandler(service *services.ChatService) *ChatHandler {
 	return &ChatHandler{service: service}
 }
 
-// Chat keeps the legacy package-level entrypoint for existing integrations.
+// Chat 保留旧入口以兼容已有路由，但不再通过全局配置隐式创建 Provider。
 func Chat(c *gin.Context) {
 	NewChatHandler(nil).Serve(c)
 }
 
-// Serve handles the streaming chat debugging endpoint.
+// Serve 处理聊天调试接口的流式响应。
 func (h *ChatHandler) Serve(c *gin.Context) {
 	var req chatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -39,13 +38,11 @@ func (h *ChatHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	var streamErr error
-	var stream *ai.ChatStream
-	if h != nil && h.service != nil {
-		stream, streamErr = h.service.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
-	} else {
-		stream, streamErr = services.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
+	if h == nil || h.service == nil {
+		middlewares.AbortWithError(c, middlewares.InternalError("chat service is not initialized", nil))
+		return
 	}
+	stream, streamErr := h.service.Chat(c.Request.Context(), req.Messages, req.Provider, req.Model)
 	if streamErr != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(streamErr))
 		return

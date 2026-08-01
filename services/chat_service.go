@@ -10,15 +10,14 @@ import (
 	"strings"
 )
 
-// ChatService owns the configured LLM provider registry for one application instance.
-// It keeps provider construction explicit so tests and runtimes do not share mutable
-// package-level HTTP client state.
+// ChatService 持有单个应用实例的 LLM Provider 注册表。
+// 它显式管理 Provider 构造，避免测试和运行时共享可变的包级 HTTP 客户端状态。
 type ChatService struct {
 	registry *ai.Registry
 }
 
-// NewChatService builds a provider registry from the supplied application config and
-// HTTP client. The client is shared with other governed outbound dependencies.
+// NewChatService 根据应用配置和 HTTP 客户端创建 Provider 注册表。
+// 传入的客户端可与其他受治理的下游依赖共享。
 func NewChatService(appConfig *config.Config, httpClient *http.Client) (*ChatService, error) {
 	if appConfig == nil {
 		return nil, errors.New("creating chat service: app config is nil")
@@ -46,7 +45,7 @@ func NewChatService(appConfig *config.Config, httpClient *http.Client) (*ChatSer
 	return &ChatService{registry: registry}, nil
 }
 
-// Chat sends a streaming chat request through the service-owned provider registry.
+// Chat 通过当前服务持有的 Provider 注册表发起流式聊天请求。
 func (s *ChatService) Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
 	if s == nil || s.registry == nil {
 		return nil, errors.New("chat service is not initialized")
@@ -61,17 +60,3 @@ func (s *ChatService) Chat(ctx context.Context, messages []ai.Message, providerN
 		Stream:   true,
 	})
 }
-
-// Chat is a compatibility helper for legacy callers. New code should inject a
-// ChatService so provider dependencies remain explicit.
-func Chat(ctx context.Context, messages []ai.Message, providerName, model string) (*ai.ChatStream, error) {
-	service, err := NewChatService(config.AppConfig, nil)
-	if err != nil {
-		return nil, err
-	}
-	return service.Chat(ctx, messages, providerName, model)
-}
-
-// ResetProviderRegistryForTest is retained for source compatibility. Provider
-// registries are now instance-owned, so there is no package state to reset.
-func ResetProviderRegistryForTest() {}

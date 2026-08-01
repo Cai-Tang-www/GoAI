@@ -8,7 +8,10 @@ import (
 )
 
 func TestKeyedLimiterBurstAndRefill(t *testing.T) {
-	limiter, err := NewKeyedLimiter(RateLimitConfig{RequestsPerSecond: 100, Burst: 2, MaxKeys: 10})
+	now := time.Unix(100, 0)
+	limiter, err := newKeyedLimiter(RateLimitConfig{RequestsPerSecond: 100, Burst: 2, MaxKeys: 10}, func() time.Time {
+		return now
+	})
 	if err != nil {
 		t.Fatalf("create limiter: %v", err)
 	}
@@ -23,25 +26,28 @@ func TestKeyedLimiterBurstAndRefill(t *testing.T) {
 		t.Fatalf("third immediate request should be rejected with retry delay, allowed=%v retry_after=%s", allowed, retryAfter)
 	}
 
-	time.Sleep(20 * time.Millisecond)
+	now = now.Add(20 * time.Millisecond)
 	if allowed, _ := limiter.Allow("client"); !allowed {
 		t.Fatal("refilled request should be allowed")
 	}
 }
 
 func TestKeyedLimiterMaxKeys(t *testing.T) {
-	limiter, err := NewKeyedLimiter(RateLimitConfig{RequestsPerSecond: 1, Burst: 1, MaxKeys: 2})
+	now := time.Unix(100, 0)
+	limiter, err := newKeyedLimiter(RateLimitConfig{RequestsPerSecond: 1, Burst: 1, MaxKeys: 2}, func() time.Time {
+		return now
+	})
 	if err != nil {
 		t.Fatalf("create limiter: %v", err)
 	}
 	if allowed, _ := limiter.Allow("first"); !allowed {
 		t.Fatal("first key should be allowed")
 	}
-	time.Sleep(2 * time.Millisecond)
+	now = now.Add(time.Nanosecond)
 	if allowed, _ := limiter.Allow("second"); !allowed {
 		t.Fatal("second key should be allowed")
 	}
-	time.Sleep(2 * time.Millisecond)
+	now = now.Add(time.Nanosecond)
 	if allowed, _ := limiter.Allow("third"); !allowed {
 		t.Fatal("new key should evict the oldest bucket and be allowed")
 	}

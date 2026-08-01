@@ -108,7 +108,11 @@ func TestBreakerRegistryEvictsOldestTarget(t *testing.T) {
 	if _, err := registry.Get("target-1"); err != nil {
 		t.Fatalf("get target-1: %v", err)
 	}
-	time.Sleep(time.Millisecond)
+	registry.mu.Lock()
+	entry := registry.breakers["target-1"]
+	entry.lastUsed = time.Unix(0, 0)
+	registry.breakers["target-1"] = entry
+	registry.mu.Unlock()
 	if _, err := registry.Get("target-2"); err != nil {
 		t.Fatalf("get target-2: %v", err)
 	}
