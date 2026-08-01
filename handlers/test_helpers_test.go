@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -95,7 +96,12 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 	if err != nil {
 		t.Fatalf("create runtime service failed: %v", err)
 	}
-	router, err := routers.New(routers.Dependencies{Database: database, RunService: runService, Runtime: runtimeService})
+	router, err := routers.New(routers.Dependencies{
+		Database:   database,
+		RunService: runService,
+		Runtime:    runtimeService,
+		A2AGateway: http.NotFoundHandler(),
+	})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)
 	}

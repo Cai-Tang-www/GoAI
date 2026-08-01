@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"GoAI/a2agateway"
 	"GoAI/config"
 	"GoAI/db"
 	"GoAI/kafka"
@@ -68,7 +69,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	runWorker, err := worker.NewRunWorker(runService)
+	a2aGateway, err := a2agateway.New(runtimeService)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	runWorker, err := worker.NewRunWorker(runService, runtimeService)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
@@ -82,6 +87,7 @@ func run(ctx context.Context) error {
 		Database:   database,
 		RunService: runService,
 		Runtime:    runtimeService,
+		A2AGateway: a2aGateway,
 	})
 	if err != nil {
 		return errors.Join(err, consumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
