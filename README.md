@@ -109,13 +109,18 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
 - 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Child Run、Task 状态查询与结果 Artifact 回流
+- Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、`message:send`、Task polling 和结果收敛
+- 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路
+- A2A 调用使用稳定的 TaskID/MessageID，节点重试不会重复创建协议任务
 
 ### 在建
-- Workflow `agent` 节点的出站 A2A Client、父 Run 等待/恢复与多 Child Run 结果聚合
+
 - A2A Agent 身份认证、授权与凭据管理
+- callback 驱动的 Parent Run suspend/resume，当前 V1 使用 Worker 内阻塞轮询
+- 多 Child Run 并行执行、结果聚合与部分失败策略
 - 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
 - Eino Graph 能力化接入
-- Loop / Trace / Replay / Eval / Cost
+- Loop / Trace / Replay / Eval / Cost 的完整观测与评估能力
 
 文档中的“在建”能力不能视为当前已经可用。
 
@@ -202,7 +207,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 
 `message:send` 会把协议请求映射为内部 `Thread + request Message + Delegation + Child Run`，并在事务提交后投递 Child Run。重复发送相同 A2A 请求会返回同一个 Child Run；复用相同标识但改变请求内容会返回冲突。Child Run 完成后，Runtime 将结果写为目标 Agent 返回给源 Agent 的 Result Message；A2A Task 查询会把结果映射为 Artifact，失败响应不会暴露 Provider 或数据库原始错误。
 
-当前 A2A Gateway 实现的是入站委派闭环。Workflow `agent` 节点主动调用目标 Agent 的出站 A2A Client、父 Run 挂起/恢复、多 Child Run 聚合仍在后续版本；这些能力完成后也不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
+当前实现已经覆盖入站与出站的 A2A 最小闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，通过官方 A2A HTTP+JSON Client 发起 `message:send`，再轮询 Task 直到终态并将 Artifact/Message 收敛为父 RunStep 输出。当前父 Worker 在节点执行期间阻塞轮询，尚未实现 callback 驱动的 suspend/resume，也尚未支持多个 Child Run 的并行聚合；这些属于后续运行时增强。无论后续如何扩展，都不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
 
 > 安全提示：当前尚未实现 A2A Agent 身份认证、授权和凭据管理。A2A 路由只适用于受控开发网络，不应直接暴露到公网。
 

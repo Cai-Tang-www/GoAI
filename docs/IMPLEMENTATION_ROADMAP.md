@@ -49,14 +49,18 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 ## P1：多 Agent 运行时闭环
 
-### 7. 多 Agent 协作运行时
-- 为 Workflow `agent` 节点实现出站 A2A Client，由 Runtime 创建委派并调用目标 Agent
-- 本地目标通过 loopback HTTP、远程目标通过 HTTPS，禁止进程内 service 调用和 Kafka 协议旁路
-- 实现父 Run 挂起/恢复、Delegation 状态推进与超时/失败传播
-- 支持并行 Child Run、结果聚合与部分失败策略
-- 增加 A2A Agent 身份认证、授权和 Endpoint 凭据管理
-- 在此基础上演进 Supervisor / Router / Worker 协作策略
+### 7. 多 Agent 协作运行时（Issue #21，核心闭环进行中）
+已落地：
+- Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调
+- 官方 A2A Go SDK Client 完成 Agent Card discovery、能力/扩展校验、`message:send`、Task polling 和 Artifact/Message 结果收敛
+- 本地目标只允许 loopback HTTP，远程目标必须使用 HTTPS；Kafka 只承载 Run 执行消息，不承担 Agent 协议通信
+- `input_from` 支持从成功的上游 RunStep 聚合输入；TaskID/MessageID 基于 Parent Run + 节点稳定生成，重试不重复创建子任务
 
+后续补齐：
+- callback 驱动的 Parent Run suspend/resume；当前 V1 是 Worker 内阻塞轮询
+- 多 Child Run 并行执行、结果聚合与部分失败策略
+- A2A Agent 身份认证、授权和 Endpoint 凭据管理
+- Supervisor / Router / Worker 协作策略
 ### 8. Eino Graph 能力化接入
 - 把 Graph 定位成 Agent 的一种执行能力
 - 保持 Workflow DSL 基础校验与执行顺序解析

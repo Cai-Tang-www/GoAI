@@ -235,7 +235,8 @@ A2A 的约束：
 - 状态推进
 - 结果回流
 - Replay
-
+- 本地 loopback HTTP / 远程 HTTPS 的 A2A 出站调用
+- Agent Card discovery、Capability 校验与 Task polling
 #### D. 编排能力
 - Eino Graph 接入
 - Workflow DSL 基础校验
