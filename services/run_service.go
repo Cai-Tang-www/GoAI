@@ -83,6 +83,7 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher) (*RunService,
 var allowedRunTriggerTypes = map[string]struct{}{
 	"api":      {},
 	"agui":     {},
+	"a2a":      {},
 	"manual":   {},
 	"replay":   {},
 	"schedule": {},
@@ -145,6 +146,7 @@ type CreateRunRequest struct {
 	Model                     string          `json:"model"`
 	IdempotencyKey            string          `json:"-"`
 	RequestedRunID            string          `json:"-"`
+	RequestedWorkflowID       uint64          `json:"-"`
 	allowGeneratedThreadReuse bool
 }
 
@@ -181,7 +183,7 @@ func ValidateCreateRunRequest(req CreateRunRequest) error {
 	triggerType := strings.TrimSpace(req.TriggerType)
 	if triggerType != "" {
 		if _, ok := allowedRunTriggerTypes[triggerType]; !ok {
-			return errors.New("trigger_type must be one of api,agui,manual,replay,schedule,webhook")
+			return errors.New("trigger_type must be one of api,agui,a2a,manual,replay,schedule,webhook")
 		}
 	}
 	if len(strings.TrimSpace(req.Provider)) > 64 {
@@ -208,6 +210,7 @@ type normalizedCreateRunRequest struct {
 	Model           string
 	IdempotencyKey  string
 	RequestedRunID  string
+	WorkflowID      uint64
 }
 
 // normalizeCreateRunRequest 对创建请求进行 trim 和默认值规范化。
@@ -233,6 +236,7 @@ func normalizeCreateRunRequest(req CreateRunRequest) (normalizedCreateRunRequest
 		Model:           strings.TrimSpace(req.Model),
 		IdempotencyKey:  strings.TrimSpace(req.IdempotencyKey),
 		RequestedRunID:  strings.TrimSpace(req.RequestedRunID),
+		WorkflowID:      req.RequestedWorkflowID,
 	}, nil
 }
 
@@ -384,6 +388,9 @@ func (s *RunService) matchRequestedRun(
 		if workflow.Version != req.WorkflowVersion {
 			return nil, nil, errRunAlreadyExists
 		}
+	}
+	if req.WorkflowID != 0 && existing.WorkflowID != req.WorkflowID {
+		return nil, nil, errRunAlreadyExists
 	}
 
 	candidate := &models.Run{
@@ -548,9 +555,22 @@ func (s *RunService) createRun(ctx context.Context, userID uint64, req CreateRun
 			return nil, fmt.Errorf("find active agent by code: %w", err)
 		}
 
-		workflow, resolveErr := s.resolveWorkflow(ctx, agent.ID, normalized.WorkflowVersion)
-		if resolveErr != nil {
-			return nil, resolveErr
+		var workflow models.Workflow
+		if normalized.WorkflowID != 0 {
+			if err := s.database.WithContext(ctx).
+				Where("id = ? AND agent_id = ? AND is_active = ?", normalized.WorkflowID, agent.ID, true).
+				First(&workflow).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, errWorkflowNotFound
+				}
+				return nil, fmt.Errorf("find requested workflow: %w", err)
+			}
+		} else {
+			resolved, resolveErr := s.resolveWorkflow(ctx, agent.ID, normalized.WorkflowVersion)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			workflow = *resolved
 		}
 		if _, validateErr := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON); validateErr != nil {
 			return nil, validateErr
@@ -944,19 +964,40 @@ func (s *RunService) persistResultMessage(ctx context.Context, tx *gorm.DB, run 
 	if err := tx.WithContext(ctx).Select("agent_code").First(&agent, "id = ?", run.AgentID).Error; err != nil {
 		return fmt.Errorf("loading result message sender agent: %w", err)
 	}
+	receiverType := models.MessageSenderUser
+	receiverID := fmt.Sprintf("%d", run.UserID)
+	delegationID := ""
+	parentMessageID := ""
+	var delegation models.Delegation
+	if !tx.Migrator().HasTable(&models.Delegation{}) {
+		delegation = models.Delegation{}
+	} else if err := tx.WithContext(ctx).Where("child_run_id = ?", run.RunID).First(&delegation).Error; err == nil {
+		var sourceAgent models.Agent
+		if err := tx.WithContext(ctx).Select("agent_code").First(&sourceAgent, "id = ?", delegation.SourceAgentID).Error; err != nil {
+			return fmt.Errorf("loading delegation source agent: %w", err)
+		}
+		receiverType = models.MessageSenderAgent
+		receiverID = sourceAgent.AgentCode
+		delegationID = delegation.DelegationID
+		parentMessageID = delegation.RequestMessageID
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("loading result message delegation: %w", err)
+	}
 	message := &models.Message{
-		MessageID:    resultMessageID(run.RunID, step.StepKey, step.Attempt),
-		ThreadID:     run.ThreadID,
-		RunID:        run.RunID,
-		SenderType:   models.MessageSenderAgent,
-		SenderID:     agent.AgentCode,
-		ReceiverType: models.MessageSenderUser,
-		ReceiverID:   fmt.Sprintf("%d", run.UserID),
-		MessageType:  models.MessageTypeResult,
-		ContentType:  "text",
-		ContentJSON:  string(content),
-		MetadataJSON: "{}",
-		Status:       models.MessageStatusDelivered,
+		MessageID:       resultMessageID(run.RunID, step.StepKey, step.Attempt),
+		ThreadID:        run.ThreadID,
+		RunID:           run.RunID,
+		DelegationID:    delegationID,
+		ParentMessageID: parentMessageID,
+		SenderType:      models.MessageSenderAgent,
+		SenderID:        agent.AgentCode,
+		ReceiverType:    receiverType,
+		ReceiverID:      receiverID,
+		MessageType:     models.MessageTypeResult,
+		ContentType:     "text",
+		ContentJSON:     string(content),
+		MetadataJSON:    "{}",
+		Status:          models.MessageStatusDelivered,
 	}
 	return tx.WithContext(ctx).Create(message).Error
 }

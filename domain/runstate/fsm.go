@@ -45,3 +45,31 @@ func IsValidRunStepTransition(from, to string) bool {
 	_, allowed := next[to]
 	return allowed
 }
+
+// IsValidDelegationTransition 判断多 Agent 委派状态是否允许显式迁移。
+func IsValidDelegationTransition(from, to string) bool {
+	transitions := map[string]map[string]struct{}{
+		models.DelegationStatusPending: {
+			models.DelegationStatusAccepted:  {},
+			models.DelegationStatusFailed:    {},
+			models.DelegationStatusCancelled: {},
+		},
+		models.DelegationStatusAccepted: {
+			models.DelegationStatusRunning:   {},
+			models.DelegationStatusSucceeded: {},
+			models.DelegationStatusFailed:    {},
+			models.DelegationStatusCancelled: {},
+		},
+		models.DelegationStatusRunning: {
+			models.DelegationStatusSucceeded: {},
+			models.DelegationStatusFailed:    {},
+			models.DelegationStatusCancelled: {},
+		},
+	}
+	next, ok := transitions[from]
+	if !ok {
+		return false
+	}
+	_, allowed := next[to]
+	return allowed
+}
