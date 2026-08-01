@@ -7,23 +7,70 @@ import (
 	"strings"
 )
 
+// Definition 描述一个 Agent 的可执行 Workflow 图。
 type Definition struct {
 	EntryNode string `json:"entry_node"`
 	Nodes     []Node `json:"nodes"`
 	Edges     []Edge `json:"edges"`
 }
 
+// Node 描述 Workflow 中的一个执行节点。
 type Node struct {
 	Key    string          `json:"key"`
 	Type   string          `json:"type"`
 	Config json.RawMessage `json:"config,omitempty"`
 }
 
+// Edge 描述 Workflow 节点之间的有向边。
 type Edge struct {
 	From string `json:"from"`
 	To   string `json:"to"`
 }
 
+// AgentNodeConfig 定义 Workflow 中 agent 节点的跨 Agent 委派参数。
+type AgentNodeConfig struct {
+	TargetAgent string   `json:"target_agent"`
+	Capability  string   `json:"capability"`
+	InputFrom   []string `json:"input_from,omitempty"`
+	TimeoutMS   int      `json:"timeout_ms,omitempty"`
+}
+
+// ParseAgentNodeConfig 解析并校验单个 agent 节点的配置结构。
+func ParseAgentNodeConfig(node Node) (*AgentNodeConfig, error) {
+	if strings.TrimSpace(node.Type) != "agent" {
+		return nil, fmt.Errorf("node %s is not an agent node", node.Key)
+	}
+	var config AgentNodeConfig
+	if len(node.Config) == 0 {
+		return nil, fmt.Errorf("agent node %s config is required", node.Key)
+	}
+	if err := json.Unmarshal(node.Config, &config); err != nil {
+		return nil, fmt.Errorf("agent node %s config is invalid: %w", node.Key, err)
+	}
+	config.TargetAgent = strings.TrimSpace(config.TargetAgent)
+	config.Capability = strings.TrimSpace(config.Capability)
+	if config.TargetAgent == "" {
+		return nil, fmt.Errorf("agent node %s target_agent is required", node.Key)
+	}
+	if config.Capability == "" {
+		return nil, fmt.Errorf("agent node %s capability is required", node.Key)
+	}
+	if config.TimeoutMS < 0 || config.TimeoutMS > 300000 {
+		return nil, fmt.Errorf("agent node %s timeout_ms must be between 0 and 300000", node.Key)
+	}
+	for index, reference := range config.InputFrom {
+		config.InputFrom[index] = strings.TrimSpace(reference)
+		if config.InputFrom[index] == "" {
+			return nil, fmt.Errorf("agent node %s input_from contains an empty step", node.Key)
+		}
+		if config.InputFrom[index] == node.Key {
+			return nil, fmt.Errorf("agent node %s input_from cannot reference itself", node.Key)
+		}
+	}
+	return &config, nil
+}
+
+// ParseAndValidate 解析并校验 Workflow JSON。
 func ParseAndValidate(raw string) (*Definition, error) {
 	var def Definition
 	if err := json.Unmarshal([]byte(raw), &def); err != nil {
@@ -35,6 +82,7 @@ func ParseAndValidate(raw string) (*Definition, error) {
 	return &def, nil
 }
 
+// Validate 校验节点、边和 agent 节点配置的基础结构。
 func Validate(def *Definition) error {
 	if def == nil {
 		return errors.New("workflow definition is nil")
@@ -60,10 +108,26 @@ func Validate(def *Definition) error {
 			return fmt.Errorf("workflow node type is required for key: %s", key)
 		}
 		n.Key = key
+		n.Type = strings.TrimSpace(n.Type)
 		nodeSet[key] = n
 	}
 	if _, exists := nodeSet[entry]; !exists {
 		return fmt.Errorf("entry_node %s does not exist in nodes", entry)
+	}
+
+	for _, node := range nodeSet {
+		if node.Type != "agent" {
+			continue
+		}
+		config, err := ParseAgentNodeConfig(node)
+		if err != nil {
+			return err
+		}
+		for _, reference := range config.InputFrom {
+			if _, exists := nodeSet[reference]; !exists {
+				return fmt.Errorf("agent node %s input_from node not found: %s", node.Key, reference)
+			}
+		}
 	}
 
 	for _, e := range def.Edges {

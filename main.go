@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"GoAI/a2aclient"
 	"GoAI/a2agateway"
 	"GoAI/config"
 	"GoAI/db"
@@ -61,7 +62,11 @@ func run(ctx context.Context) error {
 	}
 	log.Println("Kafka producer initialized")
 
-	runService, err := services.NewRunService(database, producer)
+	agentInvoker, err := a2aclient.New(&http.Client{}, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	runService, err := services.NewRunService(database, producer, services.WithAgentInvoker(agentInvoker))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}

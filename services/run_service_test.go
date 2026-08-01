@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,7 +26,7 @@ func (p *recordingRunPublisher) PublishRunExecute(_ context.Context, runID strin
 func setupRunTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRunPublisher) {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Message{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Message{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	publisher := &recordingRunPublisher{}
@@ -1093,5 +1094,112 @@ func TestRunServiceInstancesKeepDatabaseAndPublisherIsolated(t *testing.T) {
 
 	if _, err := serviceTwo.GetRunByRunID(context.Background(), 1, false, result.Run.RunID); !errors.Is(err, ErrRunNotFound()) {
 		t.Fatalf("second service unexpectedly found first run: %v", err)
+	}
+}
+
+type recordingAgentInvoker struct {
+	requests []AgentInvocationRequest
+	result   *AgentInvocationResult
+	err      error
+}
+
+func (f *recordingAgentInvoker) Invoke(_ context.Context, request AgentInvocationRequest) (*AgentInvocationResult, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
+func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"planner","nodes":[{"key":"planner","type":"planner"},{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write","input_from":["planner"]}}],"edges":[{"from":"planner","to":"delegate"}]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+	target := models.Agent{AgentCode: "writer", Name: "Writer", OwnerUserID: 1, Status: models.AgentStatusActive}
+	if err := gdb.Create(&target).Error; err != nil {
+		t.Fatalf("create target agent failed: %v", err)
+	}
+	capability := models.AgentCapability{
+		AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow,
+		Version: "1", InputSchemaJSON: "{}", OutputSchemaJSON: "{}", ConfigJSON: "{}", Status: models.AgentCapabilityStatusActive,
+	}
+	if err := gdb.Create(&capability).Error; err != nil {
+		t.Fatalf("create capability failed: %v", err)
+	}
+	endpoint := models.AgentEndpoint{
+		AgentID: target.ID, EndpointCode: "writer-local", Protocol: models.AgentEndpointProtocolA2A,
+		Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:18080/a2a/agents/writer",
+		Status: models.AgentEndpointStatusActive,
+	}
+	if err := gdb.Create(&endpoint).Error; err != nil {
+		t.Fatalf("create endpoint failed: %v", err)
+	}
+	invoker := &recordingAgentInvoker{result: &AgentInvocationResult{TaskID: "child-task", State: "TASK_STATE_COMPLETED", OutputJSON: `{"document":"ok"}`}}
+	service.agentInvoker = invoker
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+
+	run := models.Run{
+		RunID: "run_agent_node", ThreadID: "thread-agent", AgentID: source.ID, WorkflowID: workflow.ID,
+		UserID: 1, TriggerType: "api", InputJSON: `{"prompt":"draft"}`, Status: models.RunStatusQueued,
+	}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err != nil {
+		t.Fatalf("handle run failed: %v", err)
+	}
+	if len(invoker.requests) != 1 {
+		t.Fatalf("expected one A2A invocation, got %d", len(invoker.requests))
+	}
+	request := invoker.requests[0]
+	if request.SourceAgentCode != source.AgentCode || request.TargetAgentCode != target.AgentCode || request.CapabilityCode != "write" {
+		t.Fatalf("unexpected invocation routing: %+v", request)
+	}
+	if request.TaskID != stableA2AID("task", run.RunID, "delegate") || request.MessageID != stableA2AID("message", run.RunID, "delegate") {
+		t.Fatalf("invocation ids are not deterministic: %+v", request)
+	}
+	if !strings.Contains(request.InputJSON, `"step_outputs"`) || !strings.Contains(request.InputJSON, `"planner"`) {
+		t.Fatalf("expected aggregated input, got %s", request.InputJSON)
+	}
+
+	var steps []models.RunStep
+	if err := gdb.Where("run_id = ?", run.RunID).Order("id ASC").Find(&steps).Error; err != nil {
+		t.Fatalf("load run steps failed: %v", err)
+	}
+	if len(steps) != 2 || steps[1].StepKey != "delegate" || steps[1].InputJSON != request.InputJSON {
+		t.Fatalf("agent step input was not persisted: %+v", steps)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(steps[1].OutputJSON), &output); err != nil {
+		t.Fatalf("decode agent step output: %v", err)
+	}
+	if output["target_agent"] != target.AgentCode || output["capability"] != capability.CapabilityCode {
+		t.Fatalf("unexpected agent step output: %+v", output)
+	}
+}
+
+func TestHandleRunExecuteAgentNodeDoesNotInvokeWithoutInvoker(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write"}}],"edges":[]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+	target := models.Agent{AgentCode: "writer", Name: "Writer", OwnerUserID: 1, Status: models.AgentStatusActive}
+	if err := gdb.Create(&target).Error; err != nil {
+		t.Fatalf("create target agent failed: %v", err)
+	}
+	if err := gdb.Create(&models.AgentCapability{AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
+		t.Fatalf("create capability failed: %v", err)
+	}
+	run := models.Run{RunID: "run_agent_no_invoker", ThreadID: "thread-agent", AgentID: source.ID, WorkflowID: workflow.ID, UserID: 1, TriggerType: "api", InputJSON: `{}`, Status: models.RunStatusQueued}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err == nil || !strings.Contains(err.Error(), "A2A agent invoker") {
+		t.Fatalf("expected missing invoker error, got %v", err)
 	}
 }

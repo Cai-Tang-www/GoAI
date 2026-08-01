@@ -60,24 +60,34 @@ type workflowNodeExecutor func(context.Context, *models.Run, WorkflowNode, int) 
 type RunService struct {
 	database          *gorm.DB
 	publisher         RunEventPublisher
+	agentInvoker      AgentInvoker
 	executeNode       workflowNodeExecutor
 	stepRetryBackoffs []time.Duration
 }
 
 // NewRunService 使用显式数据库和事件发布器构造 RunService。
-func NewRunService(database *gorm.DB, publisher RunEventPublisher) (*RunService, error) {
+func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...RunServiceOption) (*RunService, error) {
 	if database == nil {
 		return nil, errors.New("creating run service: database is nil")
 	}
 	if publisher == nil {
 		return nil, errors.New("creating run service: publisher is nil")
 	}
-	return &RunService{
+	service := &RunService{
 		database:          database,
 		publisher:         publisher,
 		executeNode:       executeWorkflowNode,
 		stepRetryBackoffs: append([]time.Duration(nil), defaultStepRetryBackoffs...),
-	}, nil
+	}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if err := option(service); err != nil {
+			return nil, err
+		}
+	}
+	return service, nil
 }
 
 var allowedRunTriggerTypes = map[string]struct{}{
@@ -804,13 +814,19 @@ func (s *RunService) transitionRun(ctx context.Context, run *models.Run, nextSta
 // executeNodeWithRetry 将每次 attempt 的开始和结束分别提交，节点执行本身不持有数据库事务。
 func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, node WorkflowNode) error {
 	var lastErr error
+	nodeInput, err := s.resolveNodeInput(ctx, run, node)
+	if err != nil {
+		return err
+	}
 	for attempt := 1; attempt <= maxNodeRetries+1; attempt++ {
-		step, err := s.startRunStep(ctx, run, node, attempt)
+		nodeRun := *run
+		nodeRun.InputJSON = nodeInput
+		step, err := s.startRunStep(ctx, &nodeRun, node, attempt)
 		if err != nil {
 			return err
 		}
 
-		outputJSON, execErr := s.executeNode(ctx, run, node, attempt)
+		outputJSON, execErr := s.executeWorkflowNode(ctx, &nodeRun, node, attempt)
 		if execErr == nil {
 			outputJSON, execErr = normalizeNodeOutput(outputJSON)
 		}
@@ -833,7 +849,10 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 			if errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
 				return execErr
 			}
-			if attempt > maxNodeRetries {
+			if invocationErr, ok := execErr.(retryableInvocationError); ok && !invocationErr.Retryable() {
+				return execErr
+			}
+			if attempt > maxNodeRetries || !isRetryableInvocationError(execErr) {
 				continue
 			}
 			if err := s.incrementRunRetry(ctx, run.RunID); err != nil {
@@ -1000,6 +1019,144 @@ func (s *RunService) persistResultMessage(ctx context.Context, tx *gorm.DB, run 
 		Status:          models.MessageStatusDelivered,
 	}
 	return tx.WithContext(ctx).Create(message).Error
+}
+
+func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {
+	if strings.ToLower(strings.TrimSpace(node.Type)) != "agent" {
+		return run.InputJSON, nil
+	}
+	config, err := ParseAgentNodeConfig(node)
+	if err != nil {
+		return "", err
+	}
+	if len(config.InputFrom) == 0 {
+		return run.InputJSON, nil
+	}
+	var runInput any
+	if err := json.Unmarshal([]byte(run.InputJSON), &runInput); err != nil {
+		return "", fmt.Errorf("decoding run input for node %s: %w", node.Key, err)
+	}
+	outputs := make(map[string]any, len(config.InputFrom))
+	for _, reference := range config.InputFrom {
+		var step models.RunStep
+		if err := s.database.WithContext(ctx).Where("run_id = ? AND step_key = ? AND status = ?", run.RunID, reference, models.RunStepStatusSuccess).Order("attempt DESC").First(&step).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return "", fmt.Errorf("input_from step %s has no successful output", reference)
+			}
+			return "", fmt.Errorf("loading input_from step %s: %w", reference, err)
+		}
+		var output any
+		if err := json.Unmarshal([]byte(step.OutputJSON), &output); err != nil {
+			return "", fmt.Errorf("decoding output of step %s: %w", reference, err)
+		}
+		outputs[reference] = output
+	}
+	encoded, err := json.Marshal(map[string]any{"run_input": runInput, "step_outputs": outputs})
+	if err != nil {
+		return "", fmt.Errorf("encoding aggregated node input: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func (s *RunService) executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
+	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+		return s.executeAgentNode(ctx, run, node)
+	}
+	return s.executeNode(ctx, run, node, attempt)
+}
+
+func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {
+	if s.agentInvoker == nil {
+		return "", errors.New("agent workflow node requires an A2A agent invoker")
+	}
+	config, err := ParseAgentNodeConfig(node)
+	if err != nil {
+		return "", err
+	}
+	var source models.Agent
+	if err := s.database.WithContext(ctx).Where("id = ? AND status = ?", run.AgentID, models.AgentStatusActive).First(&source).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errAgentNotFound
+		}
+		return "", fmt.Errorf("loading source agent: %w", err)
+	}
+	if source.AgentCode == config.TargetAgent {
+		return "", fmt.Errorf("agent node %s cannot target source agent %s", node.Key, config.TargetAgent)
+	}
+	var target models.Agent
+	if err := s.database.WithContext(ctx).Where("agent_code = ? AND status = ?", config.TargetAgent, models.AgentStatusActive).First(&target).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errAgentNotFound
+		}
+		return "", fmt.Errorf("loading target agent: %w", err)
+	}
+	var capability models.AgentCapability
+	if err := s.database.WithContext(ctx).Where("agent_id = ? AND capability_code = ? AND status = ?", target.ID, config.Capability, models.AgentCapabilityStatusActive).First(&capability).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", fmt.Errorf("target capability %s not found", config.Capability)
+		}
+		return "", fmt.Errorf("loading target capability: %w", err)
+	}
+	var endpoints []models.AgentEndpoint
+	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", target.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").Find(&endpoints).Error; err != nil {
+		return "", fmt.Errorf("loading target A2A endpoints: %w", err)
+	}
+	invocationEndpoints := make([]AgentInvocationEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		invocationEndpoints = append(invocationEndpoints, AgentInvocationEndpoint{Address: endpoint.Address, Transport: endpoint.Transport})
+	}
+	timeout := 120 * time.Second
+	if config.TimeoutMS > 0 {
+		timeout = time.Duration(config.TimeoutMS) * time.Millisecond
+	}
+	invokeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := s.agentInvoker.Invoke(invokeCtx, AgentInvocationRequest{
+		SourceAgentCode: source.AgentCode,
+		TargetAgentCode: target.AgentCode,
+		CapabilityCode:  capability.CapabilityCode,
+		ParentRunID:     run.RunID,
+		ThreadID:        run.ThreadID,
+		TaskID:          stableA2AID("task", run.RunID, node.Key),
+		MessageID:       stableA2AID("message", run.RunID, node.Key),
+		InputJSON:       run.InputJSON,
+		Endpoints:       invocationEndpoints,
+	})
+	if err != nil {
+		return "", err
+	}
+	result = normalizeInvocationResult(result)
+	if result == nil {
+		return "", errors.New("A2A agent invoker returned an empty result")
+	}
+	if result.State != "" && result.State != "TASK_STATE_COMPLETED" {
+		return "", fmt.Errorf("target agent completed with unsupported state %s", result.State)
+	}
+	var raw json.RawMessage = json.RawMessage(result.OutputJSON)
+	if !json.Valid(raw) {
+		return "", errors.New("A2A agent result is not valid JSON")
+	}
+	output := map[string]any{
+		"type":         "agent",
+		"target_agent": target.AgentCode,
+		"capability":   capability.CapabilityCode,
+		"task_id":      result.TaskID,
+		"state":        result.State,
+		"result":       raw,
+	}
+	if result.Message != "" {
+		output["message"] = result.Message
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		return "", fmt.Errorf("encoding A2A agent result: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func stableA2AID(kind, parentRunID, nodeKey string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + parentRunID + "\x00" + nodeKey))
+	return "a2a_" + hex.EncodeToString(sum[:])[:59]
 }
 
 func executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {

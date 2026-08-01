@@ -45,6 +45,8 @@ type Config struct {
 	ModelScopeModel            string
 	ModelProviderDefault       string
 	ModelProviders             map[string]ModelProviderConfig
+	A2AClientRequestTimeout    time.Duration
+	A2AClientPollInterval      time.Duration
 }
 
 const defaultShutdownTimeout = 15 * time.Second
@@ -97,6 +99,16 @@ func LoadConfig() error {
 	if appConfig.KafkaJMXPort, err = loadIntEnv("KAFKA_JMX_PORT", 9991); err != nil {
 		return err
 	}
+	requestTimeoutSeconds, err := loadIntEnv("A2A_CLIENT_REQUEST_TIMEOUT_SECONDS", 30)
+	if err != nil {
+		return err
+	}
+	pollIntervalMilliseconds, err := loadIntEnv("A2A_CLIENT_POLL_INTERVAL_MILLISECONDS", 250)
+	if err != nil {
+		return err
+	}
+	appConfig.A2AClientRequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
+	appConfig.A2AClientPollInterval = time.Duration(pollIntervalMilliseconds) * time.Millisecond
 	if appConfig.MySQLHost == "" {
 		appConfig.MySQLHost = "localhost"
 	}
@@ -164,6 +176,14 @@ func LoadConfig() error {
 
 // ValidateStartup 校验应用启动所需的关键配置，避免服务启动后才暴露基础错误。
 func (c *Config) ValidateStartup() error {
+	if c != nil {
+		if c.A2AClientRequestTimeout == 0 {
+			c.A2AClientRequestTimeout = 30 * time.Second
+		}
+		if c.A2AClientPollInterval == 0 {
+			c.A2AClientPollInterval = 250 * time.Millisecond
+		}
+	}
 	var problems []string
 	if c == nil {
 		return fmt.Errorf("invalid config: config is nil")
@@ -192,6 +212,12 @@ func (c *Config) ValidateStartup() error {
 	}
 	if c.ServerShutdownTimeout <= 0 {
 		problems = append(problems, "SERVER_SHUTDOWN_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.A2AClientRequestTimeout <= 0 {
+		problems = append(problems, "A2A_CLIENT_REQUEST_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.A2AClientPollInterval <= 0 {
+		problems = append(problems, "A2A_CLIENT_POLL_INTERVAL_MILLISECONDS must be greater than 0")
 	}
 	if strings.TrimSpace(c.KafkaBootstrapServers) == "" {
 		problems = append(problems, "KAFKA_BOOTSTRAP_SERVERS is required")
