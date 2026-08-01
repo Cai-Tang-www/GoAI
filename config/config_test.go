@@ -147,3 +147,73 @@ func TestLoadConfigDefaultsShutdownTimeout(t *testing.T) {
 		t.Fatalf("expected 15s shutdown timeout, got %s", AppConfig.ServerShutdownTimeout)
 	}
 }
+
+// TestValidateStartupRejectsInvalidGovernanceConfig 验证启用服务治理时关键参数必须为正数。
+func TestValidateStartupRejectsInvalidGovernanceConfig(t *testing.T) {
+	cfg := &Config{
+		MySQLHost:                  "localhost",
+		MySQLPort:                  3306,
+		MySQLUser:                  "root",
+		MySQLDatabase:              "goai",
+		RedisHost:                  "localhost",
+		RedisPort:                  6379,
+		ServerPort:                 "8080",
+		ServerShutdownTimeout:      15 * time.Second,
+		KafkaBootstrapServers:      "localhost:9092",
+		KafkaRunTopic:              "run_execute",
+		KafkaRunGroupID:            "run-worker-group",
+		JWTSecret:                  "test-secret",
+		ServiceGovernanceEnabled:   true,
+		RateLimitRequestsPerSecond: 0,
+		RateLimitBurst:             40,
+		RateLimitMaxKeys:           100,
+		DownstreamRequestTimeout:   30 * time.Second,
+		CircuitFailureThreshold:    3,
+		CircuitOpenTimeout:         10 * time.Second,
+	}
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(err.Error(), "RATE_LIMIT_REQUESTS_PER_SECOND") {
+		t.Fatalf("expected governance validation error, got %v", err)
+	}
+}
+
+// TestValidateStartupSkipsGovernanceWhenDisabled 验证关闭治理时不强制要求治理参数。
+func TestValidateStartupSkipsGovernanceWhenDisabled(t *testing.T) {
+	cfg := &Config{
+		MySQLHost:             "localhost",
+		MySQLPort:             3306,
+		MySQLUser:             "root",
+		MySQLDatabase:         "goai",
+		RedisHost:             "localhost",
+		RedisPort:             6379,
+		ServerPort:            "8080",
+		ServerShutdownTimeout: 15 * time.Second,
+		KafkaBootstrapServers: "localhost:9092",
+		KafkaRunTopic:         "run_execute",
+		KafkaRunGroupID:       "run-worker-group",
+		JWTSecret:             "test-secret",
+	}
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("disabled governance should pass without governance settings: %v", err)
+	}
+}
+
+func TestLoadFloatEnvRejectsNonFiniteValues(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "-Inf"} {
+		t.Setenv("GOAI_TEST_FLOAT", value)
+		if _, err := loadFloatEnv("GOAI_TEST_FLOAT", 1); err == nil {
+			t.Fatalf("value %q should be rejected", value)
+		}
+	}
+}
+
+func TestParseStrictBoolEnvRejectsUnknownValue(t *testing.T) {
+	if _, err := parseStrictBoolEnv("SERVICE_GOVERNANCE_ENABLE", "maybe"); err == nil {
+		t.Fatal("unknown boolean value should be rejected")
+	}
+}
+
+func TestParseScopesStrictRejectsUnknownScope(t *testing.T) {
+	if _, err := parseScopesStrict("api,unknown"); err == nil {
+		t.Fatal("unknown governance scope should be rejected")
+	}
+}

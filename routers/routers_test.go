@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"GoAI/config"
 	"GoAI/services"
 
 	"gorm.io/driver/sqlite"
@@ -44,11 +45,16 @@ func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create runtime service failed: %v", err)
 	}
+	chatService, err := services.NewChatService(&config.Config{}, &http.Client{})
+	if err != nil {
+		t.Fatalf("create chat service failed: %v", err)
+	}
 	router, err := New(Dependencies{
-		Database:   gdb,
-		RunService: service,
-		Runtime:    runtimeService,
-		A2AGateway: http.NotFoundHandler(),
+		Database:    gdb,
+		RunService:  service,
+		ChatService: chatService,
+		Runtime:     runtimeService,
+		A2AGateway:  http.NotFoundHandler(),
 	})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)

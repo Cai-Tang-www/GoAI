@@ -7,14 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 )
 
 func resetProviderRegistryForTest() {
-	providerRegistry = nil
-	providerRegistryErr = nil
-	providerRegistryOnce = sync.Once{}
+	ResetProviderRegistryForTest()
 }
 
 func TestChatUsesDefaultProvider(t *testing.T) {
