@@ -46,7 +46,7 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 - `Run`：一次完整业务回合，可由 AG-UI、A2A 或系统调度触发
 - `RunStep`：Run 内部一个可观测执行步骤
 - `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录，关联 Parent Run 与唯一 Child Run
-- `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约与鉴权
+- `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约；Agent 身份认证与授权仍在后续版本建设
 - `AgentCapability`：Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力
 - `Workflow / Graph`：某个 Agent 的执行模板或能力，不代表整个平台
 - `Loop`：用于 Trace、Replay、Eval 和成本分析的执行片段
@@ -108,10 +108,12 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - db / redis / kafka 显式依赖装配
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
+- 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Child Run、Task 状态查询与结果 Artifact 回流
 
 ### 在建
-- A2A Gateway、loopback HTTP / remote HTTPS transport 与 Agent Card
-- 多 Agent Runtime、父子 Run 与结果聚合
+- Workflow `agent` 节点的出站 A2A Client、父 Run 等待/恢复与多 Child Run 结果聚合
+- A2A Agent 身份认证、授权与凭据管理
+- 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
 - Eino Graph 能力化接入
 - Loop / Trace / Replay / Eval / Cost
 
@@ -168,7 +170,41 @@ data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
 - `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END`
 - `RUN_FINISHED` / `RUN_ERROR`
 
-协议 Gateway 只负责协议解析、内部命令映射和事件编码；Thread、Message、Run 的一致性由 Runtime 保证，Workflow 执行由 Run Worker 负责。当前尚未实现 A2A 委派，因此 Workflow 的 `agent` 节点会明确失败，不会通过本地 service 直调或 Kafka 投递伪造多 Agent 成功。后续即使目标 Agent 与 Runtime 同进程，也必须经过 A2A Gateway 的 loopback HTTP；远程 Agent 则使用 HTTPS。
+协议 Gateway 只负责协议解析、内部命令映射和事件编码；Thread、Message、Run 的一致性由 Runtime 保证，Workflow 执行由 Run Worker 负责。
+
+## A2A Gateway
+
+当前实现提供官方 A2A HTTP+JSON 入站协议入口：
+
+```text
+GET  /a2a/agents/:agent_code/.well-known/agent-card.json
+POST /a2a/agents/:agent_code/message:send
+GET  /a2a/agents/:agent_code/tasks/:task_id
+```
+
+Agent Card 从目标 Agent 的活跃 `AgentCapability` 与 A2A `AgentEndpoint` 构造。Endpoint 必须满足以下传输边界：
+
+- 本地开发 Endpoint 只能使用 loopback 主机的 HTTP 地址
+- 远程 Endpoint 必须使用 HTTPS 地址
+- 本地与远程 Agent 都执行同一套 A2A 请求、Task 状态和结果契约
+
+GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
+
+```json
+{
+  "https://goai.dev/extensions/delegation/v1": {
+    "sourceAgentCode": "planner",
+    "capabilityCode": "write",
+    "parentRunId": "run-parent"
+  }
+}
+```
+
+`message:send` 会把协议请求映射为内部 `Thread + request Message + Delegation + Child Run`，并在事务提交后投递 Child Run。重复发送相同 A2A 请求会返回同一个 Child Run；复用相同标识但改变请求内容会返回冲突。Child Run 完成后，Runtime 将结果写为目标 Agent 返回给源 Agent 的 Result Message；A2A Task 查询会把结果映射为 Artifact，失败响应不会暴露 Provider 或数据库原始错误。
+
+当前 A2A Gateway 实现的是入站委派闭环。Workflow `agent` 节点主动调用目标 Agent 的出站 A2A Client、父 Run 挂起/恢复、多 Child Run 聚合仍在后续版本；这些能力完成后也不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
+
+> 安全提示：当前尚未实现 A2A Agent 身份认证、授权和凭据管理。A2A 路由只适用于受控开发网络，不应直接暴露到公网。
 
 ## 当前 HTTP API
 
@@ -176,6 +212,7 @@ data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
 - `POST /auth/login`
 - `POST /api/chat`：单 Agent / Provider 流式调试入口
 - `POST /api/agents/:agent_code/agui`：AG-UI 标准协议入口
+- `/a2a/agents/:agent_code/*`：A2A Agent Card、委派与 Task 查询入口
 - `POST /api/runs`
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`

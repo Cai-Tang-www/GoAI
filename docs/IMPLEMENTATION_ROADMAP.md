@@ -39,19 +39,23 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 支持请求取消、稳定错误事件和历史消息去重
 - V1 仅支持普通文本消息，多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 显式拒绝；空对象/空数组不渗透到内部模型。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 分开建模
 
-### 6. A2A Gateway（下一步，Issue #20）
-- Agent 间委派入口与统一 A2A 消息模型
-- 远程 Agent 使用 HTTPS，本地开发使用 loopback HTTP；两者都访问同一 A2A Gateway，并执行相同契约、鉴权、Message、Delegation 与状态语义
-- 回调 / 结果通知
-- 协议映射到 Message + Delegation + Child Run + Trace
+### 6. A2A Gateway（已完成，Issue #20）
+- 使用官方 A2A Go SDK 提供 Agent Card、`message:send` 与 Task 状态查询
+- 将入站委派原子映射为 `Thread + request Message + Delegation + Child Run`
+- Child Run 终态回写 Delegation，并将成功结果映射为 Result Message 与 A2A Artifact
+- 相同请求支持幂等复用，冲突请求显式拒绝，重复 Kafka 消费不会重复执行或重复生成结果
+- 远程 Agent Endpoint 强制 HTTPS，本地开发 Endpoint 强制 loopback HTTP；两者都访问同一 A2A Gateway，不提供 Service 直调旁路
+- 当前仅完成入站委派；A2A Agent 身份认证、授权与凭据管理尚未实现，路由只适用于受控开发网络
 
 ## P1：多 Agent 运行时闭环
 
 ### 7. 多 Agent 协作运行时
-- Supervisor / Router / Worker 模式
-- Workflow Agent 节点通过 Runtime 创建 Delegation 与 Child Run
-- Delegation 状态推进、父 Run 等待与恢复
-- 子任务结果汇总
+- 为 Workflow `agent` 节点实现出站 A2A Client，由 Runtime 创建委派并调用目标 Agent
+- 本地目标通过 loopback HTTP、远程目标通过 HTTPS，禁止进程内 service 调用和 Kafka 协议旁路
+- 实现父 Run 挂起/恢复、Delegation 状态推进与超时/失败传播
+- 支持并行 Child Run、结果聚合与部分失败策略
+- 增加 A2A Agent 身份认证、授权和 Endpoint 凭据管理
+- 在此基础上演进 Supervisor / Router / Worker 协作策略
 
 ### 8. Eino Graph 能力化接入
 - 把 Graph 定位成 Agent 的一种执行能力
