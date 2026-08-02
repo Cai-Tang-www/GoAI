@@ -115,7 +115,8 @@ GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信
 
 - V1 使用 Worker 内阻塞轮询，父 Run 在 A2A Task 完成前不会释放执行线程。
 - 当前只支持串行 Workflow 执行，不支持多个 Agent 子任务并行聚合。
-- 尚未提供 Agent-to-Agent 身份认证、授权和凭据引用解析，A2A Gateway 只适合受控网络。
+- A2A 业务请求默认使用来源 Agent 自身 Endpoint 的 `credential_ref` 解析 HMAC-SHA256 密钥；Gateway 校验签名、时间窗、nonce 和来源身份，Agent Card discovery 公开且不泄露凭据。
+- V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
 - 当前不实现 callback 驱动的 suspend/resume。
 - Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow 执行；后续并行、条件和流式能力仍必须复用本 A2A 边界。
 
