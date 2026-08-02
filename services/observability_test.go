@@ -55,7 +55,7 @@ func TestDelegationObservabilityRecordsTraceAndBusinessKeys(t *testing.T) {
 	if result == nil || result.Delegation == nil {
 		t.Fatal("expected delegation result")
 	}
-	if _, err := fixture.runtime.DelegationSnapshot(ctx, "writer", "run_child"); err != nil {
+	if _, err := fixture.runtime.DelegationSnapshot(ctx, "writer", "", "run_child"); err != nil {
 		t.Fatalf("load delegation snapshot failed: %v", err)
 	}
 	if err := fixture.runtime.ReconcileDelegation(ctx, "run_child"); err != nil {

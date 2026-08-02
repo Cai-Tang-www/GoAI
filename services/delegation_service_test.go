@@ -420,15 +420,18 @@ func TestDelegationSnapshotRestrictsTargetAgent(t *testing.T) {
 	if _, err := fixture.runtime.AcceptDelegation(context.Background(), delegationCommand()); err != nil {
 		t.Fatalf("accept delegation failed: %v", err)
 	}
-	if _, err := fixture.runtime.DelegationSnapshot(context.Background(), "planner", "run_child"); !errors.Is(err, ErrDelegationNotFound()) {
+	if _, err := fixture.runtime.DelegationSnapshot(context.Background(), "planner", "", "run_child"); !errors.Is(err, ErrDelegationNotFound()) {
 		t.Fatalf("source agent should not query target task endpoint, got %v", err)
 	}
-	snapshot, err := fixture.runtime.DelegationSnapshot(context.Background(), "writer", "run_child")
+	snapshot, err := fixture.runtime.DelegationSnapshot(context.Background(), "writer", "planner", "run_child")
 	if err != nil {
-		t.Fatalf("target snapshot failed: %v", err)
+		t.Fatalf("authorized source snapshot failed: %v", err)
 	}
 	if snapshot.Delegation.ChildRunID != "run_child" || len(snapshot.Messages) != 1 {
 		t.Fatalf("unexpected snapshot: %+v", snapshot)
+	}
+	if _, err := fixture.runtime.DelegationSnapshot(context.Background(), "writer", "intruder", "run_child"); !errors.Is(err, ErrDelegationForbidden()) {
+		t.Fatalf("unrelated source agent should be forbidden, got %v", err)
 	}
 }
 

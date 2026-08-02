@@ -46,7 +46,7 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 - `Run`：一次完整业务回合，可由 AG-UI、A2A 或系统调度触发
 - `RunStep`：Run 内部一个可观测执行步骤
 - `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录，关联 Parent Run 与唯一 Child Run
-- `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约；Agent 身份认证与授权仍在后续版本建设
+- `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约；业务请求使用 HMAC-SHA256 机器身份认证、时间窗与 nonce 防重放，Agent Card discovery 保持公开
 - `AgentCapability`：Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力
 - `Workflow / Graph`：某个 Agent 的执行模板或能力，不代表整个平台
 - `Loop`：用于 Trace、Replay、Eval 和成本分析的执行片段
@@ -117,7 +117,6 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 
 ### 在建
 
-- A2A Agent 身份认证、授权与凭据管理
 - callback 驱动的 Parent Run suspend/resume，当前 V1 使用 Worker 内阻塞轮询
 - 多 Child Run 并行执行、结果聚合与部分失败策略
 - 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
@@ -209,9 +208,9 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 
 `message:send` 会把协议请求映射为内部 `Thread + request Message + Delegation + Child Run`，并在事务提交后投递 Child Run。重复发送相同 A2A 请求会返回同一个 Child Run；复用相同标识但改变请求内容会返回冲突。Child Run 完成后，Runtime 将结果写为目标 Agent 返回给源 Agent 的 Result Message；A2A Task 查询会把结果映射为 Artifact，失败响应不会暴露 Provider 或数据库原始错误。
 
-当前实现已经覆盖入站与出站的 A2A 最小闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，通过官方 A2A HTTP+JSON Client 发起 `message:send`，再轮询 Task 直到终态并将 Artifact/Message 收敛为父 RunStep 输出。当前父 Worker 在节点执行期间阻塞轮询，尚未实现 callback 驱动的 suspend/resume，也尚未支持多个 Child Run 的并行聚合；这些属于后续运行时增强。无论后续如何扩展，都不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
+当前实现已经覆盖带机器身份认证的入站与出站 A2A 最小闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，通过官方 A2A HTTP+JSON Client 发起 `message:send`，再轮询 Task 直到终态并将 Artifact/Message 收敛为父 RunStep 输出。当前父 Worker 在节点执行期间阻塞轮询，尚未实现 callback 驱动的 suspend/resume，也尚未支持多个 Child Run 的并行聚合；这些属于后续运行时增强。无论后续如何扩展，都不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
 
-> 安全提示：当前尚未实现 A2A Agent 身份认证、授权和凭据管理。A2A 路由只适用于受控开发网络，不应直接暴露到公网。
+> 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；远程 Endpoint 仍必须使用 HTTPS。
 
 ## 当前 HTTP API
 

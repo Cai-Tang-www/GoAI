@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"log/slog"
 
+	"GoAI/a2aauth"
+	"GoAI/requestctx"
 	"GoAI/services"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
 type requestHandler struct {
-	runtime services.DelegationRuntime
+	runtime      services.DelegationRuntime
+	authRequired bool
+	logger       *slog.Logger
 }
 
 func (h *requestHandler) GetTask(ctx context.Context, request *a2a.GetTaskRequest) (*a2a.Task, error) {
@@ -22,8 +27,15 @@ func (h *requestHandler) GetTask(ctx context.Context, request *a2a.GetTaskReques
 	if request == nil || request.ID == "" {
 		return nil, a2a.NewError(a2a.ErrInvalidParams, "task id is required")
 	}
-	snapshot, err := h.runtime.DelegationSnapshot(ctx, target, string(request.ID))
+	source, err := h.authenticatedSource(ctx)
 	if err != nil {
+		return nil, err
+	}
+	snapshot, err := h.runtime.DelegationSnapshot(ctx, target, source, string(request.ID))
+	if err != nil {
+		if errors.Is(err, services.ErrDelegationForbidden()) {
+			h.logAuthorizationRejection(ctx, target, source, "delegation_source_forbidden")
+		}
 		return nil, mapRuntimeError(err)
 	}
 	return taskFromSnapshot(snapshot, request.HistoryLength)
@@ -46,11 +58,19 @@ func (h *requestHandler) SendMessage(ctx context.Context, request *a2a.SendMessa
 	if err != nil {
 		return nil, err
 	}
+	source, err := h.authenticatedSource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if h.authRequired && source != command.SourceAgentCode {
+		h.logAuthorizationRejection(ctx, target, source, "source_metadata_mismatch")
+		return nil, a2a.ErrUnauthorized
+	}
 	result, err := h.runtime.AcceptDelegation(ctx, command)
 	if err != nil {
 		return nil, mapRuntimeError(err)
 	}
-	snapshot, err := h.runtime.DelegationSnapshot(ctx, target, result.Run.RunID)
+	snapshot, err := h.runtime.DelegationSnapshot(ctx, target, source, result.Run.RunID)
 	if err != nil {
 		return nil, mapRuntimeError(err)
 	}
@@ -90,11 +110,33 @@ func (h *requestHandler) GetExtendedAgentCard(ctx context.Context, _ *a2a.GetExt
 	if err != nil {
 		return nil, mapRuntimeError(err)
 	}
-	card, err := buildAgentCard(descriptor)
+	card, err := buildAgentCardWithAuthentication(descriptor, h.authRequired)
 	if err != nil {
 		return nil, a2a.NewError(a2a.ErrInternalError, "agent card is unavailable")
 	}
 	return card, nil
+}
+
+func (h *requestHandler) logAuthorizationRejection(ctx context.Context, targetAgent, sourceAgent, reason string) {
+	if h == nil || h.logger == nil {
+		return
+	}
+	h.logger.WarnContext(ctx, "A2A security request rejected",
+		slog.String("trace_id", requestctx.TraceIDFromContext(ctx)),
+		slog.String("target_agent", safeAuditValue(targetAgent)),
+		slog.String("source_agent", safeAuditValue(sourceAgent)),
+		slog.String("reason", reason),
+	)
+}
+func (h *requestHandler) authenticatedSource(ctx context.Context) (string, error) {
+	if !h.authRequired {
+		return "", nil
+	}
+	source, ok := a2aauth.AuthenticatedAgentFromContext(ctx)
+	if !ok {
+		return "", a2a.ErrUnauthorized
+	}
+	return source, nil
 }
 
 func unsupportedEventSequence() iter.Seq2[a2a.Event, error] {
@@ -105,6 +147,8 @@ func unsupportedEventSequence() iter.Seq2[a2a.Event, error] {
 
 func mapRuntimeError(err error) error {
 	switch {
+	case errors.Is(err, services.ErrDelegationForbidden()):
+		return a2a.ErrUnauthorized
 	case errors.Is(err, services.ErrDelegationNotFound()), errors.Is(err, services.ErrRunNotFound()):
 		return a2a.NewError(a2a.ErrTaskNotFound, "task not found")
 	case errors.Is(err, services.ErrAgentNotFound()):

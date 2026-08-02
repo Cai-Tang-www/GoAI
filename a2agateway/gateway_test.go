@@ -12,7 +12,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"GoAI/a2aauth"
 	"GoAI/models"
 	"GoAI/services"
 
@@ -22,6 +24,7 @@ import (
 type fakeDelegationRuntime struct {
 	mu              sync.Mutex
 	descriptor      *services.AgentDescriptor
+	descriptors     map[string]*services.AgentDescriptor
 	describeErr     error
 	acceptResult    *services.DelegationResult
 	acceptErr       error
@@ -32,7 +35,10 @@ type fakeDelegationRuntime struct {
 	snapshotCalls   int
 }
 
-func (f *fakeDelegationRuntime) DescribeAgent(context.Context, string) (*services.AgentDescriptor, error) {
+func (f *fakeDelegationRuntime) DescribeAgent(_ context.Context, code string) (*services.AgentDescriptor, error) {
+	if f.descriptors != nil {
+		return f.descriptors[code], f.describeErr
+	}
 	return f.descriptor, f.describeErr
 }
 
@@ -44,7 +50,7 @@ func (f *fakeDelegationRuntime) AcceptDelegation(_ context.Context, command serv
 	return f.acceptResult, f.acceptErr
 }
 
-func (f *fakeDelegationRuntime) DelegationSnapshot(context.Context, string, string) (*services.DelegationSnapshot, error) {
+func (f *fakeDelegationRuntime) DelegationSnapshot(context.Context, string, string, string) (*services.DelegationSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshotCalls++
@@ -445,5 +451,150 @@ func TestRequestHandlerMapsRuntimeErrorsAndUnsupportedOperations(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("unsupported stream returned no error event")
+	}
+}
+
+func TestGatewayRequiresSignedAgentIdentityAndRejectsReplay(t *testing.T) {
+	const secret = "test-only-a2a-secret-at-least-32-bytes-long"
+	resolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{"planner-key": secret})
+	if err != nil {
+		t.Fatalf("create resolver failed: %v", err)
+	}
+	verifier, err := a2aauth.NewVerifier(resolver, a2aauth.NewMemoryNonceStore(), time.Minute)
+	if err != nil {
+		t.Fatalf("create verifier failed: %v", err)
+	}
+	writer := validDescriptor()
+	planner := &services.AgentDescriptor{Code: "planner", Endpoints: []services.AgentEndpointDescriptor{{
+		Code: "local", Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1/a2a/agents/planner",
+		AuthType: models.AgentEndpointAuthTypeHMACSHA256, CredentialRef: "planner-key",
+	}}}
+	runtime := &fakeDelegationRuntime{
+		descriptors: map[string]*services.AgentDescriptor{
+			"planner":  planner,
+			"writer":   writer,
+			"inactive": {Code: "inactive"},
+		},
+		acceptResult: &services.DelegationResult{Run: &models.Run{RunID: "run_child"}, Delegation: &models.Delegation{DelegationID: "dlg_1"}},
+		snapshot:     validSnapshot(models.RunStatusQueued),
+	}
+	gateway, err := New(runtime, WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create authenticated gateway failed: %v", err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+
+	cardResponse, err := server.Client().Get(server.URL + "/a2a/agents/writer/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("public discovery failed: %v", err)
+	}
+	defer cardResponse.Body.Close()
+	var card a2a.AgentCard
+	if err := json.NewDecoder(cardResponse.Body).Decode(&card); err != nil {
+		t.Fatalf("decode card failed: %v", err)
+	}
+	if len(card.SecurityRequirements) != 1 || len(card.SecuritySchemes) != 1 {
+		t.Fatalf("agent card did not declare HMAC security: %+v", card)
+	}
+	encodedCard, _ := json.Marshal(card)
+	if bytes.Contains(encodedCard, []byte("planner-key")) || bytes.Contains(encodedCard, []byte(secret)) {
+		t.Fatal("agent card leaked credential material")
+	}
+
+	body, _ := json.Marshal(validSendRequest())
+	unsignedResponse, err := server.Client().Post(server.URL+"/a2a/agents/writer/message:send", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unsigned request failed: %v", err)
+	}
+	unsignedResponse.Body.Close()
+	if unsignedResponse.StatusCode != http.StatusUnauthorized || runtime.acceptCalls != 0 {
+		t.Fatalf("unsigned status=%d acceptCalls=%d", unsignedResponse.StatusCode, runtime.acceptCalls)
+	}
+
+	now := time.Now().UTC()
+	signer, err := a2aauth.NewSigner(server.Client().Transport, resolver, "planner", "planner-key",
+		a2aauth.WithSignerClock(func() time.Time { return now }),
+		a2aauth.WithNonceGenerator(func() (string, error) { return "fixed-replay-nonce", nil }),
+	)
+	if err != nil {
+		t.Fatalf("create signer failed: %v", err)
+	}
+	signedClient := *server.Client()
+	signedClient.Transport = signer
+	for attempt, expected := range []int{http.StatusOK, http.StatusUnauthorized} {
+		response, err := signedClient.Post(server.URL+"/a2a/agents/writer/message:send", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("signed attempt %d failed: %v", attempt+1, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != expected {
+			t.Fatalf("signed attempt %d status=%d want=%d", attempt+1, response.StatusCode, expected)
+		}
+	}
+	if runtime.acceptCalls != 1 {
+		t.Fatalf("replayed request reached runtime: acceptCalls=%d", runtime.acceptCalls)
+	}
+
+	mismatchedRequest := validSendRequest()
+	metadata := mismatchedRequest.Message.Metadata[DelegationExtensionURI].(map[string]any)
+	metadata["sourceAgentCode"] = "intruder"
+	mismatchedBody, _ := json.Marshal(mismatchedRequest)
+	mismatchSigner, err := a2aauth.NewSigner(server.Client().Transport, resolver, "planner", "planner-key",
+		a2aauth.WithNonceGenerator(func() (string, error) { return "metadata-mismatch-nonce", nil }),
+	)
+	if err != nil {
+		t.Fatalf("create mismatch signer failed: %v", err)
+	}
+	mismatchClient := *server.Client()
+	mismatchClient.Transport = mismatchSigner
+	mismatchResponse, err := mismatchClient.Post(server.URL+"/a2a/agents/writer/message:send", "application/json", bytes.NewReader(mismatchedBody))
+	if err != nil {
+		t.Fatalf("send source mismatch request failed: %v", err)
+	}
+	mismatchResponse.Body.Close()
+	if mismatchResponse.StatusCode != http.StatusForbidden || runtime.acceptCalls != 1 {
+		t.Fatalf("source mismatch status=%d acceptCalls=%d", mismatchResponse.StatusCode, runtime.acceptCalls)
+	}
+
+	for _, source := range []string{"ghost", "inactive"} {
+		sourceSigner, signerErr := a2aauth.NewSigner(server.Client().Transport, resolver, source, "planner-key")
+		if signerErr != nil {
+			t.Fatalf("create %s signer failed: %v", source, signerErr)
+		}
+		sourceClient := *server.Client()
+		sourceClient.Transport = sourceSigner
+		response, requestErr := sourceClient.Post(server.URL+"/a2a/agents/writer/message:send", "application/json", bytes.NewReader(body))
+		if requestErr != nil {
+			t.Fatalf("send %s source request failed: %v", source, requestErr)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized || runtime.acceptCalls != 1 {
+			t.Fatalf("source=%s status=%d acceptCalls=%d", source, response.StatusCode, runtime.acceptCalls)
+		}
+	}
+}
+
+func TestAuthenticatedSourceMustMatchDelegationMetadata(t *testing.T) {
+	runtime := &fakeDelegationRuntime{}
+	handler := &requestHandler{runtime: runtime, authRequired: true}
+	ctx := context.WithValue(context.Background(), targetAgentContextKey{}, "writer")
+	ctx = a2aauth.WithAuthenticatedAgent(ctx, "intruder")
+	if _, err := handler.SendMessage(ctx, validSendRequest()); !errors.Is(err, a2a.ErrUnauthorized) {
+		t.Fatalf("expected unauthorized mismatch, got %v", err)
+	}
+	if runtime.acceptCalls != 0 {
+		t.Fatalf("identity mismatch reached runtime: %d", runtime.acceptCalls)
+	}
+}
+
+func TestSafeAuditValuePreservesUTF8(t *testing.T) {
+	input := strings.Repeat("协", 129)
+	got := safeAuditValue(input)
+	if !utf8.ValidString(got) {
+		t.Fatal("safeAuditValue returned invalid UTF-8")
+	}
+	if runeCount := utf8.RuneCountInString(got); runeCount != 128 {
+		t.Fatalf("rune count=%d, want 128", runeCount)
 	}
 }

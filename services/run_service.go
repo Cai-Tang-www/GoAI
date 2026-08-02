@@ -1306,6 +1306,14 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 		}
 		return "", fmt.Errorf("loading target capability: %w", err)
 	}
+	var sourceEndpoint models.AgentEndpoint
+	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", source.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").First(&sourceEndpoint).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			sourceEndpoint.AuthType = models.AgentEndpointAuthTypeNone
+		} else {
+			return "", fmt.Errorf("loading source A2A identity endpoint: %w", err)
+		}
+	}
 	var endpoints []models.AgentEndpoint
 	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", target.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").Find(&endpoints).Error; err != nil {
 		return "", fmt.Errorf("loading target A2A endpoints: %w", err)
@@ -1321,17 +1329,19 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	invokeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result, err := s.agentInvoker.Invoke(invokeCtx, AgentInvocationRequest{
-		SourceAgentCode: source.AgentCode,
-		TargetAgentCode: target.AgentCode,
-		CapabilityCode:  capability.CapabilityCode,
-		ParentRunID:     run.RunID,
-		TraceID:         run.TraceID,
-		DelegationID:    stableA2AID("delegation", run.RunID, node.Key),
-		ThreadID:        run.ThreadID,
-		TaskID:          stableA2AID("task", run.RunID, node.Key),
-		MessageID:       stableA2AID("message", run.RunID, node.Key),
-		InputJSON:       run.InputJSON,
-		Endpoints:       invocationEndpoints,
+		SourceAgentCode:     source.AgentCode,
+		SourceAuthType:      sourceEndpoint.AuthType,
+		SourceCredentialRef: sourceEndpoint.CredentialRef,
+		TargetAgentCode:     target.AgentCode,
+		CapabilityCode:      capability.CapabilityCode,
+		ParentRunID:         run.RunID,
+		TraceID:             run.TraceID,
+		DelegationID:        stableA2AID("delegation", run.RunID, node.Key),
+		ThreadID:            run.ThreadID,
+		TaskID:              stableA2AID("task", run.RunID, node.Key),
+		MessageID:           stableA2AID("message", run.RunID, node.Key),
+		InputJSON:           run.InputJSON,
+		Endpoints:           invocationEndpoints,
 	})
 	if err != nil {
 		return "", err

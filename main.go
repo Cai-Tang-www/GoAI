@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"GoAI/a2aauth"
 	"GoAI/a2aclient"
 	"GoAI/a2agateway"
 	"GoAI/config"
@@ -39,6 +40,15 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 	cfg := config.AppConfig
+	credentialResolver, err := a2aauth.NewStaticCredentialResolver(cfg.A2ACredentials)
+	if err != nil {
+		return fmt.Errorf("initializing A2A credentials: %w", err)
+	}
+	nonceStore := a2aauth.NewMemoryNonceStore()
+	verifier, err := a2aauth.NewVerifier(credentialResolver, nonceStore, cfg.A2AAuthMaxClockSkew)
+	if err != nil {
+		return fmt.Errorf("initializing A2A authentication: %w", err)
+	}
 
 	telemetry, err := observability.New("goai", os.Stderr)
 	if err != nil {
@@ -88,6 +98,9 @@ func run(ctx context.Context) error {
 	if err := db.Migrate(database); err != nil {
 		return errors.Join(err, db.Close(database))
 	}
+	if err := db.ValidateA2AEndpointAuthentication(ctx, database, credentialResolver, cfg.A2AAuthRequired); err != nil {
+		return errors.Join(fmt.Errorf("validating A2A endpoint authentication: %w", err), db.Close(database))
+	}
 	if err := db.SeedRBAC(database, cfg); err != nil {
 		return errors.Join(fmt.Errorf("seeding RBAC: %w", err), db.Close(database))
 	}
@@ -110,7 +123,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	agentInvoker, err := a2aclient.New(governedHTTPClient, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval, a2aclient.WithObservability(telemetry))
+	agentInvoker, err := a2aclient.New(governedHTTPClient, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval, a2aclient.WithObservability(telemetry), a2aclient.WithAuthentication(credentialResolver, cfg.A2AAuthRequired))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
@@ -131,7 +144,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	a2aGateway, err := a2agateway.New(runtimeService)
+	a2aGateway, err := a2agateway.New(runtimeService, a2agateway.WithAuthentication(verifier, cfg.A2AAuthRequired), a2agateway.WithObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}

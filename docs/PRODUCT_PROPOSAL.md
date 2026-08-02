@@ -467,7 +467,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 
 ### 14.3 仍需扩展
 
-- A2A Agent 身份认证、授权和 Endpoint 凭据管理
+- 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - callback 驱动的 Parent Run suspend/resume，替代当前节点内 Task polling
 - 多 Child Run 并行 fan-out/fan-in 与聚合策略
 - MCP、AgentAsTool、多模态消息和远程 Agent 运维管理

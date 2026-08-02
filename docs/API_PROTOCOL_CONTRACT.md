@@ -13,7 +13,7 @@
 - `/ping`、`/auth/register`、`/auth/login` 不需要 JWT。
 - `/api/*` 需要 `Authorization: Bearer <jwt>`。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
-- A2A Gateway 当前没有 Agent 身份认证、授权和凭据管理，只适用于受控开发网络。
+- A2A Agent Card discovery 公开；`message:send`、Task 查询及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
 
@@ -311,5 +311,5 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 ## 8. Compatibility and Current Limits
 
 - V1 只做文本消息和同步轮询式 A2A 结果收敛，不做多模态、Push、Cancel、callback suspend/resume 或多个 Child Run 并行聚合。
-- A2A Agent 身份认证、授权和凭据管理尚未实现，A2A 入口仅用于受控开发网络。
+- A2A 业务请求必须携带 `Authorization`、`X-GoAI-Agent-Code`、`X-GoAI-Timestamp`、`X-GoAI-Nonce`、`X-GoAI-Content-SHA256`；来源身份必须匹配委派 metadata，Task 查询仅允许委派来源 Agent。
 - 外部协议版本升级时，先更新 Gateway 适配和本文件，再变更内部领域模型；不要把 SDK 类型直接作为 Service 接口。

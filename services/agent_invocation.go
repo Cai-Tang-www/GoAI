@@ -17,17 +17,19 @@ type AgentInvocationEndpoint struct {
 
 // AgentInvocationRequest 描述 Workflow agent 节点发起的一次跨 Agent 委派。
 type AgentInvocationRequest struct {
-	SourceAgentCode string
-	TargetAgentCode string
-	CapabilityCode  string
-	ParentRunID     string
-	TraceID         string
-	DelegationID    string
-	ThreadID        string
-	TaskID          string
-	MessageID       string
-	InputJSON       string
-	Endpoints       []AgentInvocationEndpoint
+	SourceAgentCode     string
+	SourceAuthType      string
+	SourceCredentialRef string
+	TargetAgentCode     string
+	CapabilityCode      string
+	ParentRunID         string
+	TraceID             string
+	DelegationID        string
+	ThreadID            string
+	TaskID              string
+	MessageID           string
+	InputJSON           string
+	Endpoints           []AgentInvocationEndpoint
 }
 
 // AgentInvocationState 表示跨 Agent 调用映射到 Runtime 后的协议无关终态。

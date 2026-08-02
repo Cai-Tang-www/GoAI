@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"GoAI/a2aauth"
 	"GoAI/a2aprotocol"
 	"GoAI/observability"
 	"GoAI/requestctx"
@@ -31,6 +32,8 @@ type Client struct {
 	httpClient   *http.Client
 	pollInterval time.Duration
 	telemetry    *observability.Bundle
+	resolver     a2aauth.CredentialResolver
+	authRequired bool
 }
 
 // Option 配置 A2A 出站客户端的可选依赖。
@@ -43,6 +46,18 @@ func WithObservability(bundle *observability.Bundle) Option {
 			return errors.New("configuring A2A client: observability bundle is nil")
 		}
 		client.telemetry = bundle
+		return nil
+	}
+}
+
+// WithAuthentication 注入来源 Agent 凭据解析器，并控制业务 A2A 请求是否强制签名。
+func WithAuthentication(resolver a2aauth.CredentialResolver, required bool) Option {
+	return func(client *Client) error {
+		if required && resolver == nil {
+			return errors.New("configuring A2A client: credential resolver is nil")
+		}
+		client.resolver = resolver
+		client.authRequired = required
 		return nil
 	}
 }
@@ -166,11 +181,15 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 		return nil, invocationError(err, false)
 	}
 
+	businessClient, err := c.businessHTTPClient(request, card)
+	if err != nil {
+		return nil, invocationError(fmt.Errorf("configuring A2A business authentication: %w", err), false)
+	}
 	client, err := sdkclient.NewFromCard(
 		ctx,
 		card,
 		sdkclient.WithDefaultsDisabled(),
-		sdkclient.WithRESTTransport(c.httpClient),
+		sdkclient.WithRESTTransport(businessClient),
 		sdkclient.WithConfig(sdkclient.Config{
 			PreferredTransports: []a2a.TransportProtocol{a2a.TransportProtocolHTTPJSON},
 			AcceptedOutputModes: []string{"application/json", "text/plain"},
@@ -215,6 +234,45 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 	}
 }
 
+func (c *Client) businessHTTPClient(request services.AgentInvocationRequest, card *a2a.AgentCard) (*http.Client, error) {
+	if !c.authRequired {
+		return c.httpClient, nil
+	}
+	if strings.TrimSpace(request.SourceAuthType) != a2aauth.AuthTypeHMACSHA256 || strings.TrimSpace(request.SourceCredentialRef) == "" {
+		return nil, errors.New("source agent A2A authentication is not configured")
+	}
+	if !cardRequiresHMAC(card) {
+		return nil, errors.New("target agent card does not declare GoAI HMAC authentication")
+	}
+	signer, err := a2aauth.NewSigner(c.httpClient.Transport, c.resolver, request.SourceAgentCode, request.SourceCredentialRef)
+	if err != nil {
+		return nil, err
+	}
+	cloned := *c.httpClient
+	cloned.Transport = signer
+	return &cloned, nil
+}
+
+func cardRequiresHMAC(card *a2a.AgentCard) bool {
+	if card == nil {
+		return false
+	}
+	const schemeName a2a.SecuritySchemeName = "goaiHMACSHA256"
+	scheme, ok := card.SecuritySchemes[schemeName]
+	if !ok {
+		return false
+	}
+	httpScheme, ok := scheme.(a2a.HTTPAuthSecurityScheme)
+	if !ok || !strings.EqualFold(httpScheme.Scheme, a2aauth.AuthorizationScheme) {
+		return false
+	}
+	for _, requirement := range card.SecurityRequirements {
+		if _, ok := requirement[schemeName]; ok {
+			return true
+		}
+	}
+	return false
+}
 func (c *Client) waitForTask(ctx context.Context, client *sdkclient.Client, expectedTaskID string, task *a2a.Task) (*services.AgentInvocationResult, error) {
 	for {
 		if task == nil {
