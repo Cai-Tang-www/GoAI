@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"GoAI/a2aauth"
 	"GoAI/a2aclient"
 	"GoAI/a2agateway"
 	"GoAI/ai"
@@ -48,7 +49,7 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	agentBInA, workflowBInA := seedAgent(t, databaseA, "writer", "Writer Agent", 22, `{"entry_node":"write","nodes":[{"key":"write","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseA, agentBInA, "write", workflowBInA)
 
-	seedAgent(t, databaseB, "planner", "Planner Agent", 11, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+	plannerB, _ := seedAgent(t, databaseB, "planner", "Planner Agent", 11, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
 	agentB, workflowB := seedAgent(t, databaseB, "writer", "Writer Agent", 22, `{"entry_node":"write","nodes":[{"key":"write","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseB, agentB, "write", workflowB)
 
@@ -95,7 +96,18 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	if err != nil {
 		t.Fatalf("create target runtime: %v", err)
 	}
-	gatewayB, err := a2agateway.New(runtimeB)
+	credentialResolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{
+		"planner-key": "test-only-planner-a2a-secret-at-least-32-bytes",
+		"writer-key":  "test-only-writer-a2a-secret-at-least-32-bytes",
+	})
+	if err != nil {
+		t.Fatalf("create A2A credential resolver: %v", err)
+	}
+	verifier, err := a2aauth.NewVerifier(credentialResolver, a2aauth.NewMemoryNonceStore(), time.Minute)
+	if err != nil {
+		t.Fatalf("create A2A verifier: %v", err)
+	}
+	gatewayB, err := a2agateway.New(runtimeB, a2agateway.WithAuthentication(verifier, true))
 	if err != nil {
 		t.Fatalf("create target gateway: %v", err)
 	}
@@ -110,10 +122,12 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	}))
 	t.Cleanup(serverB.Close)
 
-	seedEndpoint(t, databaseB, agentB, serverB.URL+"/a2a/agents/writer")
-	seedEndpoint(t, databaseA, agentBInA, serverB.URL+"/a2a/agents/writer")
+	seedEndpoint(t, databaseB, agentB, serverB.URL+"/a2a/agents/writer", "writer-key")
+	seedEndpoint(t, databaseB, plannerB, serverB.URL+"/a2a/agents/planner", "planner-key")
+	seedEndpoint(t, databaseA, agentBInA, serverB.URL+"/a2a/agents/writer", "writer-key")
+	seedEndpoint(t, databaseA, agentA, "http://127.0.0.1:1/a2a/agents/planner", "planner-key")
 
-	outbound, err := a2aclient.New(serverB.Client(), 5*time.Second, time.Millisecond)
+	outbound, err := a2aclient.New(serverB.Client(), 5*time.Second, time.Millisecond, a2aclient.WithAuthentication(credentialResolver, true))
 	if err != nil {
 		t.Fatalf("create A2A client: %v", err)
 	}
@@ -334,11 +348,13 @@ func seedCapability(t *testing.T, database *gorm.DB, agent models.Agent, code st
 	}
 }
 
-func seedEndpoint(t *testing.T, database *gorm.DB, agent models.Agent, address string) {
+func seedEndpoint(t *testing.T, database *gorm.DB, agent models.Agent, address, credentialRef string) {
 	t.Helper()
 	endpoint := models.AgentEndpoint{
 		AgentID: agent.ID, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A,
-		Transport: models.AgentEndpointTransportHTTP, Address: address, Status: models.AgentEndpointStatusActive,
+		Transport: models.AgentEndpointTransportHTTP, Address: address,
+		AuthType: models.AgentEndpointAuthTypeHMACSHA256, CredentialRef: credentialRef,
+		Status: models.AgentEndpointStatusActive,
 	}
 	if err := database.Create(&endpoint).Error; err != nil {
 		t.Fatalf("create endpoint for %s: %v", agent.AgentCode, err)

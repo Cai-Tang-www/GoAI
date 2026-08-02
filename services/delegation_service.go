@@ -19,10 +19,11 @@ import (
 )
 
 var (
-	errDelegationNotFound = errors.New("delegation not found")
-	errCapabilityNotFound = errors.New("agent capability not found")
-	errDelegationConflict = errors.New("delegation already exists with different request")
-	errInvalidDelegation  = errors.New("invalid delegation request")
+	errDelegationNotFound  = errors.New("delegation not found")
+	errCapabilityNotFound  = errors.New("agent capability not found")
+	errDelegationConflict  = errors.New("delegation already exists with different request")
+	errInvalidDelegation   = errors.New("invalid delegation request")
+	errDelegationForbidden = errors.New("delegation access forbidden")
 )
 
 // ErrDelegationNotFound 返回委派记录不存在的统一 sentinel error。
@@ -36,6 +37,9 @@ func ErrDelegationConflict() error { return errDelegationConflict }
 
 // ErrInvalidDelegation 返回委派命令不满足运行时约束的统一 sentinel error。
 func ErrInvalidDelegation() error { return errInvalidDelegation }
+
+// ErrDelegationForbidden 返回认证 Agent 无权访问委派的统一 sentinel error。
+func ErrDelegationForbidden() error { return errDelegationForbidden }
 
 // AcceptDelegationCommand 是 A2A Gateway 映射到 Runtime 的协议无关委派命令。
 type AcceptDelegationCommand struct {
@@ -79,11 +83,13 @@ type AgentCapabilityDescriptor struct {
 	OutputSchemaJSON string
 }
 
-// AgentEndpointDescriptor 描述协议发现阶段可公开的 Agent 网络入口。
+// AgentEndpointDescriptor 是 Runtime 与 Gateway 使用的内部网络入口描述；CredentialRef 不得写入 Agent Card 或协议响应。
 type AgentEndpointDescriptor struct {
-	Code      string
-	Transport string
-	Address   string
+	Code          string
+	Transport     string
+	Address       string
+	AuthType      string
+	CredentialRef string
 }
 
 // AgentDescriptor 是协议 Gateway 构造 Agent Card 所需的稳定内部描述。
@@ -99,7 +105,7 @@ type AgentDescriptor struct {
 type DelegationRuntime interface {
 	DescribeAgent(context.Context, string) (*AgentDescriptor, error)
 	AcceptDelegation(context.Context, AcceptDelegationCommand) (*DelegationResult, error)
-	DelegationSnapshot(context.Context, string, string) (*DelegationSnapshot, error)
+	DelegationSnapshot(context.Context, string, string, string) (*DelegationSnapshot, error)
 	ReconcileDelegation(context.Context, string) error
 }
 
@@ -168,9 +174,11 @@ func (s *RuntimeService) DescribeAgent(ctx context.Context, agentCode string) (*
 	}
 	for _, endpoint := range endpoints {
 		descriptor.Endpoints = append(descriptor.Endpoints, AgentEndpointDescriptor{
-			Code:      endpoint.EndpointCode,
-			Transport: endpoint.Transport,
-			Address:   endpoint.Address,
+			Code:          endpoint.EndpointCode,
+			Transport:     endpoint.Transport,
+			Address:       endpoint.Address,
+			AuthType:      endpoint.AuthType,
+			CredentialRef: endpoint.CredentialRef,
 		})
 	}
 	return descriptor, nil
@@ -389,8 +397,9 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 }
 
 // DelegationSnapshot 返回指定目标 Agent 可见的 A2A Child Run 与协作消息快照。
-func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode, childRunID string) (snapshotResult *DelegationSnapshot, err error) {
+func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode, sourceAgentCode, childRunID string) (snapshotResult *DelegationSnapshot, err error) {
 	targetCode := strings.TrimSpace(targetAgentCode)
+	sourceCode := strings.TrimSpace(sourceAgentCode)
 	childID := strings.TrimSpace(childRunID)
 	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.snapshot", childID, "", "")
 	ctx = observedCtx
@@ -436,6 +445,9 @@ func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode
 	}
 	if err := s.database.WithContext(ctx).First(&snapshot.SourceAgent, "id = ?", snapshot.Delegation.SourceAgentID).Error; err != nil {
 		return nil, fmt.Errorf("loading delegation source agent: %w", err)
+	}
+	if sourceCode != "" && snapshot.SourceAgent.AgentCode != sourceCode {
+		return nil, errDelegationForbidden
 	}
 	if err := s.database.WithContext(ctx).First(&snapshot.TargetAgent, "id = ?", snapshot.Delegation.TargetAgentID).Error; err != nil {
 		return nil, fmt.Errorf("loading delegation target agent: %w", err)

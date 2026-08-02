@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"GoAI/a2aauth"
 	"GoAI/a2aprotocol"
 	"GoAI/models"
+	"GoAI/observability"
+	"GoAI/requestctx"
 	"GoAI/services"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -28,17 +32,55 @@ type targetAgentContextKey struct{}
 
 // Gateway 将按 Agent Code 分租户的 HTTP 请求交给官方 A2A HTTP+JSON transport。
 type Gateway struct {
-	runtime services.DelegationRuntime
-	rest    http.Handler
+	runtime      services.DelegationRuntime
+	rest         http.Handler
+	verifier     *a2aauth.Verifier
+	authRequired bool
+	logger       *slog.Logger
+}
+
+// Option 配置 A2A Gateway 的协议安全能力。
+type Option func(*Gateway) error
+
+// WithAuthentication 开启或关闭 A2A 业务请求的机器身份验签。
+func WithAuthentication(verifier *a2aauth.Verifier, required bool) Option {
+	return func(gateway *Gateway) error {
+		if required && verifier == nil {
+			return errors.New("configuring A2A gateway: verifier is nil")
+		}
+		gateway.verifier = verifier
+		gateway.authRequired = required
+		return nil
+	}
+}
+
+// WithObservability 注入 A2A Gateway 的安全审计日志能力。
+func WithObservability(bundle *observability.Bundle) Option {
+	return func(gateway *Gateway) error {
+		if bundle == nil || bundle.Logger == nil {
+			return errors.New("configuring A2A gateway: observability logger is nil")
+		}
+		gateway.logger = bundle.Logger
+		return nil
+	}
 }
 
 // New 使用协议无关 Runtime 创建 A2A Gateway。
-func New(runtime services.DelegationRuntime) (*Gateway, error) {
+func New(runtime services.DelegationRuntime, options ...Option) (*Gateway, error) {
 	if runtime == nil {
 		return nil, errors.New("creating A2A gateway: runtime is nil")
 	}
-	handler := &requestHandler{runtime: runtime}
-	return &Gateway{runtime: runtime, rest: a2asrv.NewRESTHandler(handler)}, nil
+	gateway := &Gateway{runtime: runtime}
+	for _, option := range options {
+		if option != nil {
+			if err := option(gateway); err != nil {
+				return nil, err
+			}
+		}
+	}
+	handler := &requestHandler{runtime: runtime, authRequired: gateway.authRequired, logger: gateway.logger}
+	gateway.rest = a2asrv.NewRESTHandler(handler)
+	return gateway, nil
 }
 
 // ServeHTTP 解析目标 Agent，并保持官方 A2A REST 路径不变地执行协议请求。
@@ -54,11 +96,90 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.authRequired {
+		authenticatedAgent, err := g.authenticate(r)
+		if err != nil {
+			g.logSecurityRejection(r.Context(), targetAgent, r.Header.Get(a2aauth.HeaderAgentCode), authenticationFailureReason(err))
+			writeAuthenticationError(w, http.StatusUnauthorized, "A2A authentication failed")
+			return
+		}
+		ctx = a2aauth.WithAuthenticatedAgent(ctx, authenticatedAgent)
+	}
+
 	cloned := r.Clone(ctx)
 	cloned.URL = cloneURL(r.URL)
 	cloned.URL.Path = protocolPath
 	cloned.URL.RawPath = ""
 	g.rest.ServeHTTP(w, cloned)
+}
+
+func (g *Gateway) authenticate(request *http.Request) (string, error) {
+	sourceCode := strings.TrimSpace(request.Header.Get(a2aauth.HeaderAgentCode))
+	if sourceCode == "" {
+		return "", a2aauth.ErrMissingAuthentication
+	}
+	descriptor, err := g.runtime.DescribeAgent(request.Context(), sourceCode)
+	if err != nil || descriptor == nil || strings.TrimSpace(descriptor.Code) != sourceCode {
+		return "", a2aauth.ErrInvalidAuthentication
+	}
+	credentialRef := ""
+	for _, endpoint := range descriptor.Endpoints {
+		if endpoint.AuthType != models.AgentEndpointAuthTypeHMACSHA256 || strings.TrimSpace(endpoint.CredentialRef) == "" {
+			continue
+		}
+		if credentialRef != "" && credentialRef != strings.TrimSpace(endpoint.CredentialRef) {
+			return "", a2aauth.ErrInvalidAuthentication
+		}
+		credentialRef = strings.TrimSpace(endpoint.CredentialRef)
+	}
+	if credentialRef == "" {
+		return "", a2aauth.ErrInvalidAuthentication
+	}
+	return g.verifier.Verify(request, credentialRef)
+}
+
+func (g *Gateway) logSecurityRejection(ctx context.Context, targetAgent, sourceAgent, reason string) {
+	if g == nil || g.logger == nil {
+		return
+	}
+	g.logger.WarnContext(ctx, "A2A security request rejected",
+		slog.String("trace_id", requestctx.TraceIDFromContext(ctx)),
+		slog.String("target_agent", safeAuditValue(targetAgent)),
+		slog.String("source_agent", safeAuditValue(sourceAgent)),
+		slog.String("reason", reason),
+	)
+}
+
+func authenticationFailureReason(err error) string {
+	switch {
+	case errors.Is(err, a2aauth.ErrMissingAuthentication):
+		return "missing_authentication"
+	case errors.Is(err, a2aauth.ErrExpiredRequest):
+		return "expired_timestamp"
+	case errors.Is(err, a2aauth.ErrReplayDetected):
+		return "nonce_replay"
+	case errors.Is(err, a2aauth.ErrRequestBodyTooLarge):
+		return "body_too_large"
+	case errors.Is(err, a2aauth.ErrInvalidAuthentication):
+		return "invalid_authentication"
+	default:
+		return "verification_failed"
+	}
+}
+
+func safeAuditValue(value string) string {
+	value = strings.TrimSpace(value)
+	const maxAuditValueRunes = 128
+	runes := []rune(value)
+	if len(runes) > maxAuditValueRunes {
+		return string(runes[:maxAuditValueRunes])
+	}
+	return value
+}
+func writeAuthenticationError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 func splitGatewayPath(path string) (string, string, bool) {
@@ -107,7 +228,7 @@ func (g *Gateway) serveAgentCard(ctx context.Context, targetAgent string, w http
 		writeCardError(w, status, message)
 		return
 	}
-	card, err := buildAgentCard(descriptor)
+	card, err := buildAgentCardWithAuthentication(descriptor, g.authRequired)
 	if err != nil {
 		writeCardError(w, http.StatusInternalServerError, "agent card is invalid")
 		return
@@ -124,6 +245,10 @@ func writeCardError(w http.ResponseWriter, status int, message string) {
 }
 
 func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error) {
+	return buildAgentCardWithAuthentication(descriptor, false)
+}
+
+func buildAgentCardWithAuthentication(descriptor *services.AgentDescriptor, authRequired bool) (*a2a.AgentCard, error) {
 	if descriptor == nil || strings.TrimSpace(descriptor.Code) == "" {
 		return nil, errors.New("agent descriptor is empty")
 	}
@@ -165,7 +290,7 @@ func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error
 		}
 		contracts[capability.Code] = contract
 	}
-	return &a2a.AgentCard{
+	card := &a2a.AgentCard{
 		Name:                descriptor.Name,
 		Description:         descriptor.Description,
 		Version:             "1.0",
@@ -179,7 +304,17 @@ func buildAgentCard(descriptor *services.AgentDescriptor) (*a2a.AgentCard, error
 		DefaultInputModes:  []string{"text/plain", "application/json"},
 		DefaultOutputModes: []string{"application/json"},
 		Skills:             skills,
-	}, nil
+	}
+	if authRequired {
+		const schemeName a2a.SecuritySchemeName = "goaiHMACSHA256"
+		card.SecuritySchemes = a2a.NamedSecuritySchemes{
+			schemeName: a2a.HTTPAuthSecurityScheme{Scheme: a2aauth.AuthorizationScheme},
+		}
+		card.SecurityRequirements = a2a.SecurityRequirementsOptions{
+			a2a.SecurityRequirements{schemeName: a2a.SecuritySchemeScopes{}},
+		}
+	}
+	return card, nil
 }
 
 func decodeSchema(raw string) (any, error) {

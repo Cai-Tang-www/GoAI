@@ -6,10 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"GoAI/a2aauth"
 	"GoAI/a2aprotocol"
 	"GoAI/observability"
 	"GoAI/services"
@@ -151,6 +153,152 @@ func TestClientRejectsMissingDelegationExtension(t *testing.T) {
 	}
 }
 
+func TestClientAuthenticationSignsBusinessRequestsWithFreshNonces(t *testing.T) {
+	const secret = "test-only-a2a-secret-at-least-32-bytes-long"
+	resolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{"planner-key": secret})
+	if err != nil {
+		t.Fatalf("create credential resolver: %v", err)
+	}
+	verifier, err := a2aauth.NewVerifier(resolver, a2aauth.NewMemoryNonceStore(), time.Minute)
+	if err != nil {
+		t.Fatalf("create verifier: %v", err)
+	}
+
+	var mu sync.Mutex
+	var discoveryHeaders http.Header
+	var businessNonces []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/a2a/agents/writer/.well-known/agent-card.json":
+			mu.Lock()
+			discoveryHeaders = r.Header.Clone()
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(testSecuredCard(serverBaseURL(r), "write"))
+		case "/a2a/agents/writer/message:send":
+			if agent, verifyErr := verifier.Verify(r, "planner-key"); verifyErr != nil || agent != "planner" {
+				http.Error(w, "invalid authentication", http.StatusUnauthorized)
+				return
+			}
+			mu.Lock()
+			businessNonces = append(businessNonces, r.Header.Get(a2aauth.HeaderNonce))
+			mu.Unlock()
+			var request a2a.SendMessageRequest
+			if decodeErr := json.NewDecoder(r.Body).Decode(&request); decodeErr != nil {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(&a2a.StreamResponse{Event: &a2a.Task{
+				ID: request.Message.TaskID, ContextID: request.Message.ContextID,
+				Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+			}})
+		case "/a2a/agents/writer/tasks/secured-task":
+			if agent, verifyErr := verifier.Verify(r, "planner-key"); verifyErr != nil || agent != "planner" {
+				http.Error(w, "invalid authentication", http.StatusUnauthorized)
+				return
+			}
+			mu.Lock()
+			businessNonces = append(businessNonces, r.Header.Get(a2aauth.HeaderNonce))
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(&a2a.Task{
+				ID: "secured-task", ContextID: "thread-secured",
+				Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+				Artifacts: []*a2a.Artifact{{Parts: a2a.ContentParts{a2a.NewDataPart(map[string]any{"answer": "signed"})}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.Client(), time.Second, time.Millisecond, WithAuthentication(resolver, true))
+	if err != nil {
+		t.Fatalf("new authenticated client: %v", err)
+	}
+	result, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
+		SourceAgentCode: "planner", SourceAuthType: a2aauth.AuthTypeHMACSHA256, SourceCredentialRef: "planner-key",
+		TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "parent-secured",
+		ThreadID: "thread-secured", TaskID: "secured-task", MessageID: "message-secured", InputJSON: `{}`,
+		Endpoints: []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke authenticated endpoint: %v", err)
+	}
+	if result.OutputJSON != `{"answer":"signed"}` {
+		t.Fatalf("unexpected authenticated result: %+v", result)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if discoveryHeaders.Get("Authorization") != "" || discoveryHeaders.Get(a2aauth.HeaderAgentCode) != "" {
+		t.Fatalf("public discovery carried authentication headers: %v", discoveryHeaders)
+	}
+	if len(businessNonces) != 2 || businessNonces[0] == "" || businessNonces[1] == "" || businessNonces[0] == businessNonces[1] {
+		t.Fatalf("business requests must use distinct nonces: %v", businessNonces)
+	}
+}
+
+func TestClientAuthenticationRejectsMissingSourceConfigAndUnsecuredCard(t *testing.T) {
+	const secret = "test-only-a2a-secret-at-least-32-bytes-long"
+	resolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{"planner-key": secret})
+	if err != nil {
+		t.Fatalf("create credential resolver: %v", err)
+	}
+	tests := []struct {
+		name          string
+		secureCard    bool
+		request       services.AgentInvocationRequest
+		wantErrorText string
+	}{
+		{
+			name: "missing source authentication", secureCard: true,
+			request:       services.AgentInvocationRequest{SourceAgentCode: "planner"},
+			wantErrorText: "source agent A2A authentication is not configured",
+		},
+		{
+			name: "target card omits authentication", secureCard: false,
+			request:       services.AgentInvocationRequest{SourceAgentCode: "planner", SourceAuthType: a2aauth.AuthTypeHMACSHA256, SourceCredentialRef: "planner-key"},
+			wantErrorText: "target agent card does not declare GoAI HMAC authentication",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var businessCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/a2a/agents/writer/.well-known/agent-card.json" {
+					card := testCard(serverBaseURL(r), "write")
+					if test.secureCard {
+						card = testSecuredCard(serverBaseURL(r), "write")
+					}
+					_ = json.NewEncoder(w).Encode(card)
+					return
+				}
+				businessCalls.Add(1)
+				http.Error(w, "unexpected business request", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			client, newErr := New(server.Client(), time.Second, time.Millisecond, WithAuthentication(resolver, true))
+			if newErr != nil {
+				t.Fatalf("new authenticated client: %v", newErr)
+			}
+			test.request.TargetAgentCode = "writer"
+			test.request.CapabilityCode = "write"
+			test.request.ParentRunID = "parent"
+			test.request.TaskID = "task"
+			test.request.MessageID = "message"
+			test.request.InputJSON = `{}`
+			test.request.Endpoints = []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}}
+			if _, invokeErr := client.Invoke(context.Background(), test.request); invokeErr == nil || !contains(invokeErr.Error(), test.wantErrorText) {
+				t.Fatalf("got %v, want error containing %q", invokeErr, test.wantErrorText)
+			}
+			if businessCalls.Load() != 0 {
+				t.Fatalf("invalid authentication configuration reached business endpoint: %d", businessCalls.Load())
+			}
+		})
+	}
+}
 func testCard(baseURL, capability string) *a2a.AgentCard {
 	return &a2a.AgentCard{
 		Name: "writer", Description: "writer agent", Version: "1.0",
@@ -161,6 +309,17 @@ func testCard(baseURL, capability string) *a2a.AgentCard {
 	}
 }
 
+func testSecuredCard(baseURL, capability string) *a2a.AgentCard {
+	card := testCard(baseURL, capability)
+	const schemeName a2a.SecuritySchemeName = "goaiHMACSHA256"
+	card.SecuritySchemes = a2a.NamedSecuritySchemes{
+		schemeName: a2a.HTTPAuthSecurityScheme{Scheme: a2aauth.AuthorizationScheme},
+	}
+	card.SecurityRequirements = a2a.SecurityRequirementsOptions{
+		a2a.SecurityRequirements{schemeName: a2a.SecuritySchemeScopes{}},
+	}
+	return card
+}
 func serverBaseURL(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {
