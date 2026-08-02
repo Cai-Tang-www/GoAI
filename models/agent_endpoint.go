@@ -14,6 +14,13 @@ const (
 )
 
 const (
+	// AgentEndpointAuthTypeNone 表示仅在显式关闭 A2A 认证时允许匿名访问。
+	AgentEndpointAuthTypeNone = "none"
+	// AgentEndpointAuthTypeHMACSHA256 表示使用 GoAI HMAC-SHA256 机器身份签名。
+	AgentEndpointAuthTypeHMACSHA256 = "goai_hmac_sha256"
+)
+
+const (
 	AgentEndpointStatusActive    = "active"
 	AgentEndpointStatusInactive  = "inactive"
 	AgentEndpointStatusUnhealthy = "unhealthy"

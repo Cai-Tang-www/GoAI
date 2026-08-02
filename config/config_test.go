@@ -217,3 +217,32 @@ func TestParseScopesStrictRejectsUnknownScope(t *testing.T) {
 		t.Fatal("unknown governance scope should be rejected")
 	}
 }
+
+func TestLoadConfigParsesA2AAuthentication(t *testing.T) {
+	t.Setenv("MYSQL_HOST", "localhost")
+	t.Setenv("MYSQL_USER", "root")
+	t.Setenv("MYSQL_DATABASE", "goai")
+	t.Setenv("REDIS_HOST", "localhost")
+	t.Setenv("SERVER_PORT", "8080")
+	t.Setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+	t.Setenv("KAFKA_RUN_TOPIC", "run_execute")
+	t.Setenv("KAFKA_RUN_GROUP_ID", "run-worker-group")
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("MODEL_PROVIDER_DEFAULT", "")
+	t.Setenv("A2A_AUTH_REQUIRED", "true")
+	t.Setenv("A2A_AUTH_MAX_CLOCK_SKEW_SECONDS", "120")
+	t.Setenv("A2A_AUTH_CREDENTIALS_JSON", `{"planner-key":"test-only-a2a-secret-at-least-32-bytes-long"}`)
+	if err := LoadConfig(); err != nil {
+		t.Fatalf("load config failed: %v", err)
+	}
+	if !AppConfig.A2AAuthRequired || AppConfig.A2AAuthMaxClockSkew != 2*time.Minute || len(AppConfig.A2ACredentials) != 1 {
+		t.Fatalf("unexpected A2A auth config: required=%v skew=%s credentials=%d", AppConfig.A2AAuthRequired, AppConfig.A2AAuthMaxClockSkew, len(AppConfig.A2ACredentials))
+	}
+}
+
+func TestLoadConfigRejectsMalformedA2ACredentialsWithoutLeakingValue(t *testing.T) {
+	t.Setenv("A2A_AUTH_CREDENTIALS_JSON", `{"secret":"sensitive-value"`)
+	if err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "A2A_AUTH_CREDENTIALS_JSON") || strings.Contains(err.Error(), "sensitive-value") {
+		t.Fatalf("unexpected credentials parse error: %v", err)
+	}
+}

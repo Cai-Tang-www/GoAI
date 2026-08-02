@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -48,6 +50,9 @@ type Config struct {
 	ModelProviders             map[string]ModelProviderConfig
 	A2AClientRequestTimeout    time.Duration
 	A2AClientPollInterval      time.Duration
+	A2AAuthRequired            bool
+	A2AAuthMaxClockSkew        time.Duration
+	A2ACredentials             map[string]string
 	ServiceGovernanceEnabled   bool
 	RateLimitRequestsPerSecond float64
 	RateLimitBurst             int
@@ -90,6 +95,8 @@ func LoadConfig() error {
 		ModelProviderDefault:       strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
 		ModelProviders:             make(map[string]ModelProviderConfig),
 		ServiceGovernanceEnabled:   true,
+		A2AAuthRequired:            true,
+		A2ACredentials:             make(map[string]string),
 	}
 
 	var err error
@@ -120,6 +127,19 @@ func LoadConfig() error {
 	}
 	appConfig.A2AClientRequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
 	appConfig.A2AClientPollInterval = time.Duration(pollIntervalMilliseconds) * time.Millisecond
+	if raw := strings.TrimSpace(os.Getenv("A2A_AUTH_REQUIRED")); raw != "" {
+		if appConfig.A2AAuthRequired, err = parseStrictBoolEnv("A2A_AUTH_REQUIRED", raw); err != nil {
+			return err
+		}
+	}
+	maxClockSkewSeconds, err := loadIntEnv("A2A_AUTH_MAX_CLOCK_SKEW_SECONDS", 300)
+	if err != nil {
+		return err
+	}
+	appConfig.A2AAuthMaxClockSkew = time.Duration(maxClockSkewSeconds) * time.Second
+	if appConfig.A2ACredentials, err = parseA2ACredentials(os.Getenv("A2A_AUTH_CREDENTIALS_JSON")); err != nil {
+		return err
+	}
 	if appConfig.RateLimitRequestsPerSecond, err = loadFloatEnv("RATE_LIMIT_REQUESTS_PER_SECOND", 20); err != nil {
 		return err
 	}
@@ -234,6 +254,9 @@ func (c *Config) ValidateStartup() error {
 		if c.A2AClientPollInterval == 0 {
 			c.A2AClientPollInterval = 250 * time.Millisecond
 		}
+		if c.A2AAuthMaxClockSkew == 0 {
+			c.A2AAuthMaxClockSkew = 5 * time.Minute
+		}
 	}
 	var problems []string
 	if c == nil {
@@ -270,6 +293,9 @@ func (c *Config) ValidateStartup() error {
 	if c.A2AClientPollInterval <= 0 {
 		problems = append(problems, "A2A_CLIENT_POLL_INTERVAL_MILLISECONDS must be greater than 0")
 	}
+	if c.A2AAuthMaxClockSkew <= 0 {
+		problems = append(problems, "A2A_AUTH_MAX_CLOCK_SKEW_SECONDS must be greater than 0")
+	}
 	if strings.TrimSpace(c.KafkaBootstrapServers) == "" {
 		problems = append(problems, "KAFKA_BOOTSTRAP_SERVERS is required")
 	}
@@ -294,6 +320,22 @@ func (c *Config) ValidateStartup() error {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func parseA2ACredentials(raw string) (map[string]string, error) {
+	credentials := make(map[string]string)
+	if strings.TrimSpace(raw) == "" {
+		return credentials, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &credentials); err != nil {
+		return nil, errors.New("invalid config: A2A_AUTH_CREDENTIALS_JSON must be a JSON object with string values")
+	}
+	for ref := range credentials {
+		if strings.TrimSpace(ref) == "" {
+			return nil, errors.New("invalid config: A2A credential reference must not be empty")
+		}
+	}
+	return credentials, nil
 }
 
 // loadIntEnv 读取整型环境变量，空值时回退到默认值，非法值直接报错。
