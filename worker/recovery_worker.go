@@ -21,8 +21,8 @@ type RecoveryWorker struct {
 	logger    *log.Logger
 }
 
-// NewRecoveryWorker 使用显式恢复服务、扫描间隔和批量大小构造恢复 Worker。
-func NewRecoveryWorker(service recoveryService, interval time.Duration, batchSize int) (*RecoveryWorker, error) {
+// NewRecoveryWorker 使用显式恢复服务、扫描配置和日志器构造恢复 Worker。
+func NewRecoveryWorker(service recoveryService, interval time.Duration, batchSize int, logger *log.Logger) (*RecoveryWorker, error) {
 	if service == nil {
 		return nil, errors.New("creating recovery worker: service is nil")
 	}
@@ -32,12 +32,15 @@ func NewRecoveryWorker(service recoveryService, interval time.Duration, batchSiz
 	if batchSize <= 0 {
 		return nil, errors.New("creating recovery worker: batch size must be positive")
 	}
-	return &RecoveryWorker{service: service, interval: interval, batchSize: batchSize, logger: log.Default()}, nil
+	if logger == nil {
+		return nil, errors.New("creating recovery worker: logger is nil")
+	}
+	return &RecoveryWorker{service: service, interval: interval, batchSize: batchSize, logger: logger}, nil
 }
 
 // Start 立即执行一次恢复扫描，之后按固定周期运行直到 context 取消。
 func (w *RecoveryWorker) Start(ctx context.Context) error {
-	if w == nil || w.service == nil {
+	if w == nil || w.service == nil || w.logger == nil {
 		return errors.New("starting recovery worker: worker is nil")
 	}
 	if ctx == nil {
@@ -57,15 +60,11 @@ func (w *RecoveryWorker) Start(ctx context.Context) error {
 }
 
 func (w *RecoveryWorker) recover(ctx context.Context) {
-	logger := w.logger
-	if logger == nil {
-		logger = log.Default()
-	}
 	if err := w.service.RecoverPendingCallbacks(ctx, w.batchSize); err != nil {
-		logger.Printf("A2A callback recovery failed err=%v", err)
+		w.logger.Printf("A2A callback recovery failed err=%v", err)
 	}
 	if err := w.service.RecoverPendingResumes(ctx, w.batchSize); err != nil {
-		logger.Printf("run resume recovery failed err=%v", err)
+		w.logger.Printf("run resume recovery failed err=%v", err)
 	}
 }
 

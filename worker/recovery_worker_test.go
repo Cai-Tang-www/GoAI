@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"sync"
 	"testing"
 	"time"
@@ -33,9 +35,16 @@ func (s *recordingRecoveryService) RecoverPendingResumes(context.Context, int) e
 	return nil
 }
 
+func TestNewRecoveryWorkerRejectsNilLogger(t *testing.T) {
+	service := &recordingRecoveryService{}
+	if _, err := NewRecoveryWorker(service, time.Second, 1, nil); err == nil {
+		t.Fatal("expected nil logger error")
+	}
+}
+
 func TestRecoveryWorkerRunsImmediatelyAndStopsWithContext(t *testing.T) {
 	service := &recordingRecoveryService{called: make(chan struct{})}
-	worker, err := NewRecoveryWorker(service, 10*time.Millisecond, 25)
+	worker, err := NewRecoveryWorker(service, 10*time.Millisecond, 25, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create recovery worker failed: %v", err)
 	}

@@ -177,7 +177,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	recoveryWorker, err := worker.NewRecoveryWorker(runtimeService, 5*time.Second, 100)
+	recoveryWorker, err := worker.NewRecoveryWorker(runtimeService, 5*time.Second, 100, log.Default())
 	if err != nil {
 		return errors.Join(err, resumeConsumer.Close(), executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
