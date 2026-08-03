@@ -45,6 +45,10 @@ type Config struct {
 	KafkaRunGroupID            string
 	KafkaRunResumeTopic        string
 	KafkaRunResumeGroupID      string
+	RunResumeLeaseDuration     time.Duration
+	RunResumeHeartbeatInterval time.Duration
+	RunRecoveryScanInterval    time.Duration
+	RunRecoveryBatchSize       int
 	JWTSecret                  string
 	RBACEnable                 bool
 	RBACBootstrapAdminUsername string
@@ -118,6 +122,24 @@ func LoadConfig() error {
 		return err
 	}
 	appConfig.ServerShutdownTimeout = time.Duration(shutdownTimeoutSeconds) * time.Second
+	resumeLeaseSeconds, err := loadIntEnv("RUN_RESUME_LEASE_SECONDS", 30)
+	if err != nil {
+		return err
+	}
+	appConfig.RunResumeLeaseDuration = time.Duration(resumeLeaseSeconds) * time.Second
+	resumeHeartbeatSeconds, err := loadIntEnv("RUN_RESUME_HEARTBEAT_SECONDS", 10)
+	if err != nil {
+		return err
+	}
+	appConfig.RunResumeHeartbeatInterval = time.Duration(resumeHeartbeatSeconds) * time.Second
+	recoveryScanSeconds, err := loadIntEnv("RUN_RECOVERY_SCAN_INTERVAL_SECONDS", 5)
+	if err != nil {
+		return err
+	}
+	appConfig.RunRecoveryScanInterval = time.Duration(recoveryScanSeconds) * time.Second
+	if appConfig.RunRecoveryBatchSize, err = loadIntEnv("RUN_RECOVERY_BATCH_SIZE", 100); err != nil {
+		return err
+	}
 	if appConfig.KafkaPort, err = loadIntEnv("KAFKA_PORT", 9092); err != nil {
 		return err
 	}
@@ -303,6 +325,20 @@ func (c *Config) ValidateStartup() error {
 	}
 	if c.ServerShutdownTimeout <= 0 {
 		problems = append(problems, "SERVER_SHUTDOWN_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.RunResumeLeaseDuration <= 0 {
+		problems = append(problems, "RUN_RESUME_LEASE_SECONDS must be greater than 0")
+	}
+	if c.RunResumeHeartbeatInterval <= 0 {
+		problems = append(problems, "RUN_RESUME_HEARTBEAT_SECONDS must be greater than 0")
+	} else if c.RunResumeLeaseDuration > 0 && c.RunResumeHeartbeatInterval >= c.RunResumeLeaseDuration {
+		problems = append(problems, "RUN_RESUME_HEARTBEAT_SECONDS must be less than RUN_RESUME_LEASE_SECONDS")
+	}
+	if c.RunRecoveryScanInterval <= 0 {
+		problems = append(problems, "RUN_RECOVERY_SCAN_INTERVAL_SECONDS must be greater than 0")
+	}
+	if c.RunRecoveryBatchSize <= 0 {
+		problems = append(problems, "RUN_RECOVERY_BATCH_SIZE must be greater than 0")
 	}
 	if c.A2AClientRequestTimeout <= 0 {
 		problems = append(problems, "A2A_CLIENT_REQUEST_TIMEOUT_SECONDS must be greater than 0")

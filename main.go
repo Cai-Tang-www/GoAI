@@ -149,6 +149,7 @@ func run(ctx context.Context) error {
 		services.WithChatService(chatService),
 		services.WithLoopService(loopService),
 		services.WithRunObservability(telemetry),
+		services.WithRunResumeLease(cfg.RunResumeLeaseDuration, cfg.RunResumeHeartbeatInterval),
 	)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
@@ -177,7 +178,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	recoveryWorker, err := worker.NewRecoveryWorker(runtimeService, 5*time.Second, 100, log.Default())
+	recoveryWorker, err := worker.NewRecoveryWorker(runtimeService, cfg.RunRecoveryScanInterval, cfg.RunRecoveryBatchSize, log.Default())
 	if err != nil {
 		return errors.Join(err, resumeConsumer.Close(), executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}

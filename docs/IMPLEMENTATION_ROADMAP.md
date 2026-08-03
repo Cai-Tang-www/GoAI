@@ -50,7 +50,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 ## P1：多 Agent 运行时闭环
 
-### 7. 多 Agent 协作运行时（Issue #37 + Issue #43，异步闭环已落地）
+### 7. 多 Agent 协作运行时（Issue #37 + Issue #43 + Issue #45，可靠异步闭环已落地）
 已落地：
 - Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调
 - 官方 A2A Go SDK Client 完成 Agent Card discovery、能力/扩展/Push Notification 校验，并使用 `ReturnImmediately + PushConfig` 提交委派
@@ -58,7 +58,9 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - `input_from` 支持从成功的上游 RunStep 聚合输入；TaskID/MessageID/DelegationID 基于 Parent Run + 节点稳定生成，重试不重复创建子任务
 - Target 返回 accepted 后，Parent Run/RunStep 持久化为 `waiting_external` 并释放 Worker，不进行 Task polling
 - Target 终态通过认证 A2A callback 回流；源 Runtime 幂等写 Result Message，发布 `run_resume`，并从持久化游标继续 Eino Graph
-- callback/resume 发布状态、原子 claim、重复消息 no-op 与 RecoveryWorker 已覆盖进程重启恢复
+- callback/resume 发布状态、重复消息 no-op 与 RecoveryWorker 已覆盖进程重启恢复
+- Parent resume 使用带 heartbeat、expires_at 和递增 execution attempt fencing token 的执行租约，多实例并发只能有一个 worker 接管
+- 持久化 Workflow/Delegation 游标与成功 RunStep checkpoint 支持从 crash point 继续；遗留 running Step、再次 A2A 挂起和终态残留租约均可幂等收敛
 
 后续补齐：
 - 多 Child Run fan-out/fan-in、结果聚合与部分失败策略

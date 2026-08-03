@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -19,7 +20,7 @@ import (
 func setupRunIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	return gdb
@@ -65,7 +66,7 @@ func seedRunIntegrationData(t *testing.T, gdb *gorm.DB) (models.User, models.Use
 
 func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	gdb := setupRunIntegrationDB(t)
-	user1, user2, _, _ := seedRunIntegrationData(t, gdb)
+	user1, user2, agent, _ := seedRunIntegrationData(t, gdb)
 	config.AppConfig = &config.Config{
 		JWTSecret: "test-secret",
 	}
@@ -120,6 +121,41 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 		t.Fatalf("run_id is empty in response: %v", createResp)
 	}
 
+	var persistedRun models.Run
+	if err := gdb.First(&persistedRun, "run_id = ?", runID).Error; err != nil {
+		t.Fatalf("load created run failed: %v", err)
+	}
+	claimedAt := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	heartbeatAt := claimedAt.Add(5 * time.Second)
+	expiresAt := claimedAt.Add(30 * time.Second)
+	delegation := models.Delegation{
+		DelegationID:           "delegation-resume-api",
+		ThreadID:               persistedRun.ThreadID,
+		ParentRunID:            runID,
+		ChildRunID:             "run-child-resume-api",
+		TraceID:                persistedRun.TraceID,
+		SourceAgentID:          agent.ID,
+		TargetAgentID:          agent.ID,
+		CapabilityCode:         "review",
+		RequestMessageID:       "message-resume-api",
+		ParentStepKey:          "delegate-reviewer",
+		ResumeNodeKey:          "summarize",
+		InputJSON:              `{"prompt":"review"}`,
+		OutputJSON:             `{"result":"approved"}`,
+		Status:                 models.DelegationStatusSucceeded,
+		ResumeStatus:           models.DelegationResumeStatusClaimed,
+		ResumeError:            "previous worker lease expired",
+		ResumeAttemptCount:     2,
+		ResumeExecutionAttempt: 3,
+		ResumeLeaseOwner:       "resume-worker-2",
+		ResumeLeaseClaimedAt:   &claimedAt,
+		ResumeLeaseHeartbeatAt: &heartbeatAt,
+		ResumeLeaseExpiresAt:   &expiresAt,
+	}
+	if err := gdb.Create(&delegation).Error; err != nil {
+		t.Fatalf("create resume delegation failed: %v", err)
+	}
+
 	getReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)
 	getReq.Header.Set("Authorization", "Bearer "+token1)
 	getW := httptest.NewRecorder()
@@ -130,6 +166,46 @@ func TestRunAPIs_CreateAndQuery(t *testing.T) {
 	getEnv := decodeEnvelope(t, getW)
 	if getEnv.Code != "OK" {
 		t.Fatalf("unexpected get code: %s body=%s", getEnv.Code, getW.Body.String())
+	}
+	var detail struct {
+		RunID  string `json:"RunID"`
+		Status string `json:"Status"`
+		Resume *struct {
+			DelegationID     string  `json:"delegation_id"`
+			Status           string  `json:"status"`
+			Error            string  `json:"error"`
+			PublishAttempts  int     `json:"publish_attempts"`
+			ExecutionAttempt int     `json:"execution_attempt"`
+			LeaseOwner       string  `json:"lease_owner"`
+			LeaseClaimedAt   *string `json:"lease_claimed_at"`
+			LeaseHeartbeatAt *string `json:"lease_heartbeat_at"`
+			LeaseExpiresAt   *string `json:"lease_expires_at"`
+		} `json:"resume"`
+	}
+	if err := json.Unmarshal(getEnv.Data, &detail); err != nil {
+		t.Fatalf("parse run detail failed: %v", err)
+	}
+	if detail.RunID != runID {
+		t.Fatalf("expected flattened RunID %q, got %q body=%s", runID, detail.RunID, getW.Body.String())
+	}
+	if detail.Resume == nil {
+		t.Fatalf("expected resume state in run detail: %s", getW.Body.String())
+	}
+	if detail.Resume.DelegationID != delegation.DelegationID || detail.Resume.Status != models.DelegationResumeStatusClaimed {
+		t.Fatalf("unexpected resume identity/status: %+v", detail.Resume)
+	}
+	if detail.Resume.Error != delegation.ResumeError || detail.Resume.PublishAttempts != 2 || detail.Resume.ExecutionAttempt != 3 {
+		t.Fatalf("unexpected resume diagnostic fields: %+v", detail.Resume)
+	}
+	if detail.Resume.LeaseOwner != delegation.ResumeLeaseOwner || detail.Resume.LeaseClaimedAt == nil || detail.Resume.LeaseHeartbeatAt == nil || detail.Resume.LeaseExpiresAt == nil {
+		t.Fatalf("unexpected resume lease fields: %+v", detail.Resume)
+	}
+	var rawDetail map[string]json.RawMessage
+	if err := json.Unmarshal(getEnv.Data, &rawDetail); err != nil {
+		t.Fatalf("parse raw run detail failed: %v", err)
+	}
+	if _, nested := rawDetail["Run"]; nested {
+		t.Fatalf("run detail must keep Run fields flattened: %s", getW.Body.String())
 	}
 
 	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)

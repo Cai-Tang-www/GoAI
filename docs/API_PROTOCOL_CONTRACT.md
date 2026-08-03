@@ -137,6 +137,34 @@ Idempotency-Key: replay-demo-001
 
 Replay 使用原 Run 的输入和 Workflow 创建新 Run；管理员可以跨用户查询或回放，普通用户只能访问自己的 Run。
 
+Run 查询保持既有 Run 字段格式，并在 Parent resume 存在时增加可选的 `resume` 对象：
+
+```json
+{
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "RunID": "run-parent-001",
+    "Status": "running",
+    "CurrentStep": "summarize",
+    "resume": {
+      "delegation_id": "delegation-review-001",
+      "status": "claimed",
+      "error": "resume execution lease expired before completion; recovery event scheduled",
+      "publish_attempts": 2,
+      "execution_attempt": 3,
+      "lease_owner": "resume-worker-2",
+      "lease_claimed_at": "2026-08-03T12:00:00Z",
+      "lease_heartbeat_at": "2026-08-03T12:00:05Z",
+      "lease_expires_at": "2026-08-03T12:00:30Z"
+    }
+  },
+  "trace_id": "trace-parent"
+}
+```
+
+`resume` 是受 JWT、RBAC 和 owner/admin 约束的管理诊断信息。租约字段不会进入公开 A2A Task metadata；没有恢复记录时该字段省略。
+
 ## 5. AG-UI Gateway
 
 ### Request

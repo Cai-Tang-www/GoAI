@@ -32,6 +32,7 @@ func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},
+		&models.Delegation{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

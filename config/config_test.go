@@ -9,18 +9,22 @@ import (
 // TestValidateStartupSuccess 验证完整关键配置可以通过启动期校验。
 func TestValidateStartupSuccess(t *testing.T) {
 	cfg := &Config{
-		MySQLHost:             "localhost",
-		MySQLPort:             3306,
-		MySQLUser:             "root",
-		MySQLDatabase:         "goai",
-		RedisHost:             "localhost",
-		RedisPort:             6379,
-		ServerPort:            "8080",
-		ServerShutdownTimeout: 15 * time.Second,
-		KafkaBootstrapServers: "localhost:9092",
-		KafkaRunTopic:         "run_execute",
-		KafkaRunGroupID:       "run-worker-group",
-		JWTSecret:             "test-secret",
+		MySQLHost:                  "localhost",
+		MySQLPort:                  3306,
+		MySQLUser:                  "root",
+		MySQLDatabase:              "goai",
+		RedisHost:                  "localhost",
+		RedisPort:                  6379,
+		ServerPort:                 "8080",
+		ServerShutdownTimeout:      15 * time.Second,
+		RunResumeLeaseDuration:     30 * time.Second,
+		RunResumeHeartbeatInterval: 10 * time.Second,
+		RunRecoveryScanInterval:    5 * time.Second,
+		RunRecoveryBatchSize:       100,
+		KafkaBootstrapServers:      "localhost:9092",
+		KafkaRunTopic:              "run_execute",
+		KafkaRunGroupID:            "run-worker-group",
+		JWTSecret:                  "test-secret",
 	}
 	if err := cfg.ValidateStartup(); err != nil {
 		t.Fatalf("expected config valid, got %v", err)
@@ -100,19 +104,23 @@ func TestValidateStartupReportsMissingCriticalFields(t *testing.T) {
 // TestValidateStartupRequiresDefaultProviderProfile 验证启用 provider 配置时必须存在完整默认 profile。
 func TestValidateStartupRequiresDefaultProviderProfile(t *testing.T) {
 	cfg := &Config{
-		MySQLHost:             "localhost",
-		MySQLPort:             3306,
-		MySQLUser:             "root",
-		MySQLDatabase:         "goai",
-		RedisHost:             "localhost",
-		RedisPort:             6379,
-		ServerPort:            "8080",
-		ServerShutdownTimeout: 15 * time.Second,
-		KafkaBootstrapServers: "localhost:9092",
-		KafkaRunTopic:         "run_execute",
-		KafkaRunGroupID:       "run-worker-group",
-		JWTSecret:             "test-secret",
-		ModelProviderDefault:  "deepseek",
+		MySQLHost:                  "localhost",
+		MySQLPort:                  3306,
+		MySQLUser:                  "root",
+		MySQLDatabase:              "goai",
+		RedisHost:                  "localhost",
+		RedisPort:                  6379,
+		ServerPort:                 "8080",
+		ServerShutdownTimeout:      15 * time.Second,
+		RunResumeLeaseDuration:     30 * time.Second,
+		RunResumeHeartbeatInterval: 10 * time.Second,
+		RunRecoveryScanInterval:    5 * time.Second,
+		RunRecoveryBatchSize:       100,
+		KafkaBootstrapServers:      "localhost:9092",
+		KafkaRunTopic:              "run_execute",
+		KafkaRunGroupID:            "run-worker-group",
+		JWTSecret:                  "test-secret",
+		ModelProviderDefault:       "deepseek",
 		ModelProviders: map[string]ModelProviderConfig{
 			"deepseek": {
 				Driver:       "openai_compatible",
@@ -159,18 +167,22 @@ func TestLoadConfigRejectsInvalidPortEnv(t *testing.T) {
 func TestValidateStartupRejectsNonPositiveShutdownTimeout(t *testing.T) {
 	for _, timeout := range []time.Duration{0, -time.Second} {
 		cfg := &Config{
-			MySQLHost:             "localhost",
-			MySQLPort:             3306,
-			MySQLUser:             "root",
-			MySQLDatabase:         "goai",
-			RedisHost:             "localhost",
-			RedisPort:             6379,
-			ServerPort:            "8080",
-			ServerShutdownTimeout: timeout,
-			KafkaBootstrapServers: "localhost:9092",
-			KafkaRunTopic:         "run_execute",
-			KafkaRunGroupID:       "run-worker-group",
-			JWTSecret:             "test-secret",
+			MySQLHost:                  "localhost",
+			MySQLPort:                  3306,
+			MySQLUser:                  "root",
+			MySQLDatabase:              "goai",
+			RedisHost:                  "localhost",
+			RedisPort:                  6379,
+			ServerPort:                 "8080",
+			ServerShutdownTimeout:      timeout,
+			RunResumeLeaseDuration:     30 * time.Second,
+			RunResumeHeartbeatInterval: 10 * time.Second,
+			RunRecoveryScanInterval:    5 * time.Second,
+			RunRecoveryBatchSize:       100,
+			KafkaBootstrapServers:      "localhost:9092",
+			KafkaRunTopic:              "run_execute",
+			KafkaRunGroupID:            "run-worker-group",
+			JWTSecret:                  "test-secret",
 		}
 		err := cfg.ValidateStartup()
 		if err == nil || !strings.Contains(err.Error(), "SERVER_SHUTDOWN_TIMEOUT_SECONDS") {
@@ -200,6 +212,38 @@ func TestLoadConfigDefaultsShutdownTimeout(t *testing.T) {
 	}
 	if AppConfig.ServerShutdownTimeout != 15*time.Second {
 		t.Fatalf("expected 15s shutdown timeout, got %s", AppConfig.ServerShutdownTimeout)
+	}
+	if AppConfig.RunResumeLeaseDuration != 30*time.Second || AppConfig.RunResumeHeartbeatInterval != 10*time.Second {
+		t.Fatalf("unexpected resume lease defaults: lease=%s heartbeat=%s", AppConfig.RunResumeLeaseDuration, AppConfig.RunResumeHeartbeatInterval)
+	}
+	if AppConfig.RunRecoveryScanInterval != 5*time.Second || AppConfig.RunRecoveryBatchSize != 100 {
+		t.Fatalf("unexpected recovery defaults: interval=%s batch=%d", AppConfig.RunRecoveryScanInterval, AppConfig.RunRecoveryBatchSize)
+	}
+}
+
+// TestValidateStartupRejectsInvalidResumeRecoveryConfig 验证恢复租约与扫描参数的边界关系。
+func TestValidateStartupRejectsInvalidResumeRecoveryConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{name: "non-positive lease", mutate: func(cfg *Config) { cfg.RunResumeLeaseDuration = 0 }, wantErr: "RUN_RESUME_LEASE_SECONDS"},
+		{name: "non-positive heartbeat", mutate: func(cfg *Config) { cfg.RunResumeHeartbeatInterval = 0 }, wantErr: "RUN_RESUME_HEARTBEAT_SECONDS"},
+		{name: "heartbeat equals lease", mutate: func(cfg *Config) { cfg.RunResumeHeartbeatInterval = cfg.RunResumeLeaseDuration }, wantErr: "must be less than RUN_RESUME_LEASE_SECONDS"},
+		{name: "non-positive scan interval", mutate: func(cfg *Config) { cfg.RunRecoveryScanInterval = 0 }, wantErr: "RUN_RECOVERY_SCAN_INTERVAL_SECONDS"},
+		{name: "non-positive batch size", mutate: func(cfg *Config) { cfg.RunRecoveryBatchSize = 0 }, wantErr: "RUN_RECOVERY_BATCH_SIZE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validStartupConfig()
+			tt.mutate(cfg)
+			err := cfg.ValidateStartup()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
 	}
 }
 
@@ -234,18 +278,22 @@ func TestValidateStartupRejectsInvalidGovernanceConfig(t *testing.T) {
 // TestValidateStartupSkipsGovernanceWhenDisabled 验证关闭治理时不强制要求治理参数。
 func TestValidateStartupSkipsGovernanceWhenDisabled(t *testing.T) {
 	cfg := &Config{
-		MySQLHost:             "localhost",
-		MySQLPort:             3306,
-		MySQLUser:             "root",
-		MySQLDatabase:         "goai",
-		RedisHost:             "localhost",
-		RedisPort:             6379,
-		ServerPort:            "8080",
-		ServerShutdownTimeout: 15 * time.Second,
-		KafkaBootstrapServers: "localhost:9092",
-		KafkaRunTopic:         "run_execute",
-		KafkaRunGroupID:       "run-worker-group",
-		JWTSecret:             "test-secret",
+		MySQLHost:                  "localhost",
+		MySQLPort:                  3306,
+		MySQLUser:                  "root",
+		MySQLDatabase:              "goai",
+		RedisHost:                  "localhost",
+		RedisPort:                  6379,
+		ServerPort:                 "8080",
+		ServerShutdownTimeout:      15 * time.Second,
+		RunResumeLeaseDuration:     30 * time.Second,
+		RunResumeHeartbeatInterval: 10 * time.Second,
+		RunRecoveryScanInterval:    5 * time.Second,
+		RunRecoveryBatchSize:       100,
+		KafkaBootstrapServers:      "localhost:9092",
+		KafkaRunTopic:              "run_execute",
+		KafkaRunGroupID:            "run-worker-group",
+		JWTSecret:                  "test-secret",
 	}
 	if err := cfg.ValidateStartup(); err != nil {
 		t.Fatalf("disabled governance should pass without governance settings: %v", err)
@@ -304,20 +352,24 @@ func TestLoadConfigRejectsMalformedA2ACredentialsWithoutLeakingValue(t *testing.
 
 func validStartupConfig() *Config {
 	return &Config{
-		MySQLHost:             "localhost",
-		MySQLPort:             3306,
-		MySQLUser:             "root",
-		MySQLDatabase:         "goai",
-		RedisHost:             "localhost",
-		RedisPort:             6379,
-		ServerPort:            "8080",
-		ServerShutdownTimeout: 15 * time.Second,
-		KafkaBootstrapServers: "localhost:9092",
-		KafkaRunTopic:         "run_execute",
-		KafkaRunGroupID:       "run-worker-group",
-		KafkaRunResumeTopic:   "run_resume",
-		KafkaRunResumeGroupID: "run-resume-worker-group",
-		JWTSecret:             "test-secret",
-		A2ACallbackBaseURL:    "http://127.0.0.1:8080",
+		MySQLHost:                  "localhost",
+		MySQLPort:                  3306,
+		MySQLUser:                  "root",
+		MySQLDatabase:              "goai",
+		RedisHost:                  "localhost",
+		RedisPort:                  6379,
+		ServerPort:                 "8080",
+		ServerShutdownTimeout:      15 * time.Second,
+		RunResumeLeaseDuration:     30 * time.Second,
+		RunResumeHeartbeatInterval: 10 * time.Second,
+		RunRecoveryScanInterval:    5 * time.Second,
+		RunRecoveryBatchSize:       100,
+		KafkaBootstrapServers:      "localhost:9092",
+		KafkaRunTopic:              "run_execute",
+		KafkaRunGroupID:            "run-worker-group",
+		KafkaRunResumeTopic:        "run_resume",
+		KafkaRunResumeGroupID:      "run-resume-worker-group",
+		JWTSecret:                  "test-secret",
+		A2ACallbackBaseURL:         "http://127.0.0.1:8080",
 	}
 }
