@@ -100,3 +100,26 @@ func TestProducerCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("expected writer close once, got %d", writer.closeCalls)
 	}
 }
+
+func TestProducerPublishRunResumeWritesStableMessageToResumeTopic(t *testing.T) {
+	writer := &fakeMessageWriter{}
+	producer := &Producer{writer: writer, topic: "run_execute", resumeTopic: "run_resume"}
+	ctx := requestctx.WithTraceID(context.Background(), "trace-resume")
+	if err := producer.PublishRunResume(ctx, "run-parent", "dlg-1"); err != nil {
+		t.Fatalf("publish run resume failed: %v", err)
+	}
+	if len(writer.messages) != 1 {
+		t.Fatalf("message count=%d want=1", len(writer.messages))
+	}
+	message := writer.messages[0]
+	if message.Topic != "run_resume" || string(message.Key) != "run-parent" {
+		t.Fatalf("unexpected resume Kafka message: %+v", message)
+	}
+	var payload RunResumeMessage
+	if err := json.Unmarshal(message.Value, &payload); err != nil {
+		t.Fatalf("decode resume message failed: %v", err)
+	}
+	if payload.RunID != "run-parent" || payload.DelegationID != "dlg-1" || payload.TraceID != "trace-resume" {
+		t.Fatalf("unexpected resume payload: %+v", payload)
+	}
+}

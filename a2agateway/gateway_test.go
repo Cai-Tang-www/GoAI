@@ -33,6 +33,11 @@ type fakeDelegationRuntime struct {
 	acceptedCommand services.AcceptDelegationCommand
 	acceptCalls     int
 	snapshotCalls   int
+	pushConfigs     map[string]services.DelegationPushConfig
+	pushErr         error
+	callbackCommand services.DelegationCallbackCommand
+	callbackErr     error
+	callbackCalls   int
 }
 
 func (f *fakeDelegationRuntime) DescribeAgent(_ context.Context, code string) (*services.AgentDescriptor, error) {
@@ -55,6 +60,73 @@ func (f *fakeDelegationRuntime) DelegationSnapshot(context.Context, string, stri
 	defer f.mu.Unlock()
 	f.snapshotCalls++
 	return f.snapshot, f.snapshotErr
+}
+
+func (f *fakeDelegationRuntime) CreateDelegationPushConfig(_ context.Context, _, _ string, config services.DelegationPushConfig) (*services.DelegationPushConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return nil, f.pushErr
+	}
+	if config.ConfigID == "" {
+		config.ConfigID = "push_generated"
+	}
+	if f.pushConfigs == nil {
+		f.pushConfigs = make(map[string]services.DelegationPushConfig)
+	}
+	f.pushConfigs[config.TaskID+"\x00"+config.ConfigID] = config
+	stored := config
+	return &stored, nil
+}
+
+func (f *fakeDelegationRuntime) GetDelegationPushConfig(_ context.Context, _, _, taskID, configID string) (*services.DelegationPushConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return nil, f.pushErr
+	}
+	config, ok := f.pushConfigs[taskID+"\x00"+configID]
+	if !ok {
+		return nil, services.ErrPushConfigNotFound()
+	}
+	return &config, nil
+}
+
+func (f *fakeDelegationRuntime) ListDelegationPushConfigs(_ context.Context, _, _, taskID string) ([]services.DelegationPushConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return nil, f.pushErr
+	}
+	configs := make([]services.DelegationPushConfig, 0)
+	for _, config := range f.pushConfigs {
+		if config.TaskID == taskID {
+			configs = append(configs, config)
+		}
+	}
+	return configs, nil
+}
+
+func (f *fakeDelegationRuntime) DeleteDelegationPushConfig(_ context.Context, _, _, taskID, configID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return f.pushErr
+	}
+	key := taskID + "\x00" + configID
+	if _, ok := f.pushConfigs[key]; !ok {
+		return services.ErrPushConfigNotFound()
+	}
+	delete(f.pushConfigs, key)
+	return nil
+}
+
+func (f *fakeDelegationRuntime) AcceptDelegationCallback(_ context.Context, command services.DelegationCallbackCommand) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callbackCalls++
+	f.callbackCommand = command
+	return f.callbackErr
 }
 
 func (*fakeDelegationRuntime) ReconcileDelegation(context.Context, string) error { return nil }
@@ -141,8 +213,8 @@ func TestBuildAgentCardValidatesTransportBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatalf("build agent card failed: %v", err)
 			}
-			if card.Capabilities.Streaming || card.Capabilities.PushNotifications {
-				t.Fatalf("unsupported capabilities must not be advertised: %+v", card.Capabilities)
+			if card.Capabilities.Streaming || !card.Capabilities.PushNotifications {
+				t.Fatalf("push notifications must be advertised without claiming streaming: %+v", card.Capabilities)
 			}
 			if len(card.Capabilities.Extensions) != 1 || card.Capabilities.Extensions[0].URI != DelegationExtensionURI {
 				t.Fatalf("delegation extension missing: %+v", card.Capabilities.Extensions)
@@ -434,12 +506,13 @@ func TestRequestHandlerMapsRuntimeErrorsAndUnsupportedOperations(t *testing.T) {
 		})
 	}
 
-	handler := &requestHandler{}
+	handler := &requestHandler{runtime: &fakeDelegationRuntime{}}
 	if _, err := handler.CancelTask(context.Background(), nil); !errors.Is(err, a2a.ErrTaskNotCancelable) {
 		t.Fatalf("cancel error got=%v", err)
 	}
-	if _, err := handler.GetTaskPushConfig(context.Background(), nil); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
-		t.Fatalf("push error got=%v", err)
+	pushContext := context.WithValue(context.Background(), targetAgentContextKey{}, "writer")
+	if _, err := handler.GetTaskPushConfig(pushContext, nil); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Fatalf("push validation error got=%v", err)
 	}
 	sequence := handler.SendStreamingMessage(context.Background(), nil)
 	seen := false

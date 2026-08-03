@@ -1154,10 +1154,14 @@ type recordingAgentInvoker struct {
 	requests []AgentInvocationRequest
 	result   *AgentInvocationResult
 	err      error
+	invoke   func(AgentInvocationRequest) (*AgentInvocationResult, error)
 }
 
 func (f *recordingAgentInvoker) Invoke(_ context.Context, request AgentInvocationRequest) (*AgentInvocationResult, error) {
 	f.requests = append(f.requests, request)
+	if f.invoke != nil {
+		return f.invoke(request)
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1234,6 +1238,130 @@ func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T)
 	}
 }
 
+func TestHandleRunResumeCompletesPreviousDelegationWhenNextAgentSuspends(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"planner","nodes":[{"key":"planner","type":"planner"},{"key":"delegate_writer","type":"agent","config":{"target_agent":"writer","capability":"write"}},{"key":"delegate_reviewer","type":"agent","config":{"target_agent":"reviewer","capability":"review"}}],"edges":[{"from":"planner","to":"delegate_writer"},{"from":"delegate_writer","to":"delegate_reviewer"}]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+
+	for _, target := range []struct {
+		code       string
+		capability string
+	}{
+		{code: "writer", capability: "write"},
+		{code: "reviewer", capability: "review"},
+	} {
+		agent := models.Agent{AgentCode: target.code, Name: target.code, OwnerUserID: 1, Status: models.AgentStatusActive}
+		if err := gdb.Create(&agent).Error; err != nil {
+			t.Fatalf("create target agent %s failed: %v", target.code, err)
+		}
+		capability := models.AgentCapability{
+			AgentID: agent.ID, CapabilityCode: target.capability, Name: target.capability,
+			CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "1", Status: models.AgentCapabilityStatusActive,
+		}
+		if err := gdb.Create(&capability).Error; err != nil {
+			t.Fatalf("create target capability %s failed: %v", target.capability, err)
+		}
+		endpoint := models.AgentEndpoint{
+			AgentID: agent.ID, EndpointCode: target.code + "-local", Protocol: models.AgentEndpointProtocolA2A,
+			Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:18080/a2a/agents/" + target.code,
+			Status: models.AgentEndpointStatusActive,
+		}
+		if err := gdb.Create(&endpoint).Error; err != nil {
+			t.Fatalf("create target endpoint %s failed: %v", target.code, err)
+		}
+	}
+
+	invoker := &recordingAgentInvoker{}
+	invoker.invoke = func(request AgentInvocationRequest) (*AgentInvocationResult, error) {
+		return &AgentInvocationResult{
+			TaskID: request.TaskID, State: AgentInvocationStateAccepted,
+			OutputJSON: `{"accepted":true}`, NotificationToken: "token-" + request.TargetAgentCode,
+		}, nil
+	}
+	service.agentInvoker = invoker
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+
+	run := models.Run{
+		RunID: "run_agent_chain", ThreadID: "thread-agent-chain", AgentID: source.ID, WorkflowID: workflow.ID,
+		UserID: 1, TriggerType: "api", InputJSON: `{"prompt":"draft and review"}`, Status: models.RunStatusQueued,
+	}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err != nil {
+		t.Fatalf("initial run execution failed: %v", err)
+	}
+
+	var firstDelegation models.Delegation
+	if err := gdb.Where("parent_run_id = ? AND parent_step_key = ?", run.RunID, "delegate_writer").First(&firstDelegation).Error; err != nil {
+		t.Fatalf("load first delegation failed: %v", err)
+	}
+	finishedAt := time.Now()
+	if err := gdb.Model(&models.RunStep{}).
+		Where("run_id = ? AND step_key = ? AND status = ?", run.RunID, "delegate_writer", models.RunStepStatusWaitingExternal).
+		Updates(map[string]any{
+			"status": models.RunStepStatusSuccess, "output_json": `{"document":"draft"}`,
+			"finished_at": finishedAt, "error_message": "",
+		}).Error; err != nil {
+		t.Fatalf("apply first callback step result failed: %v", err)
+	}
+	if err := gdb.Model(&models.Delegation{}).Where("id = ?", firstDelegation.ID).Updates(map[string]any{
+		"status": models.DelegationStatusSucceeded, "output_json": `{"document":"draft"}`,
+		"callback_event_hash": "writer-terminal-event", "callback_received_at": finishedAt,
+		"resume_status": models.DelegationResumeStatusPublished,
+	}).Error; err != nil {
+		t.Fatalf("apply first callback delegation result failed: %v", err)
+	}
+
+	if err := service.HandleRunResume(context.Background(), run.RunID, firstDelegation.DelegationID); err != nil {
+		t.Fatalf("resume run failed: %v", err)
+	}
+
+	var storedRun models.Run
+	if err := gdb.Where("run_id = ?", run.RunID).First(&storedRun).Error; err != nil {
+		t.Fatalf("reload parent run failed: %v", err)
+	}
+	if storedRun.Status != models.RunStatusWaitingExternal || storedRun.CurrentStep != "delegate_reviewer" {
+		t.Fatalf("parent run did not suspend on reviewer: %+v", storedRun)
+	}
+	if len(invoker.requests) != 2 || invoker.requests[0].TargetAgentCode != "writer" || invoker.requests[1].TargetAgentCode != "reviewer" {
+		t.Fatalf("unexpected A2A invocation sequence: %+v", invoker.requests)
+	}
+
+	var completedFirst models.Delegation
+	if err := gdb.First(&completedFirst, firstDelegation.ID).Error; err != nil {
+		t.Fatalf("reload first delegation failed: %v", err)
+	}
+	if completedFirst.ResumeStatus != models.DelegationResumeStatusCompleted {
+		t.Fatalf("first delegation resume was not completed: %+v", completedFirst)
+	}
+	var secondDelegation models.Delegation
+	if err := gdb.Where("parent_run_id = ? AND parent_step_key = ?", run.RunID, "delegate_reviewer").First(&secondDelegation).Error; err != nil {
+		t.Fatalf("load second delegation failed: %v", err)
+	}
+	if secondDelegation.Status != models.DelegationStatusAccepted || secondDelegation.ResumeStatus != models.DelegationResumeStatusNone {
+		t.Fatalf("unexpected second delegation state: %+v", secondDelegation)
+	}
+	var steps []models.RunStep
+	if err := gdb.Where("run_id = ?", run.RunID).Order("id ASC").Find(&steps).Error; err != nil {
+		t.Fatalf("load run steps failed: %v", err)
+	}
+	attempts := make(map[string]int)
+	statuses := make(map[string]string)
+	for _, step := range steps {
+		attempts[step.StepKey]++
+		statuses[step.StepKey] = step.Status
+	}
+	if attempts["planner"] != 1 || attempts["delegate_writer"] != 1 || attempts["delegate_reviewer"] != 1 {
+		t.Fatalf("workflow prefix was replayed or a node was skipped: attempts=%v steps=%+v", attempts, steps)
+	}
+	if statuses["delegate_writer"] != models.RunStepStatusSuccess || statuses["delegate_reviewer"] != models.RunStepStatusWaitingExternal {
+		t.Fatalf("unexpected agent step states: %v", statuses)
+	}
+}
 func TestHandleRunExecuteAgentNodeDoesNotInvokeWithoutInvoker(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	source, workflow := seedAgentWorkflow(t, gdb)

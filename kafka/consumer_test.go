@@ -184,3 +184,29 @@ func TestConsumerReturnsReadFailureToLifecycle(t *testing.T) {
 		t.Fatalf("expected fatal read failure to stop after one attempt, got %d", reader.calls)
 	}
 }
+
+func TestResumeConsumerValidatesPayloadAndPropagatesTrace(t *testing.T) {
+	var handled RunResumeMessage
+	var traceID string
+	consumer := &Consumer{resumeHandler: func(ctx context.Context, message RunResumeMessage) error {
+		handled = message
+		traceID = requestctx.TraceIDFromContext(ctx)
+		return nil
+	}}
+	logger := log.New(io.Discard, "", 0)
+	payload, err := json.Marshal(RunResumeMessage{RunID: "run-parent", DelegationID: "dlg-1", TraceID: "trace-resume"})
+	if err != nil {
+		t.Fatalf("marshal resume payload failed: %v", err)
+	}
+	if err := consumer.handleMessage(context.Background(), logger, kgo.Message{Topic: "run_resume", Value: payload}); err != nil {
+		t.Fatalf("handle resume message failed: %v", err)
+	}
+	if handled.RunID != "run-parent" || handled.DelegationID != "dlg-1" || traceID != "trace-resume" {
+		t.Fatalf("unexpected handled resume: payload=%+v trace=%q", handled, traceID)
+	}
+	for _, invalid := range [][]byte{[]byte("not-json"), []byte(`{"run_id":"run-parent"}`), []byte(`{"delegation_id":"dlg-1"}`)} {
+		if err := consumer.handleMessage(context.Background(), logger, kgo.Message{Value: invalid}); err == nil {
+			t.Fatalf("invalid resume payload accepted: %s", invalid)
+		}
+	}
+}

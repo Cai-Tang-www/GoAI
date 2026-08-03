@@ -27,6 +27,61 @@ func TestValidateStartupSuccess(t *testing.T) {
 	}
 }
 
+// TestValidateStartupDefaultsResumeQueue 验证直接构造配置时也会补齐恢复队列默认值。
+func TestValidateStartupDefaultsResumeQueue(t *testing.T) {
+	cfg := validStartupConfig()
+	cfg.KafkaRunResumeTopic = ""
+	cfg.KafkaRunResumeGroupID = ""
+
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("expected config valid, got %v", err)
+	}
+	if cfg.KafkaRunResumeTopic != "run_resume" {
+		t.Fatalf("expected default resume topic, got %q", cfg.KafkaRunResumeTopic)
+	}
+	if cfg.KafkaRunResumeGroupID != "run-resume-worker-group" {
+		t.Fatalf("expected default resume group, got %q", cfg.KafkaRunResumeGroupID)
+	}
+}
+
+// TestValidateStartupValidatesA2ACallbackURL 验证 callback 地址只允许 loopback HTTP 或远程 HTTPS。
+func TestValidateStartupValidatesA2ACallbackURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr string
+	}{
+		{name: "loopback IPv4 HTTP", rawURL: "http://127.0.0.1:8080"},
+		{name: "loopback IPv6 HTTP", rawURL: "http://[::1]:8080"},
+		{name: "localhost HTTP", rawURL: "http://localhost:8080"},
+		{name: "remote HTTPS", rawURL: "https://agents.example.com"},
+		{name: "remote HTTP", rawURL: "http://agents.example.com", wantErr: "remote callback URL must use HTTPS"},
+		{name: "relative URL", rawURL: "/a2a/callback", wantErr: "must be an absolute URL"},
+		{name: "user info", rawURL: "https://user:password@agents.example.com", wantErr: "must not contain user info"},
+		{name: "query", rawURL: "https://agents.example.com?token=secret", wantErr: "query and fragment are not allowed"},
+		{name: "fragment", rawURL: "https://agents.example.com#callback", wantErr: "query and fragment are not allowed"},
+		{name: "unsupported scheme", rawURL: "ftp://agents.example.com", wantErr: "unsupported scheme"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validStartupConfig()
+			cfg.A2ACallbackBaseURL = tt.rawURL
+
+			err := cfg.ValidateStartup()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected URL valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 // TestValidateStartupReportsMissingCriticalFields 验证缺失关键配置时会返回可读错误。
 func TestValidateStartupReportsMissingCriticalFields(t *testing.T) {
 	cfg := &Config{}
@@ -244,5 +299,25 @@ func TestLoadConfigRejectsMalformedA2ACredentialsWithoutLeakingValue(t *testing.
 	t.Setenv("A2A_AUTH_CREDENTIALS_JSON", `{"secret":"sensitive-value"`)
 	if err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "A2A_AUTH_CREDENTIALS_JSON") || strings.Contains(err.Error(), "sensitive-value") {
 		t.Fatalf("unexpected credentials parse error: %v", err)
+	}
+}
+
+func validStartupConfig() *Config {
+	return &Config{
+		MySQLHost:             "localhost",
+		MySQLPort:             3306,
+		MySQLUser:             "root",
+		MySQLDatabase:         "goai",
+		RedisHost:             "localhost",
+		RedisPort:             6379,
+		ServerPort:            "8080",
+		ServerShutdownTimeout: 15 * time.Second,
+		KafkaBootstrapServers: "localhost:9092",
+		KafkaRunTopic:         "run_execute",
+		KafkaRunGroupID:       "run-worker-group",
+		KafkaRunResumeTopic:   "run_resume",
+		KafkaRunResumeGroupID: "run-resume-worker-group",
+		JWTSecret:             "test-secret",
+		A2ACallbackBaseURL:    "http://127.0.0.1:8080",
 	}
 }
