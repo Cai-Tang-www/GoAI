@@ -117,12 +117,48 @@ GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信
 
 ## 挂起、恢复与故障恢复
 
-- Parent Run/RunStep 的挂起状态固定为 `waiting_external`，不是失败或长时间 running。
+### 状态与内部调度边界
+
+- Parent Run/RunStep 的挂起状态固定为 `waiting_external`，不是失败或长时间 `running`。
 - Delegation 保存 `parent_step_key` 与 `resume_node_key`，恢复时只执行后继节点，不重复执行已经成功的 Graph 前缀。
 - callback 投递状态持久化在 `a2a_push_configs`；失败投递由 RecoveryWorker 按到期时间重试。
-- resume 发布状态按 `pending -> publishing -> published -> claimed -> completed` 推进；发布失败或 stale claim 由 RecoveryWorker 重新投递。
-- 重复终态 callback 使用事件哈希幂等接受；相同 Task 的不同终态事件返回冲突。
-- Kafka 至少一次投递由数据库原子 claim 收敛，重复 `run_resume` 消息安全 no-op。
+- resume 发布状态按 `pending -> publishing -> published -> claimed -> completed` 推进。
+- Kafka `run_resume` 只通知 Runtime 存在可恢复工作，不传递或替代 Agent 间协议语义；跨 Agent 请求和结果仍只经过 A2A loopback HTTP 或 remote HTTPS。
+
+### Resume 执行租约
+
+- worker 只能通过数据库条件更新原子 claim 可恢复 Delegation，并同时把 Parent Run 从 `waiting_external` 推进到 `running`。
+- claim 持久化 `resume_lease_owner`、`resume_lease_claimed_at`、`resume_lease_heartbeat_at`、`resume_lease_expires_at` 和递增的 `resume_execution_attempt`。
+- `resume_execution_attempt` 是 fencing token。所有 heartbeat、RunStep、Parent Run 终态和租约完成写入都必须校验 owner 与 attempt；旧 worker 在租约被接管后不能覆盖新 worker 的结果。
+- 持有者按 `RUN_RESUME_HEARTBEAT_SECONDS` 周期续租；该值必须小于 `RUN_RESUME_LEASE_SECONDS`。续租失败会取消本次执行，并由持久化失败状态或 RecoveryWorker 收敛。
+- 两个 worker 并发接管同一过期租约时，只有条件更新成功且 `RowsAffected == 1` 的实例可以执行。
+
+### Persisted checkpoint
+
+- Runtime 从已持久化 Workflow 版本、Delegation `resume_node_key`、成功 RunStep 和当前等待点推导恢复游标，不依赖进程内内存。
+- 已成功的 `(run_id, step_key, attempt)` checkpoint 会被复用，接管者从下一个未完成节点继续。
+- 崩溃遗留的 `running` RunStep 会先收敛为失败，再使用递增 attempt 创建新的执行记录，避免违反唯一约束或覆盖历史。
+- 如果后继 `agent` 节点已经持久化 Delegation 且 Parent Run 已再次进入 `waiting_external`，接管者只完成旧 resume 租约，不重复发出 A2A 委派。
+- Workflow 版本缺失或 checkpoint 状态互相矛盾时，Parent Run 进入稳定失败状态，并记录可检索诊断错误；禁止静默从头执行。
+
+### Crash window 与 RecoveryWorker
+
+RecoveryWorker 周期扫描并恢复以下窗口：
+
+1. resume 已 claim，但 worker 在执行 Graph 前崩溃。
+2. 后继 RunStep 已成功落库，但 Parent Run 终态尚未提交时崩溃。
+3. 下一次 A2A 委派已经持久化，Parent Run 已进入 `waiting_external`，但旧 resume 租约尚未完成时崩溃。
+4. resume 发布停留在 stale `publishing` / `published`，或租约已过期。
+5. Parent Run 已是终态，但 Delegation 仍残留 `claimed` 租约。
+
+扫描、重新发布和 Kafka 重复消费都允许重复发生；数据库 claim、fencing token、checkpoint 与终态条件更新负责将它们收敛为一次有效执行。
+
+### 运维可见性
+
+- 日志关联 `trace_id / run_id / delegation_id / lease_owner / resume_attempt`。
+- `GET /api/runs/:run_id` 在存在恢复记录时附加可选 `resume` 字段，显示发布次数、执行 attempt、租约时间和最近一次恢复错误。
+- 最近恢复错误会保留到本次 resume 成功完成；重新发布或重新 claim 不会提前清空诊断信息。
+- 租约字段属于 Runtime 内部协调状态，不写入通用 A2A Task metadata，也不改变 A2A wire contract。
 
 ## 当前限制
 

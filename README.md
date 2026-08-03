@@ -123,6 +123,7 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - Target 返回 accepted 后，Parent Run 与当前 RunStep 持久化为 `waiting_external`，释放执行 Worker，不进行 Task polling
 - Target 终态通过认证 A2A callback 回流；Runtime 幂等落库后发布 Kafka `run_resume`，Resume Worker 原子 claim 并从持久化游标继续 Eino Graph
 - callback 与 resume 发布失败由 RecoveryWorker 扫描恢复，重复 callback、重复 Kafka 消息和进程重启不会重复执行后继节点
+- Parent Run resume 使用带 owner、heartbeat、expires_at 与 fencing attempt 的执行租约；过期租约可由新 Worker 原子接管，并根据成功 RunStep checkpoint 跳过已完成节点
 
 ### 在建
 
