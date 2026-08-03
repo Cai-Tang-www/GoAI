@@ -43,6 +43,7 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		"threads",
 		"messages",
 		"delegations",
+		"delegation_groups",
 		"agent_endpoints",
 		"agent_capabilities",
 		"loop_records",
@@ -61,6 +62,10 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		{&models.Message{}, "idx_messages_message_id"},
 		{&models.Delegation{}, "idx_delegations_delegation_id"},
 		{&models.Delegation{}, "idx_delegations_child_run_id"},
+		{&models.Delegation{}, "uidx_delegation_group_member"},
+		{&models.DelegationGroup{}, "idx_delegation_groups_group_id"},
+		{&models.DelegationGroup{}, "uidx_delegation_group_parent_step"},
+		{&models.DelegationGroup{}, "uidx_delegation_group_coordinator"},
 		{&models.AgentEndpoint{}, "idx_agent_endpoint_unique"},
 		{&models.AgentCapability{}, "idx_agent_capability_unique"},
 		{&models.LoopRecord{}, "idx_loop_records_loop_id"},
@@ -114,6 +119,45 @@ func TestUnifiedDomainModelUniqueConstraints(t *testing.T) {
 		)
 	})
 
+	t.Run("ungrouped delegations allow null group keys", func(t *testing.T) {
+		if err := database.Create(newTestDelegation("delegation-null-1", "child-run-null-1")).Error; err != nil {
+			t.Fatalf("create first ungrouped delegation: %v", err)
+		}
+		if err := database.Create(newTestDelegation("delegation-null-2", "child-run-null-2")).Error; err != nil {
+			t.Fatalf("create second ungrouped delegation: %v", err)
+		}
+	})
+
+	t.Run("delegation group member", func(t *testing.T) {
+		groupID := "group-1"
+		memberKey := "security"
+		first := newTestDelegation("delegation-group-1", "child-run-group-1")
+		first.DelegationGroupID = &groupID
+		first.GroupMemberKey = &memberKey
+		duplicate := newTestDelegation("delegation-group-2", "child-run-group-2")
+		duplicate.DelegationGroupID = &groupID
+		duplicate.GroupMemberKey = &memberKey
+		assertDuplicateRejected(t, first, duplicate)
+	})
+
+	t.Run("delegation group parent step", func(t *testing.T) {
+		assertDuplicateRejected(t,
+			newTestDelegationGroup("group-parent-1", "review"),
+			newTestDelegationGroup("group-parent-2", "review"),
+		)
+	})
+
+	t.Run("delegation group coordinator", func(t *testing.T) {
+		testFirst := newTestDelegationGroup("group-coordinator-1", "review-1")
+		testDuplicate := newTestDelegationGroup("group-coordinator-2", "review-2")
+		testFirst.CoordinatorDelegationID = "coordinator-unique"
+		testDuplicate.CoordinatorDelegationID = "coordinator-unique"
+		testFirst.ParentStepKey = "review-1"
+		testDuplicate.ParentStepKey = "review-2"
+		testFirst.ParentRunID = "parent-run-coordinator"
+		testDuplicate.ParentRunID = "parent-run-coordinator"
+		assertDuplicateRejected(t, testFirst, testDuplicate)
+	})
 	t.Run("agent endpoint code", func(t *testing.T) {
 		assertDuplicateRejected(t,
 			&models.AgentEndpoint{AgentID: 1, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:8080/api/a2a", Status: models.AgentEndpointStatusActive},
@@ -158,5 +202,13 @@ func newTestDelegation(delegationID, childRunID string) *models.Delegation {
 		RequestMessageID: "request-message-1",
 		InputJSON:        `{}`,
 		Status:           models.DelegationStatusPending,
+	}
+}
+
+func newTestDelegationGroup(groupID, parentStepKey string) *models.DelegationGroup {
+	return &models.DelegationGroup{
+		GroupID: groupID, ThreadID: "thread-1", ParentRunID: "parent-run-group", ParentStepKey: parentStepKey,
+		CoordinatorDelegationID: "coordinator-1", Strategy: models.DelegationGroupStrategyAll, RequiredSuccesses: 2,
+		TotalMembers: 2, Status: models.DelegationGroupStatusWaiting, ResultJSON: "{}",
 	}
 }

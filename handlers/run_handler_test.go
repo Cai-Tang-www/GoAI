@@ -20,7 +20,7 @@ import (
 func setupRunIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	return gdb

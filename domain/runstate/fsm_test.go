@@ -14,6 +14,7 @@ func TestIsValidDelegationTransition(t *testing.T) {
 		want bool
 	}{
 		{name: "pending to accepted", from: models.DelegationStatusPending, to: models.DelegationStatusAccepted, want: true},
+		{name: "pending to success for fast callback", from: models.DelegationStatusPending, to: models.DelegationStatusSucceeded, want: true},
 		{name: "pending to failed", from: models.DelegationStatusPending, to: models.DelegationStatusFailed, want: true},
 		{name: "accepted to running", from: models.DelegationStatusAccepted, to: models.DelegationStatusRunning, want: true},
 		{name: "accepted to success", from: models.DelegationStatusAccepted, to: models.DelegationStatusSucceeded, want: true},

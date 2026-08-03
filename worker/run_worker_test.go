@@ -56,7 +56,7 @@ func openWorkerTestDB(t *testing.T) *gorm.DB {
 	})
 	if err := database.AutoMigrate(
 		&models.Agent{}, &models.AgentCapability{}, &models.Workflow{}, &models.Thread{}, &models.Message{},
-		&models.Delegation{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{},
+		&models.Delegation{}, &models.DelegationGroup{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{},
 	); err != nil {
 		t.Fatalf("auto migrate worker database failed: %v", err)
 	}

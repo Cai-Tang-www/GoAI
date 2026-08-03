@@ -38,6 +38,7 @@ func setupDelegationFixture(t *testing.T) delegationFixture {
 		&models.RunStep{},
 		&models.RunIdempotency{},
 		&models.Delegation{},
+		&models.DelegationGroup{},
 		&models.Message{},
 		&models.A2APushConfig{},
 	); err != nil {

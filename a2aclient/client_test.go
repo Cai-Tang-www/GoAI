@@ -39,7 +39,11 @@ func TestClientInvokeReturnsAcceptedTaskWithoutPolling(t *testing.T) {
 				t.Fatalf("unexpected A2A message: %+v", request.Message)
 			}
 			metadata, ok := request.Message.Metadata[a2aprotocol.DelegationExtensionURI].(map[string]any)
-			if !ok || metadata["traceId"] != "trace-parent" || metadata["delegationId"] != "dlg-parent" || metadata["parentRunId"] != "run-parent" {
+			if !ok || metadata["traceId"] != "trace-parent" ||
+				metadata["delegationId"] != "dlg-parent" ||
+				metadata["parentRunId"] != "run-parent" ||
+				metadata["delegationGroupId"] != "group-parent" ||
+				metadata["groupMemberKey"] != "security" {
 				t.Fatalf("A2A delegation metadata not propagated: %#v", request.Message.Metadata)
 			}
 			if request.Config == nil || !request.Config.ReturnImmediately || request.Config.PushConfig == nil {
@@ -81,17 +85,19 @@ func TestClientInvokeReturnsAcceptedTaskWithoutPolling(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	result, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
-		SourceAgentCode: "planner",
-		TargetAgentCode: "writer",
-		CapabilityCode:  "write",
-		ParentRunID:     "run-parent",
-		TraceID:         "trace-parent",
-		DelegationID:    "dlg-parent",
-		ThreadID:        "thread-1",
-		TaskID:          "a2a_task_123",
-		MessageID:       "a2a_message_123",
-		InputJSON:       `{"prompt":"write"}`,
-		Endpoints:       []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
+		SourceAgentCode:   "planner",
+		TargetAgentCode:   "writer",
+		CapabilityCode:    "write",
+		ParentRunID:       "run-parent",
+		TraceID:           "trace-parent",
+		DelegationID:      "dlg-parent",
+		ThreadID:          "thread-1",
+		TaskID:            "a2a_task_123",
+		MessageID:         "a2a_message_123",
+		DelegationGroupID: "group-parent",
+		GroupMemberKey:    "security",
+		InputJSON:         `{"prompt":"write"}`,
+		Endpoints:         []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
 	})
 	if err != nil {
 		t.Fatalf("invoke: %v", err)

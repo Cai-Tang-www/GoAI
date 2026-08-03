@@ -26,6 +26,44 @@ func TestValidateAgentNodeConfig(t *testing.T) {
 	}
 }
 
+func TestValidateAgentGroupNodeConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "missing config", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\"}]}", wantErr: "config is required"},
+		{name: "too few members", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"all\",\"members\":[{\"key\":\"one\",\"target_agent\":\"reviewer\",\"capability\":\"review\"}]}}]}", wantErr: "between 2 and 16"},
+		{name: "duplicate member", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"all\",\"members\":[{\"key\":\"same\",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"same\",\"target_agent\":\"quality\",\"capability\":\"review\"}]}}]}", wantErr: "duplicate member key"},
+		{name: "duplicate target capability", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"all\",\"members\":[{\"key\":\"one\",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"two\",\"target_agent\":\"security\",\"capability\":\"review\"}]}}]}", wantErr: "repeats target"},
+		{name: "invalid strategy", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"race\",\"members\":[{\"key\":\"one\",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"two\",\"target_agent\":\"quality\",\"capability\":\"review\"}]}}]}", wantErr: "strategy must be"},
+		{name: "invalid quorum", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"quorum\",\"required_successes\":3,\"members\":[{\"key\":\"one\",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"two\",\"target_agent\":\"quality\",\"capability\":\"review\"}]}}]}", wantErr: "required_successes"},
+		{name: "unknown input", raw: "{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"any\",\"input_from\":[\"missing\"],\"members\":[{\"key\":\"one\",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"two\",\"target_agent\":\"quality\",\"capability\":\"review\"}]}}]}", wantErr: "input_from node not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseAndValidate(tt.raw)
+			if err == nil || !containsText(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseAgentGroupNodeConfigNormalizesPolicy(t *testing.T) {
+	def, err := ParseAndValidate("{\"entry_node\":\"review\",\"nodes\":[{\"key\":\"review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\" ALL \",\"members\":[{\"key\":\" security \",\"target_agent\":\"security\",\"capability\":\"review\"},{\"key\":\"quality\",\"target_agent\":\"quality\",\"capability\":\"review\"}]}}]}")
+	if err != nil {
+		t.Fatalf("parse group definition: %v", err)
+	}
+	config, err := ParseAgentGroupNodeConfig(def.Nodes[0])
+	if err != nil {
+		t.Fatalf("parse group config: %v", err)
+	}
+	if config.Strategy != "all" || config.RequiredSuccesses != 2 || config.Members[0].Key != "security" {
+		t.Fatalf("unexpected normalized config: %+v", config)
+	}
+}
+
 func TestResolveExecutionOrderSupportsAgentNode(t *testing.T) {
 	def, err := ParseAndValidate(`{
 		"entry_node":"planner",

@@ -82,6 +82,7 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 			&models.Run{},
 			&models.RunStep{},
 			&models.RunIdempotency{},
+			&models.DelegationGroup{},
 		); err != nil {
 			t.Fatalf("auto migrate test database failed: %v", err)
 		}

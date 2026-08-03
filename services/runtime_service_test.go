@@ -23,6 +23,8 @@ func setupRuntimeTestService(t *testing.T) (*gorm.DB, *RuntimeService, *RunServi
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},
+		&models.Delegation{},
+		&models.DelegationGroup{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}

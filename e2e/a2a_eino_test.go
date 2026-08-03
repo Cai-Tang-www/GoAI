@@ -21,6 +21,7 @@ import (
 	"GoAI/handlers"
 	"GoAI/middlewares"
 	"GoAI/models"
+	"GoAI/requestctx"
 	"GoAI/services"
 
 	"github.com/gin-gonic/gin"
@@ -425,6 +426,7 @@ func migrateE2ADB(t *testing.T, database *gorm.DB) {
 		&models.Thread{},
 		&models.Message{},
 		&models.Delegation{},
+		&models.DelegationGroup{},
 		&models.A2APushConfig{},
 		&models.Run{},
 		&models.RunStep{},
@@ -478,4 +480,298 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAgentGroupDelegatesThroughA2AHTTPToTwoChildRuns(t *testing.T) {
+	databaseA := openE2EDB(t, "agent_group_source")
+	databaseSecurity := openE2EDB(t, "agent_group_security")
+	databaseQuality := openE2EDB(t, "agent_group_quality")
+	migrateE2ADB(t, databaseA)
+	migrateE2ADB(t, databaseSecurity)
+	migrateE2ADB(t, databaseQuality)
+
+	parentDefinition := `{
+		"entry_node":"parallel_review",
+		"nodes":[
+			{"key":"parallel_review","type":"agent_group","config":{
+				"strategy":"all",
+				"members":[
+					{"key":"security","target_agent":"security-reviewer","capability":"review","timeout_ms":5000},
+					{"key":"quality","target_agent":"quality-reviewer","capability":"review","timeout_ms":5000}
+				]
+			}},
+			{"key":"finalize","type":"tool","config":{"input_from":["parallel_review"]}}
+		],
+		"edges":[{"from":"parallel_review","to":"finalize"}]
+	}`
+	plannerA, _ := seedAgent(t, databaseA, "planner-group", "Planner Group Agent", 11, parentDefinition)
+	securityInA, securityWorkflowInA := seedAgent(t, databaseA, "security-reviewer", "Security Reviewer", 22, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
+	qualityInA, qualityWorkflowInA := seedAgent(t, databaseA, "quality-reviewer", "Quality Reviewer", 23, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
+	seedCapability(t, databaseA, securityInA, "review", securityWorkflowInA)
+	seedCapability(t, databaseA, qualityInA, "review", qualityWorkflowInA)
+
+	plannerSecurity, _ := seedAgent(t, databaseSecurity, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"tool"}],"edges":[]}`)
+	securityAgent, securityWorkflow := seedAgent(t, databaseSecurity, "security-reviewer", "Security Reviewer", 22, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
+	seedCapability(t, databaseSecurity, securityAgent, "review", securityWorkflow)
+	plannerQuality, _ := seedAgent(t, databaseQuality, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"tool"}],"edges":[]}`)
+	qualityAgent, qualityWorkflow := seedAgent(t, databaseQuality, "quality-reviewer", "Quality Reviewer", 23, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
+	seedCapability(t, databaseQuality, qualityAgent, "review", qualityWorkflow)
+
+	var providerCalls atomic.Int32
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"review complete\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(providerServer.Close)
+	chatService, err := services.NewChatService(&config.Config{
+		ModelProviderDefault: "test",
+		ModelProviders: map[string]config.ModelProviderConfig{
+			"test": {
+				Driver: ai.DriverOpenAICompatible, BaseURL: providerServer.URL, APIKey: "test-key",
+				DefaultModel: "test-model", EndpointPath: "/chat/completions",
+			},
+		},
+	}, providerServer.Client())
+	if err != nil {
+		t.Fatalf("create shared chat service: %v", err)
+	}
+
+	credentialResolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{
+		"planner-group-key": "test-only-planner-group-secret-at-least-32-bytes",
+		"security-key":      "test-only-security-secret-at-least-32-bytes",
+		"quality-key":       "test-only-quality-secret-at-least-32-bytes",
+	})
+	if err != nil {
+		t.Fatalf("create group A2A credential resolver: %v", err)
+	}
+	verifier, err := a2aauth.NewVerifier(credentialResolver, a2aauth.NewMemoryNonceStore(), time.Minute)
+	if err != nil {
+		t.Fatalf("create group A2A verifier: %v", err)
+	}
+
+	var sourceHandler atomic.Value
+	sourceHandler.Store(httpHandlerHolder{handler: http.NotFoundHandler()})
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceHandler.Load().(httpHandlerHolder).handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(serverA.Close)
+	callbackSender, err := a2aclient.NewCallbackSender(serverA.Client(), credentialResolver, true)
+	if err != nil {
+		t.Fatalf("create group callback sender: %v", err)
+	}
+
+	securityRunIDs := make(chan string, 1)
+	securityService, err := services.NewRunService(databaseSecurity, queuedRunPublisher{runIDs: securityRunIDs}, services.WithChatService(chatService))
+	if err != nil {
+		t.Fatalf("create security run service: %v", err)
+	}
+	securityRuntime, err := services.NewRuntimeService(databaseSecurity, securityService, services.WithDelegationCallbackSender(callbackSender))
+	if err != nil {
+		t.Fatalf("create security runtime: %v", err)
+	}
+	securityGateway, err := a2agateway.New(securityRuntime, a2agateway.WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create security gateway: %v", err)
+	}
+	var securityPathsMu sync.Mutex
+	var securityPaths []string
+	securityServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		securityPathsMu.Lock()
+		securityPaths = append(securityPaths, r.URL.Path)
+		securityPathsMu.Unlock()
+		securityGateway.ServeHTTP(w, r)
+	}))
+	t.Cleanup(securityServer.Close)
+
+	qualityRunIDs := make(chan string, 1)
+	qualityService, err := services.NewRunService(databaseQuality, queuedRunPublisher{runIDs: qualityRunIDs}, services.WithChatService(chatService))
+	if err != nil {
+		t.Fatalf("create quality run service: %v", err)
+	}
+	qualityRuntime, err := services.NewRuntimeService(databaseQuality, qualityService, services.WithDelegationCallbackSender(callbackSender))
+	if err != nil {
+		t.Fatalf("create quality runtime: %v", err)
+	}
+	qualityGateway, err := a2agateway.New(qualityRuntime, a2agateway.WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create quality gateway: %v", err)
+	}
+	var qualityPathsMu sync.Mutex
+	var qualityPaths []string
+	qualityServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qualityPathsMu.Lock()
+		qualityPaths = append(qualityPaths, r.URL.Path)
+		qualityPathsMu.Unlock()
+		qualityGateway.ServeHTTP(w, r)
+	}))
+	t.Cleanup(qualityServer.Close)
+
+	seedEndpoint(t, databaseSecurity, securityAgent, securityServer.URL+"/a2a/agents/security-reviewer", "security-key")
+	seedEndpoint(t, databaseSecurity, plannerSecurity, serverA.URL+"/a2a/agents/planner-group", "planner-group-key")
+	seedEndpoint(t, databaseQuality, qualityAgent, qualityServer.URL+"/a2a/agents/quality-reviewer", "quality-key")
+	seedEndpoint(t, databaseQuality, plannerQuality, serverA.URL+"/a2a/agents/planner-group", "planner-group-key")
+	seedEndpoint(t, databaseA, securityInA, securityServer.URL+"/a2a/agents/security-reviewer", "security-key")
+	seedEndpoint(t, databaseA, qualityInA, qualityServer.URL+"/a2a/agents/quality-reviewer", "quality-key")
+	seedEndpoint(t, databaseA, plannerA, serverA.URL+"/a2a/agents/planner-group", "planner-group-key")
+
+	outbound, err := a2aclient.New(&http.Client{}, 5*time.Second, a2aclient.WithCallbackBaseURL(serverA.URL), a2aclient.WithAuthentication(credentialResolver, true))
+	if err != nil {
+		t.Fatalf("create group A2A client: %v", err)
+	}
+	var parentService *services.RunService
+	parentPublisher := syncRunPublisher{execute: func(ctx context.Context, runID string) error {
+		return parentService.HandleRunExecute(ctx, runID)
+	}}
+	parentService, err = services.NewRunService(databaseA, parentPublisher, services.WithAgentInvoker(outbound), services.WithChatService(chatService))
+	if err != nil {
+		t.Fatalf("create group parent service: %v", err)
+	}
+	var resumeCalls atomic.Int32
+	resumePublisher := runResumePublisherFunc(func(ctx context.Context, runID, delegationID string) error {
+		resumeCalls.Add(1)
+		return parentService.HandleRunResume(ctx, runID, delegationID)
+	})
+	runtimeA, err := services.NewRuntimeService(databaseA, parentService, services.WithRunResumePublisher(resumePublisher))
+	if err != nil {
+		t.Fatalf("create group source runtime: %v", err)
+	}
+	gatewayA, err := a2agateway.New(runtimeA, a2agateway.WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create group source gateway: %v", err)
+	}
+	muxA := http.NewServeMux()
+	muxA.Handle("/a2a/", gatewayA)
+	sourceHandler.Store(httpHandlerHolder{handler: muxA})
+
+	ctx := requestctx.WithTraceID(context.Background(), "trace-agent-group-e2e")
+	result, err := parentService.CreateRun(ctx, 42, services.CreateRunRequest{
+		AgentCode: "planner-group", ThreadID: "thread-agent-group-e2e", TriggerType: "api",
+		Input: json.RawMessage(`{"prompt":"review this release"}`),
+	})
+	if err != nil {
+		t.Fatalf("create parent agent group run: %v", err)
+	}
+	parentRunID := result.Run.RunID
+	waitForRunStatus(t, databaseA, parentRunID, models.RunStatusWaitingExternal)
+
+	var securityChildID, qualityChildID string
+	select {
+	case securityChildID = <-securityRunIDs:
+	case <-time.After(3 * time.Second):
+		t.Fatal("security A2A gateway did not enqueue a child run")
+	}
+	select {
+	case qualityChildID = <-qualityRunIDs:
+	case <-time.After(3 * time.Second):
+		t.Fatal("quality A2A gateway did not enqueue a child run")
+	}
+	if securityChildID == qualityChildID {
+		t.Fatalf("agent group reused child run id %s", securityChildID)
+	}
+
+	if err := securityService.HandleRunExecute(context.Background(), securityChildID); err != nil {
+		t.Fatalf("execute security child run: %v", err)
+	}
+	if err := securityRuntime.ReconcileDelegation(context.Background(), securityChildID); err != nil {
+		t.Fatalf("reconcile security child delegation: %v", err)
+	}
+	waitForRunStatus(t, databaseA, parentRunID, models.RunStatusWaitingExternal)
+	if err := qualityService.HandleRunExecute(context.Background(), qualityChildID); err != nil {
+		t.Fatalf("execute quality child run: %v", err)
+	}
+	if err := qualityRuntime.ReconcileDelegation(context.Background(), qualityChildID); err != nil {
+		t.Fatalf("reconcile quality child delegation: %v", err)
+	}
+
+	parentRun := waitForRunStatus(t, databaseA, parentRunID, models.RunStatusSuccess)
+	if parentRun.TraceID != "trace-agent-group-e2e" {
+		t.Fatalf("parent trace id=%q", parentRun.TraceID)
+	}
+	if resumeCalls.Load() != 1 {
+		t.Fatalf("group resume calls=%d want=1", resumeCalls.Load())
+	}
+	if providerCalls.Load() != 2 {
+		t.Fatalf("provider calls=%d want=2 (one call per child Agent)", providerCalls.Load())
+	}
+
+	var parentSteps []models.RunStep
+	if err := databaseA.Where("run_id = ?", parentRunID).Order("id ASC").Find(&parentSteps).Error; err != nil {
+		t.Fatalf("load parent group steps: %v", err)
+	}
+	if len(parentSteps) != 2 || parentSteps[0].StepKey != "parallel_review" || parentSteps[1].StepKey != "finalize" {
+		t.Fatalf("unexpected parent group steps: %+v", parentSteps)
+	}
+	if parentSteps[0].Status != models.RunStepStatusSuccess || parentSteps[1].Status != models.RunStepStatusSuccess {
+		t.Fatalf("parent group steps did not succeed: %+v", parentSteps)
+	}
+
+	var group models.DelegationGroup
+	if err := databaseA.Where("parent_run_id = ?", parentRunID).First(&group).Error; err != nil {
+		t.Fatalf("load persisted delegation group: %v", err)
+	}
+	if group.Status != models.DelegationGroupStatusSucceeded || group.SucceededMembers != 2 || group.TotalMembers != 2 {
+		t.Fatalf("unexpected persisted delegation group: %+v", group)
+	}
+	var sourceDelegations []models.Delegation
+	if err := databaseA.Where("delegation_group_id = ?", group.GroupID).Order("group_member_position ASC").Find(&sourceDelegations).Error; err != nil {
+		t.Fatalf("load source group delegations: %v", err)
+	}
+	if len(sourceDelegations) != 2 || sourceDelegations[0].ChildRunID == sourceDelegations[1].ChildRunID {
+		t.Fatalf("unexpected source group delegations: %+v", sourceDelegations)
+	}
+	for _, delegation := range sourceDelegations {
+		if delegation.Status != models.DelegationStatusSucceeded || delegation.CallbackEventHash == "" {
+			t.Fatalf("source group delegation was not completed by callback: %+v", delegation)
+		}
+	}
+
+	for _, target := range []struct {
+		database   *gorm.DB
+		childRunID string
+		agentCode  string
+		pathsMu    *sync.Mutex
+		paths      *[]string
+	}{
+		{database: databaseSecurity, childRunID: securityChildID, agentCode: "security-reviewer", pathsMu: &securityPathsMu, paths: &securityPaths},
+		{database: databaseQuality, childRunID: qualityChildID, agentCode: "quality-reviewer", pathsMu: &qualityPathsMu, paths: &qualityPaths},
+	} {
+		var delegation models.Delegation
+		if err := target.database.Where("child_run_id = ?", target.childRunID).First(&delegation).Error; err != nil {
+			t.Fatalf("load %s target delegation: %v", target.agentCode, err)
+		}
+		if delegation.Status != models.DelegationStatusSucceeded || delegation.TraceID != "trace-agent-group-e2e" {
+			t.Fatalf("unexpected %s target delegation: %+v", target.agentCode, delegation)
+		}
+		var messageCount int64
+		if err := target.database.Model(&models.Message{}).Where("delegation_id = ?", delegation.DelegationID).Count(&messageCount).Error; err != nil {
+			t.Fatalf("count %s delegation messages: %v", target.agentCode, err)
+		}
+		if messageCount != 2 {
+			t.Fatalf("%s delegation message count=%d want=2", target.agentCode, messageCount)
+		}
+		target.pathsMu.Lock()
+		paths := append([]string(nil), (*target.paths)...)
+		target.pathsMu.Unlock()
+		if !containsPath(paths, "/a2a/agents/"+target.agentCode+"/.well-known/agent-card.json") ||
+			!containsPath(paths, "/a2a/agents/"+target.agentCode+"/message:send") {
+			t.Fatalf("%s was not reached through A2A HTTP: %v", target.agentCode, paths)
+		}
+	}
+
+	detail, err := parentService.GetRunDetailByRunID(context.Background(), 42, false, parentRunID)
+	if err != nil {
+		t.Fatalf("get parent group detail: %v", err)
+	}
+	if len(detail.DelegationGroups) != 1 || len(detail.DelegationGroups[0].Members) != 2 {
+		t.Fatalf("run detail did not expose agent group: %+v", detail.DelegationGroups)
+	}
+	if detail.DelegationGroups[0].CoordinatorDelegationID != sourceDelegations[0].DelegationID {
+		t.Fatalf("coordinator delegation=%s want=%s", detail.DelegationGroups[0].CoordinatorDelegationID, sourceDelegations[0].DelegationID)
+	}
 }

@@ -52,6 +52,7 @@ func setupResumeLeaseFixture(t *testing.T, definitionJSON, resumeNodeKey string)
 		&models.Run{},
 		&models.RunStep{},
 		&models.Delegation{},
+		&models.DelegationGroup{},
 		&models.Message{},
 	); err != nil {
 		t.Fatalf("auto migrate resume fixture failed: %v", err)
