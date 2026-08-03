@@ -11,9 +11,10 @@ import (
 )
 
 type fakeMessageWriter struct {
-	messages []kgo.Message
-	writeErr error
-	closeErr error
+	messages   []kgo.Message
+	writeErr   error
+	closeErr   error
+	closeCalls int
 }
 
 func (w *fakeMessageWriter) WriteMessages(_ context.Context, messages ...kgo.Message) error {
@@ -22,6 +23,7 @@ func (w *fakeMessageWriter) WriteMessages(_ context.Context, messages ...kgo.Mes
 }
 
 func (w *fakeMessageWriter) Close() error {
+	w.closeCalls++
 	return w.closeErr
 }
 
@@ -81,5 +83,20 @@ func TestProducerNilReceiverIsSafe(t *testing.T) {
 	}
 	if err := producer.Close(); err != nil {
 		t.Fatalf("close nil producer failed: %v", err)
+	}
+}
+
+func TestProducerCloseIsIdempotent(t *testing.T) {
+	closeErr := errors.New("close failed")
+	writer := &fakeMessageWriter{closeErr: closeErr}
+	producer := &Producer{writer: writer}
+
+	for range 2 {
+		if err := producer.Close(); !errors.Is(err, closeErr) {
+			t.Fatalf("expected original close error, got %v", err)
+		}
+	}
+	if writer.closeCalls != 1 {
+		t.Fatalf("expected writer close once, got %d", writer.closeCalls)
 	}
 }

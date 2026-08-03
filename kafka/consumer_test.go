@@ -27,6 +27,20 @@ type closeAwareMessageReader struct {
 	closeOnce sync.Once
 }
 
+type failingMessageReader struct {
+	err   error
+	calls int
+}
+
+func (r *failingMessageReader) ReadMessage(context.Context) (kgo.Message, error) {
+	r.calls++
+	return kgo.Message{}, r.err
+}
+
+func (r *failingMessageReader) Close() error {
+	return nil
+}
+
 func (r *closeAwareMessageReader) ReadMessage(ctx context.Context) (kgo.Message, error) {
 	select {
 	case <-ctx.Done():
@@ -89,13 +103,15 @@ func TestConsumerSkipsInvalidMessagesAndPropagatesTraceID(t *testing.T) {
 		logger: log.New(io.Discard, "", 0),
 	}
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		consumer.Start(ctx)
-		close(done)
+		done <- consumer.Start(ctx)
 	}()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("consumer stopped with error: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("consumer did not stop after context cancellation")
 	}
@@ -133,18 +149,38 @@ func TestConsumerStopsWhenReaderIsClosed(t *testing.T) {
 		logger:  log.New(io.Discard, "", 0),
 	}
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		consumer.Start(context.Background())
-		close(done)
+		done <- consumer.Start(context.Background())
 	}()
 
 	if err := consumer.Close(); err != nil {
 		t.Fatalf("close consumer failed: %v", err)
 	}
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("consumer stopped with error: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("consumer did not stop after reader close")
+	}
+}
+
+func TestConsumerReturnsReadFailureToLifecycle(t *testing.T) {
+	readErr := errors.New("broker authentication failed")
+	reader := &failingMessageReader{err: readErr}
+	consumer := &Consumer{
+		reader:  reader,
+		handler: func(context.Context, RunExecuteMessage) error { return nil },
+		logger:  log.New(io.Discard, "", 0),
+	}
+
+	err := consumer.Start(context.Background())
+	if !errors.Is(err, readErr) {
+		t.Fatalf("expected read failure to reach lifecycle, got %v", err)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("expected fatal read failure to stop after one attempt, got %d", reader.calls)
 	}
 }
