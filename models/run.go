@@ -3,12 +3,13 @@ package models
 import "time"
 
 const (
-	RunStatusPending   = "pending"
-	RunStatusQueued    = "queued"
-	RunStatusRunning   = "running"
-	RunStatusSuccess   = "success"
-	RunStatusFailed    = "failed"
-	RunStatusCancelled = "cancelled"
+	RunStatusPending         = "pending"
+	RunStatusQueued          = "queued"
+	RunStatusRunning         = "running"
+	RunStatusWaitingExternal = "waiting_external"
+	RunStatusSuccess         = "success"
+	RunStatusFailed          = "failed"
+	RunStatusCancelled       = "cancelled"
 )
 
 // Run 表示一次完整业务回合，可由 AG-UI、A2A 委派或系统调度触发。

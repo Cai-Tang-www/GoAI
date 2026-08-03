@@ -132,7 +132,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	agentInvoker, err := a2aclient.New(governedHTTPClient, cfg.A2AClientRequestTimeout, cfg.A2AClientPollInterval, a2aclient.WithObservability(telemetry), a2aclient.WithAuthentication(credentialResolver, cfg.A2AAuthRequired))
+	agentInvoker, err := a2aclient.New(governedHTTPClient, cfg.A2AClientRequestTimeout, a2aclient.WithCallbackBaseURL(cfg.A2ACallbackBaseURL), a2aclient.WithObservability(telemetry), a2aclient.WithAuthentication(credentialResolver, cfg.A2AAuthRequired))
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	callbackSender, err := a2aclient.NewCallbackSender(governedHTTPClient, credentialResolver, cfg.A2AAuthRequired)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
@@ -149,7 +153,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	runtimeService, err := services.NewRuntimeService(database, runService, services.WithRuntimeObservability(telemetry))
+	runtimeService, err := services.NewRuntimeService(database, runService,
+		services.WithRuntimeObservability(telemetry),
+		services.WithRunResumePublisher(producer),
+		services.WithDelegationCallbackSender(callbackSender),
+	)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
@@ -161,11 +169,19 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	consumer, err := kafka.NewConsumer(cfg, runWorker.HandleRunExecuteMessage, kafka.WithConsumerObservability(telemetry))
+	executeConsumer, err := kafka.NewConsumer(cfg, runWorker.HandleRunExecuteMessage, kafka.WithConsumerObservability(telemetry))
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
-	log.Println("Kafka consumer initialized")
+	resumeConsumer, err := kafka.NewResumeConsumer(cfg, runWorker.HandleRunResumeMessage, kafka.WithConsumerObservability(telemetry))
+	if err != nil {
+		return errors.Join(err, executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	recoveryWorker, err := worker.NewRecoveryWorker(runtimeService, 5*time.Second, 100)
+	if err != nil {
+		return errors.Join(err, resumeConsumer.Close(), executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	log.Println("Kafka run execute/resume consumers initialized")
 
 	streamShutdownCtx, stopStreams := context.WithCancel(context.Background())
 	defer stopStreams()
@@ -182,7 +198,7 @@ func run(ctx context.Context) error {
 		StreamShutdown:   streamShutdownCtx,
 	})
 	if err != nil {
-		return errors.Join(err, consumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+		return errors.Join(err, resumeConsumer.Close(), executeConsumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
 	connectionTracker := newHTTPConnectionTracker()
 	server := &http.Server{
@@ -198,14 +214,18 @@ func run(ctx context.Context) error {
 		address:         server.Addr,
 		shutdownTimeout: cfg.ServerShutdownTimeout,
 		waitHTTP:        connectionTracker.Wait,
-		runWorker:       consumer.Start,
-		stopStreams:     stopStreams,
-		closeConsumer:   consumer.Close,
-		closeProducer:   contextCloser(producer.Close),
-		closeRedis:      contextCloser(func() error { return redisinfra.Close(redisClient) }),
-		closeDB:         contextCloser(func() error { return db.Close(database) }),
-		closeTelemetry:  telemetry.Shutdown,
-		logger:          log.Default(),
+		runWorker: func(ctx context.Context) error {
+			return worker.RunGroup(ctx, executeConsumer.Start, resumeConsumer.Start, recoveryWorker.Start)
+		},
+		stopStreams: stopStreams,
+		closeConsumer: func() error {
+			return errors.Join(executeConsumer.Close(), resumeConsumer.Close())
+		},
+		closeProducer:  contextCloser(producer.Close),
+		closeRedis:     contextCloser(func() error { return redisinfra.Close(redisClient) }),
+		closeDB:        contextCloser(func() error { return db.Close(database) }),
+		closeTelemetry: telemetry.Shutdown,
+		logger:         log.Default(),
 	}
 	telemetryOwnedByLifecycle = true
 	return runtime.Run(ctx)

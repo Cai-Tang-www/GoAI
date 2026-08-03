@@ -3,11 +3,12 @@ package models
 import "time"
 
 const (
-	RunStepStatusPending = "pending"
-	RunStepStatusRunning = "running"
-	RunStepStatusSuccess = "success"
-	RunStepStatusFailed  = "failed"
-	RunStepStatusSkipped = "skipped"
+	RunStepStatusPending         = "pending"
+	RunStepStatusRunning         = "running"
+	RunStepStatusWaitingExternal = "waiting_external"
+	RunStepStatusSuccess         = "success"
+	RunStepStatusFailed          = "failed"
+	RunStepStatusSkipped         = "skipped"
 )
 
 // RunStep 记录 Run 中每个节点（含重试 attempt）的执行结果。

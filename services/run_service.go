@@ -36,6 +36,32 @@ var (
 	errInvalidStepTransition = errors.New("invalid step status transition")
 )
 
+type agentInvocationAcceptedError struct {
+	TaskID            string
+	DelegationID      string
+	MessageID         string
+	SourceAgentID     uint64
+	TargetAgentID     uint64
+	CapabilityCode    string
+	OutputJSON        string
+	CallbackTokenHash string
+}
+
+func (e *agentInvocationAcceptedError) Error() string {
+	return fmt.Sprintf("A2A task %s accepted for asynchronous execution", e.TaskID)
+}
+
+type runSuspendedError struct {
+	TaskID        string
+	DelegationID  string
+	StepKey       string
+	ResumeNodeKey string
+}
+
+func (e *runSuspendedError) Error() string {
+	return fmt.Sprintf("run suspended waiting for A2A task %s", e.TaskID)
+}
+
 var defaultStepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 const (
@@ -843,9 +869,17 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
 			return "", err
 		}
-		return s.executeNodeWithRetryInput(nodeCtx, run, node, input)
+		resumeNodeKey, successorErr := workflowSuccessor(def, node.Key)
+		if successorErr != nil {
+			return "", successorErr
+		}
+		return s.executeNodeWithRetryInputAt(nodeCtx, run, node, input, resumeNodeKey)
 	})
 	if err != nil {
+		var suspended *runSuspendedError
+		if errors.As(err, &suspended) {
+			return nil
+		}
 		return s.failClaimedRun(observedCtx, run.RunID, err)
 	}
 	if err := s.validateRunOutputContract(observedCtx, run, outputJSON); err != nil {
@@ -858,7 +892,153 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 	return nil
 }
 
+// HandleRunResume 原子 claim waiting_external Parent Run，并从持久化后继节点继续执行。
+func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID string) error {
+	runID = strings.TrimSpace(runID)
+	delegationID = strings.TrimSpace(delegationID)
+	if runID == "" || delegationID == "" {
+		return errors.New("resuming run: run_id and delegation_id are required")
+	}
+
+	var run models.Run
+	var delegation models.Delegation
+	var callbackOutput string
+	claimed := false
+	err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("delegation_id = ? AND parent_run_id = ?", delegationID, runID).First(&delegation).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRunNotFound
+			}
+			return err
+		}
+		if err := tx.Where("run_id = ?", runID).First(&run).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRunNotFound
+			}
+			return err
+		}
+		if run.Status != models.RunStatusWaitingExternal {
+			return nil
+		}
+		if delegation.ResumeStatus == models.DelegationResumeStatusClaimed || delegation.ResumeStatus == models.DelegationResumeStatusCompleted {
+			return nil
+		}
+		var step models.RunStep
+		if err := tx.Where("run_id = ? AND step_key = ?", runID, delegation.ParentStepKey).Order("attempt DESC").First(&step).Error; err != nil {
+			return err
+		}
+		if step.Status != models.RunStepStatusSuccess {
+			return fmt.Errorf("resuming run %s: callback step %s is not successful", runID, step.StepKey)
+		}
+		callbackOutput = step.OutputJSON
+		claim := tx.Model(&models.Delegation{}).
+			Where("id = ? AND resume_status NOT IN ?", delegation.ID, []string{models.DelegationResumeStatusClaimed, models.DelegationResumeStatusCompleted}).
+			Updates(map[string]any{"resume_status": models.DelegationResumeStatusClaimed, "resume_error": ""})
+		if claim.Error != nil {
+			return claim.Error
+		}
+		if claim.RowsAffected != 1 {
+			return nil
+		}
+		if err := transitionRunStatus(ctx, tx, &run, models.RunStatusRunning, ""); err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	if err != nil || !claimed {
+		return err
+	}
+
+	complete := func(outputJSON string) error {
+		if err := s.validateRunOutputContract(ctx, &run, outputJSON); err != nil {
+			return s.failResumedRun(ctx, &run, &delegation, err)
+		}
+		if err := s.transitionRun(ctx, &run, models.RunStatusSuccess, ""); err != nil {
+			return s.failResumedRun(ctx, &run, &delegation, err)
+		}
+		return s.completeDelegationResume(ctx, delegation.ID, "")
+	}
+	if strings.TrimSpace(delegation.ResumeNodeKey) == "" {
+		return complete(callbackOutput)
+	}
+
+	var workflow models.Workflow
+	if err := s.database.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
+		return s.failResumedRun(ctx, &run, &delegation, err)
+	}
+	def, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON)
+	if err != nil {
+		return s.failResumedRun(ctx, &run, &delegation, err)
+	}
+	outputJSON, err := s.graphExecutor.ExecuteFrom(ctx, def, delegation.ResumeNodeKey, callbackOutput, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
+			return "", err
+		}
+		next, err := workflowSuccessor(def, node.Key)
+		if err != nil {
+			return "", err
+		}
+		return s.executeNodeWithRetryInputAt(nodeCtx, &run, node, input, next)
+	})
+	if err != nil {
+		var suspended *runSuspendedError
+		if errors.As(err, &suspended) {
+			return s.completeDelegationResume(ctx, delegation.ID, "")
+		}
+		return s.failResumedRun(ctx, &run, &delegation, err)
+	}
+	return complete(outputJSON)
+}
+
+func (s *RunService) completeDelegationResume(ctx context.Context, delegationID uint64, resumeError string) error {
+	persistCtx, cancel := runFailurePersistenceContext(ctx)
+	defer cancel()
+
+	result := s.database.WithContext(persistCtx).Model(&models.Delegation{}).
+		Where("id = ? AND resume_status = ?", delegationID, models.DelegationResumeStatusClaimed).
+		Updates(map[string]any{"resume_status": models.DelegationResumeStatusCompleted, "resume_error": resumeError})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+
+	var current models.Delegation
+	if err := s.database.WithContext(persistCtx).Select("resume_status").First(&current, "id = ?", delegationID).Error; err != nil {
+		return err
+	}
+	if current.ResumeStatus == models.DelegationResumeStatusCompleted {
+		return nil
+	}
+	return fmt.Errorf("completing delegation resume: delegation is in status %q", current.ResumeStatus)
+}
+
+func (s *RunService) failResumedRun(ctx context.Context, run *models.Run, delegation *models.Delegation, cause error) error {
+	failErr := s.failClaimedRun(ctx, run.RunID, cause)
+	persistCtx, cancel := runFailurePersistenceContext(ctx)
+	defer cancel()
+	updateErr := s.completeDelegationResume(persistCtx, delegation.ID, cause.Error())
+	return errors.Join(failErr, updateErr)
+}
+
 // updateCurrentStep 单独提交当前节点，供协议 Gateway 实时观察执行进度。
+func workflowSuccessor(def *WorkflowDefinition, nodeKey string) (string, error) {
+	nodeKey = strings.TrimSpace(nodeKey)
+	successor := ""
+	for _, edge := range def.Edges {
+		if strings.TrimSpace(edge.From) != nodeKey {
+			continue
+		}
+		if successor != "" {
+			return "", fmt.Errorf("workflow node %s has multiple successors", nodeKey)
+		}
+		successor = strings.TrimSpace(edge.To)
+	}
+	return successor, nil
+}
+
 func (s *RunService) updateCurrentStep(ctx context.Context, runID, stepKey string) error {
 	result := s.database.WithContext(ctx).
 		Model(&models.Run{}).
@@ -895,6 +1075,10 @@ func (s *RunService) executeNodeWithRetry(ctx context.Context, run *models.Run, 
 
 // executeNodeWithRetryInput 执行一个已确定输入的节点，并返回最终输出供 Eino 下游节点使用。
 func (s *RunService) executeNodeWithRetryInput(ctx context.Context, run *models.Run, node WorkflowNode, nodeInput string) (string, error) {
+	return s.executeNodeWithRetryInputAt(ctx, run, node, nodeInput, "")
+}
+
+func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *models.Run, node WorkflowNode, nodeInput, resumeNodeKey string) (string, error) {
 	var lastErr error
 	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
 		config, err := ParseAgentNodeConfig(node)
@@ -926,6 +1110,13 @@ func (s *RunService) executeNodeWithRetryInput(ctx context.Context, run *models.
 		finishedAt := time.Now()
 		latencyMS := finishedAt.Sub(*step.StartedAt).Milliseconds()
 		if execErr != nil {
+			var accepted *agentInvocationAcceptedError
+			if errors.As(execErr, &accepted) {
+				if err := s.suspendRunForAgentInvocation(ctx, run, step, node, resumeNodeKey, accepted); err != nil {
+					return "", errors.Join(execErr, fmt.Errorf("persisting suspended run: %w", err))
+				}
+				return "", &runSuspendedError{TaskID: accepted.TaskID, DelegationID: accepted.DelegationID, StepKey: node.Key, ResumeNodeKey: resumeNodeKey}
+			}
 			lastErr = execErr
 			persistCtx, cancel := runFailurePersistenceContext(ctx)
 			finishErr := s.finishRunStep(persistCtx, run, step, models.RunStepStatusFailed, "{}", execErr.Error(), latencyMS, &finishedAt)
@@ -979,6 +1170,67 @@ func (s *RunService) executeNodeWithRetryInput(ctx context.Context, run *models.
 	}
 	return "", lastErr
 }
+
+// suspendRunForAgentInvocation 原子持久化外部 A2A 等待点和恢复游标。
+func (s *RunService) suspendRunForAgentInvocation(ctx context.Context, run *models.Run, step *models.RunStep, node WorkflowNode, resumeNodeKey string, accepted *agentInvocationAcceptedError) error {
+	if run == nil || step == nil || accepted == nil {
+		return errors.New("suspending run: run, step and invocation are required")
+	}
+	outputJSON, err := normalizeNodeOutput(accepted.OutputJSON)
+	if err != nil {
+		return err
+	}
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusWaitingExternal, outputJSON, "", 0, nil); err != nil {
+			return err
+		}
+		if err := transitionRunStatus(ctx, tx, run, models.RunStatusWaitingExternal, ""); err != nil {
+			return err
+		}
+
+		var delegation models.Delegation
+		err := tx.Where("delegation_id = ?", accepted.DelegationID).First(&delegation).Error
+		if err == nil {
+			if delegation.ParentRunID != run.RunID || delegation.SourceAgentID != accepted.SourceAgentID || delegation.TargetAgentID != accepted.TargetAgentID {
+				return errors.New("existing delegation does not match suspended parent run")
+			}
+			return tx.Model(&models.Delegation{}).Where("id = ?", delegation.ID).Updates(map[string]any{
+				"a2_a_task_id": accepted.TaskID, "parent_step_key": node.Key, "resume_node_key": resumeNodeKey,
+				"trace_id": run.TraceID, "loop_id": step.LoopID, "callback_token_hash": accepted.CallbackTokenHash,
+			}).Error
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		var source, target models.Agent
+		if err := tx.First(&source, "id = ?", accepted.SourceAgentID).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&target, "id = ?", accepted.TargetAgentID).Error; err != nil {
+			return err
+		}
+		message := &models.Message{
+			MessageID: accepted.MessageID, ThreadID: run.ThreadID, RunID: run.RunID, DelegationID: accepted.DelegationID,
+			SenderType: models.MessageSenderAgent, SenderID: source.AgentCode, ReceiverType: models.MessageSenderAgent,
+			ReceiverID: target.AgentCode, MessageType: models.MessageTypeDelegation, ContentType: "application/json",
+			ContentJSON: step.InputJSON, MetadataJSON: "{}", Status: models.MessageStatusDelivered,
+		}
+		if err := tx.Create(message).Error; err != nil {
+			return err
+		}
+		taskID := accepted.TaskID
+		delegation = models.Delegation{
+			DelegationID: accepted.DelegationID, ThreadID: run.ThreadID, ParentRunID: run.RunID, ChildRunID: accepted.TaskID,
+			A2ATaskID: &taskID, TraceID: run.TraceID, LoopID: step.LoopID, SourceAgentID: accepted.SourceAgentID,
+			TargetAgentID: accepted.TargetAgentID, CapabilityCode: accepted.CapabilityCode, RequestMessageID: accepted.MessageID,
+			ParentStepKey: node.Key, ResumeNodeKey: resumeNodeKey, InputJSON: step.InputJSON, OutputJSON: "{}",
+			Status: models.DelegationStatusAccepted, ResumeStatus: models.DelegationResumeStatusNone, CallbackTokenHash: accepted.CallbackTokenHash,
+		}
+		return tx.Create(&delegation).Error
+	})
+}
+
 func (s *RunService) startRunLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run) error {
 	if s.loopService == nil || run == nil || run.LoopID == nil || strings.TrimSpace(*run.LoopID) == "" {
 		return nil
@@ -1183,6 +1435,8 @@ func (s *RunService) persistResultMessage(ctx context.Context, tx *gorm.DB, run 
 	if err := tx.WithContext(ctx).Select("agent_code").First(&agent, "id = ?", run.AgentID).Error; err != nil {
 		return fmt.Errorf("loading result message sender agent: %w", err)
 	}
+	messageID := resultMessageID(run.RunID, step.StepKey, step.Attempt)
+	messageRunID := run.RunID
 	receiverType := models.MessageSenderUser
 	receiverID := fmt.Sprintf("%d", run.UserID)
 	delegationID := ""
@@ -1198,14 +1452,16 @@ func (s *RunService) persistResultMessage(ctx context.Context, tx *gorm.DB, run 
 		receiverType = models.MessageSenderAgent
 		receiverID = sourceAgent.AgentCode
 		delegationID = delegation.DelegationID
+		messageID = delegationResultMessageID(delegation.DelegationID)
+		messageRunID = delegation.ParentRunID
 		parentMessageID = delegation.RequestMessageID
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("loading result message delegation: %w", err)
 	}
 	message := &models.Message{
-		MessageID:       resultMessageID(run.RunID, step.StepKey, step.Attempt),
+		MessageID:       messageID,
 		ThreadID:        run.ThreadID,
-		RunID:           run.RunID,
+		RunID:           messageRunID,
 		DelegationID:    delegationID,
 		ParentMessageID: parentMessageID,
 		SenderType:      models.MessageSenderAgent,
@@ -1350,7 +1606,7 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	if result == nil {
 		return "", errors.New("A2A agent invoker returned an empty result")
 	}
-	if result.State != AgentInvocationStateCompleted {
+	if result.State != AgentInvocationStateAccepted && result.State != AgentInvocationStateCompleted {
 		return "", fmt.Errorf("target agent returned unsupported invocation state %q", result.State)
 	}
 	var raw json.RawMessage = json.RawMessage(result.OutputJSON)
@@ -1372,7 +1628,24 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	if err != nil {
 		return "", fmt.Errorf("encoding A2A agent result: %w", err)
 	}
+	if result.State == AgentInvocationStateAccepted {
+		return "", &agentInvocationAcceptedError{
+			TaskID: result.TaskID, DelegationID: stableA2AID("delegation", run.RunID, node.Key),
+			MessageID: stableA2AID("message", run.RunID, node.Key), SourceAgentID: source.ID,
+			TargetAgentID: target.ID, CapabilityCode: capability.CapabilityCode, OutputJSON: string(encoded),
+			CallbackTokenHash: callbackTokenHash(result.NotificationToken),
+		}
+	}
 	return string(encoded), nil
+}
+
+func callbackTokenHash(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func stableA2AID(kind, parentRunID, nodeKey string) string {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -41,6 +43,8 @@ type Config struct {
 	KafkaTopic                 string
 	KafkaRunTopic              string
 	KafkaRunGroupID            string
+	KafkaRunResumeTopic        string
+	KafkaRunResumeGroupID      string
 	JWTSecret                  string
 	RBACEnable                 bool
 	RBACBootstrapAdminUsername string
@@ -49,7 +53,7 @@ type Config struct {
 	ModelProviderDefault       string
 	ModelProviders             map[string]ModelProviderConfig
 	A2AClientRequestTimeout    time.Duration
-	A2AClientPollInterval      time.Duration
+	A2ACallbackBaseURL         string
 	A2AAuthRequired            bool
 	A2AAuthMaxClockSkew        time.Duration
 	A2ACredentials             map[string]string
@@ -88,6 +92,8 @@ func LoadConfig() error {
 		KafkaTopic:                 strings.TrimSpace(os.Getenv("KAFKA_TOPIC")),
 		KafkaRunTopic:              strings.TrimSpace(os.Getenv("KAFKA_RUN_TOPIC")),
 		KafkaRunGroupID:            strings.TrimSpace(os.Getenv("KAFKA_RUN_GROUP_ID")),
+		KafkaRunResumeTopic:        strings.TrimSpace(os.Getenv("KAFKA_RUN_RESUME_TOPIC")),
+		KafkaRunResumeGroupID:      strings.TrimSpace(os.Getenv("KAFKA_RUN_RESUME_GROUP_ID")),
 		RBACEnable:                 true,
 		RBACBootstrapAdminUsername: strings.TrimSpace(os.Getenv("RBAC_BOOTSTRAP_ADMIN_USERNAME")),
 		ModelScopeKey:              strings.TrimSpace(os.Getenv("MODELSCOPE_KEY")),
@@ -95,6 +101,7 @@ func LoadConfig() error {
 		ModelProviderDefault:       strings.ToLower(strings.TrimSpace(os.Getenv("MODEL_PROVIDER_DEFAULT"))),
 		ModelProviders:             make(map[string]ModelProviderConfig),
 		ServiceGovernanceEnabled:   true,
+		A2ACallbackBaseURL:         strings.TrimSpace(os.Getenv("A2A_CALLBACK_BASE_URL")),
 		A2AAuthRequired:            true,
 		A2ACredentials:             make(map[string]string),
 	}
@@ -121,12 +128,7 @@ func LoadConfig() error {
 	if err != nil {
 		return err
 	}
-	pollIntervalMilliseconds, err := loadIntEnv("A2A_CLIENT_POLL_INTERVAL_MILLISECONDS", 250)
-	if err != nil {
-		return err
-	}
 	appConfig.A2AClientRequestTimeout = time.Duration(requestTimeoutSeconds) * time.Second
-	appConfig.A2AClientPollInterval = time.Duration(pollIntervalMilliseconds) * time.Millisecond
 	if raw := strings.TrimSpace(os.Getenv("A2A_AUTH_REQUIRED")); raw != "" {
 		if appConfig.A2AAuthRequired, err = parseStrictBoolEnv("A2A_AUTH_REQUIRED", raw); err != nil {
 			return err
@@ -177,11 +179,20 @@ func LoadConfig() error {
 	if appConfig.ServerPort == "" {
 		appConfig.ServerPort = "8080"
 	}
+	if appConfig.A2ACallbackBaseURL == "" {
+		appConfig.A2ACallbackBaseURL = "http://127.0.0.1:" + appConfig.ServerPort
+	}
 	if appConfig.KafkaRunTopic == "" {
 		appConfig.KafkaRunTopic = "run_execute"
 	}
 	if appConfig.KafkaRunGroupID == "" {
 		appConfig.KafkaRunGroupID = "run-worker-group"
+	}
+	if appConfig.KafkaRunResumeTopic == "" {
+		appConfig.KafkaRunResumeTopic = "run_resume"
+	}
+	if appConfig.KafkaRunResumeGroupID == "" {
+		appConfig.KafkaRunResumeGroupID = "run-resume-worker-group"
 	}
 	if enableStr := strings.TrimSpace(os.Getenv("RBAC_ENABLE")); enableStr != "" {
 		appConfig.RBACEnable, err = parseStrictBoolEnv("RBAC_ENABLE", enableStr)
@@ -251,8 +262,14 @@ func (c *Config) ValidateStartup() error {
 		if c.A2AClientRequestTimeout == 0 {
 			c.A2AClientRequestTimeout = 30 * time.Second
 		}
-		if c.A2AClientPollInterval == 0 {
-			c.A2AClientPollInterval = 250 * time.Millisecond
+		if strings.TrimSpace(c.A2ACallbackBaseURL) == "" && strings.TrimSpace(c.ServerPort) != "" {
+			c.A2ACallbackBaseURL = "http://127.0.0.1:" + strings.TrimSpace(c.ServerPort)
+		}
+		if strings.TrimSpace(c.KafkaRunResumeTopic) == "" {
+			c.KafkaRunResumeTopic = "run_resume"
+		}
+		if strings.TrimSpace(c.KafkaRunResumeGroupID) == "" {
+			c.KafkaRunResumeGroupID = "run-resume-worker-group"
 		}
 		if c.A2AAuthMaxClockSkew == 0 {
 			c.A2AAuthMaxClockSkew = 5 * time.Minute
@@ -290,8 +307,10 @@ func (c *Config) ValidateStartup() error {
 	if c.A2AClientRequestTimeout <= 0 {
 		problems = append(problems, "A2A_CLIENT_REQUEST_TIMEOUT_SECONDS must be greater than 0")
 	}
-	if c.A2AClientPollInterval <= 0 {
-		problems = append(problems, "A2A_CLIENT_POLL_INTERVAL_MILLISECONDS must be greater than 0")
+	if strings.TrimSpace(c.A2ACallbackBaseURL) == "" {
+		problems = append(problems, "A2A_CALLBACK_BASE_URL is required")
+	} else if err := validateA2ACallbackBaseURL(c.A2ACallbackBaseURL); err != nil {
+		problems = append(problems, fmt.Sprintf("A2A_CALLBACK_BASE_URL is invalid: %v", err))
 	}
 	if c.A2AAuthMaxClockSkew <= 0 {
 		problems = append(problems, "A2A_AUTH_MAX_CLOCK_SKEW_SECONDS must be greater than 0")
@@ -304,6 +323,12 @@ func (c *Config) ValidateStartup() error {
 	}
 	if strings.TrimSpace(c.KafkaRunGroupID) == "" {
 		problems = append(problems, "KAFKA_RUN_GROUP_ID is required")
+	}
+	if strings.TrimSpace(c.KafkaRunResumeTopic) == "" {
+		problems = append(problems, "KAFKA_RUN_RESUME_TOPIC is required")
+	}
+	if strings.TrimSpace(c.KafkaRunResumeGroupID) == "" {
+		problems = append(problems, "KAFKA_RUN_RESUME_GROUP_ID is required")
 	}
 	if strings.TrimSpace(c.JWTSecret) == "" {
 		problems = append(problems, "JWT_SECRET is required")
@@ -320,6 +345,41 @@ func (c *Config) ValidateStartup() error {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validateA2ACallbackBaseURL(rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("parse URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return errors.New("must be an absolute URL")
+	}
+	if parsed.User != nil {
+		return errors.New("must not contain user info")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("query and fragment are not allowed")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(parsed.Hostname()) {
+			return nil
+		}
+		return errors.New("remote callback URL must use HTTPS")
+	default:
+		return fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseA2ACredentials(raw string) (map[string]string, error) {

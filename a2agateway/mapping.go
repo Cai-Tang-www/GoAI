@@ -56,6 +56,22 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 	if err != nil {
 		return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "message metadata is invalid")
 	}
+	var pushConfig *services.DelegationPushConfig
+	if request.Config != nil && request.Config.PushConfig != nil {
+		protocolConfig := request.Config.PushConfig
+		if protocolConfig.Auth != nil {
+			return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "push config authentication is managed by the GoAI A2A machine identity")
+		}
+		if strings.TrimSpace(string(protocolConfig.TaskID)) != childRunID {
+			return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "push config taskId must match message taskId")
+		}
+		pushConfig = &services.DelegationPushConfig{
+			ConfigID:    strings.TrimSpace(protocolConfig.ID),
+			TaskID:      childRunID,
+			CallbackURL: strings.TrimSpace(protocolConfig.URL),
+			Token:       strings.TrimSpace(protocolConfig.Token),
+		}
+	}
 	return services.AcceptDelegationCommand{
 		SourceAgentCode:       extension.SourceAgentCode,
 		TargetAgentCode:       targetAgent,
@@ -68,6 +84,7 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 		RequestMessageID:      message.ID,
 		Input:                 input,
 		MetadataJSON:          string(metadata),
+		PushConfig:            pushConfig,
 	}, nil
 }
 

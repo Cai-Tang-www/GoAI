@@ -24,6 +24,7 @@ var (
 	errDelegationConflict  = errors.New("delegation already exists with different request")
 	errInvalidDelegation   = errors.New("invalid delegation request")
 	errDelegationForbidden = errors.New("delegation access forbidden")
+	errPushConfigNotFound  = errors.New("A2A push config not found")
 )
 
 // ErrDelegationNotFound 返回委派记录不存在的统一 sentinel error。
@@ -41,6 +42,17 @@ func ErrInvalidDelegation() error { return errInvalidDelegation }
 // ErrDelegationForbidden 返回认证 Agent 无权访问委派的统一 sentinel error。
 func ErrDelegationForbidden() error { return errDelegationForbidden }
 
+// ErrPushConfigNotFound 返回 A2A Push Notification 配置不存在的统一 sentinel error。
+func ErrPushConfigNotFound() error { return errPushConfigNotFound }
+
+// DelegationPushConfig 是协议 Gateway 映射到 Runtime 的 Push Notification 配置。
+type DelegationPushConfig struct {
+	ConfigID    string
+	TaskID      string
+	CallbackURL string
+	Token       string
+}
+
 // AcceptDelegationCommand 是 A2A Gateway 映射到 Runtime 的协议无关委派命令。
 type AcceptDelegationCommand struct {
 	SourceAgentCode       string
@@ -54,6 +66,7 @@ type AcceptDelegationCommand struct {
 	RequestMessageID      string
 	Input                 json.RawMessage
 	MetadataJSON          string
+	PushConfig            *DelegationPushConfig
 }
 
 // DelegationResult 返回已接受委派及其目标 Child Run。
@@ -106,6 +119,11 @@ type DelegationRuntime interface {
 	DescribeAgent(context.Context, string) (*AgentDescriptor, error)
 	AcceptDelegation(context.Context, AcceptDelegationCommand) (*DelegationResult, error)
 	DelegationSnapshot(context.Context, string, string, string) (*DelegationSnapshot, error)
+	CreateDelegationPushConfig(context.Context, string, string, DelegationPushConfig) (*DelegationPushConfig, error)
+	GetDelegationPushConfig(context.Context, string, string, string, string) (*DelegationPushConfig, error)
+	ListDelegationPushConfigs(context.Context, string, string, string) ([]DelegationPushConfig, error)
+	DeleteDelegationPushConfig(context.Context, string, string, string, string) error
+	AcceptDelegationCallback(context.Context, DelegationCallbackCommand) error
 	ReconcileDelegation(context.Context, string) error
 }
 
@@ -252,6 +270,17 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	if metadataJSON == "" {
 		metadataJSON = "{}"
 	}
+	var pushConfig *DelegationPushConfig
+	if command.PushConfig != nil {
+		normalized, normalizeErr := normalizeDelegationPushConfig(*command.PushConfig)
+		if normalizeErr != nil {
+			return nil, normalizeErr
+		}
+		if normalized.TaskID != childRunID {
+			return nil, fmt.Errorf("%w: push config task_id does not match child run", errInvalidDelegation)
+		}
+		pushConfig = &normalized
+	}
 
 	var sourceAgent, targetAgent models.Agent
 	if err := s.database.WithContext(ctx).Where("agent_code = ? AND status = ?", sourceCode, models.AgentStatusActive).First(&sourceAgent).Error; err != nil {
@@ -317,6 +346,9 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	if delegationID == "" {
 		delegationID = newPrefixedID("dlg")
 	}
+	if pushConfig != nil && pushConfig.ConfigID == "" {
+		pushConfig.ConfigID = delegationID
+	}
 	var createdDelegation *models.Delegation
 	hook := func(tx *gorm.DB, run *models.Run, _ *models.Agent) error {
 		if _, err := ensureThread(tx, threadID, ownerUserID); err != nil {
@@ -357,6 +389,11 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 		if err := tx.Create(delegation).Error; err != nil {
 			return fmt.Errorf("creating delegation: %w", err)
 		}
+		if pushConfig != nil {
+			if err := createDelegationPushConfig(tx, delegation, *pushConfig); err != nil {
+				return err
+			}
+		}
 		createdDelegation = delegation
 		return nil
 	}
@@ -389,6 +426,15 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 		}
 		if existing.SourceAgentID != sourceAgent.ID || existing.TargetAgentID != targetAgent.ID || existing.CapabilityCode != capabilityCode || existing.ParentRunID != parentRunID || existing.RequestMessageID != messageID || existing.InputJSON != inputJSON || existingMessage.ThreadID != threadID || existingMessage.SenderID != sourceCode || existingMessage.ReceiverID != targetCode || existingMessage.MessageType != models.MessageTypeDelegation || existingMessage.ContentType != "application/json" || existingMessage.ContentJSON != inputJSON || existingMessage.MetadataJSON != metadataJSON || (requestedDelegationID != "" && existing.DelegationID != delegationID) || (requestedTraceID != "" && existing.TraceID != traceID) {
 			return nil, errDelegationConflict
+		}
+		if pushConfig != nil {
+			var existingPush models.A2APushConfig
+			if err := s.database.WithContext(ctx).Where("task_id = ? AND config_id = ?", pushConfig.TaskID, pushConfig.ConfigID).First(&existingPush).Error; err != nil {
+				return nil, errDelegationConflict
+			}
+			if existingPush.DelegationID != existing.DelegationID || existingPush.SourceAgentID != sourceAgent.ID || existingPush.TargetAgentID != targetAgent.ID || existingPush.CallbackURL != pushConfig.CallbackURL || existingPush.Token != pushConfig.Token {
+				return nil, errDelegationConflict
+			}
 		}
 		createdDelegation = &existing
 	}
@@ -462,76 +508,125 @@ func (s *RuntimeService) DelegationSnapshot(ctx context.Context, targetAgentCode
 	return snapshotResult, nil
 }
 
-// ReconcileDelegation 将 Child Run 终态收敛为 Delegation 终态，并持久化结果或失败消息。
+// ReconcileDelegation 将 Child Run 终态收敛为 Delegation 终态，并在提交后发送 A2A callback。
 func (s *RuntimeService) ReconcileDelegation(ctx context.Context, childRunID string) (err error) {
 	childID := strings.TrimSpace(childRunID)
 	observedCtx, span, startedAt := startServiceObservation(ctx, s.observability, "delegation.reconcile", childID, "", "")
 	ctx = observedCtx
 	status := "success"
-	delegationID := ""
-	threadID := ""
-	parentRunID := ""
+	var reconciled models.Delegation
+	terminal := false
 	defer func() {
 		if err != nil {
 			status = "error"
 		}
-		finishServiceObservation(s.observability, observedCtx, span, "reconcile_delegation", status, startedAt, childID, threadID, delegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
+		finishServiceObservation(s.observability, observedCtx, span, "reconcile_delegation", status, startedAt, childID, reconciled.ThreadID, reconciled.DelegationID, func(metrics *observability.Metrics, _, status string, elapsed time.Duration) {
 			metrics.ObserveDelegation(status)
-		}, err,
-			slog.String("parent_run_id", parentRunID),
-			slog.String("child_run_id", childID),
-		)
+		}, err, slog.String("parent_run_id", reconciled.ParentRunID), slog.String("child_run_id", childID))
 	}()
-	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var delegation models.Delegation
-		if err := tx.Where("child_run_id = ?", childID).First(&delegation).Error; err != nil {
+	err = s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("child_run_id = ?", childID).First(&reconciled).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
 			return err
 		}
-		delegationID = delegation.DelegationID
-		threadID = delegation.ThreadID
-		parentRunID = delegation.ParentRunID
 		var run models.Run
-		if err := tx.Where("run_id = ?", delegation.ChildRunID).First(&run).Error; err != nil {
+		if err := tx.Where("run_id = ?", reconciled.ChildRunID).First(&run).Error; err != nil {
 			return err
 		}
 		nextStatus := delegationStatusForRun(run.Status)
-		if nextStatus == "" || nextStatus == delegation.Status {
+		if nextStatus == "" {
 			return nil
 		}
-		if !runstate.IsValidDelegationTransition(delegation.Status, nextStatus) {
-			return fmt.Errorf("invalid delegation status transition: %s -> %s", delegation.Status, nextStatus)
+		if nextStatus != reconciled.Status {
+			if !runstate.IsValidDelegationTransition(reconciled.Status, nextStatus) {
+				return fmt.Errorf("invalid delegation status transition: %s -> %s", reconciled.Status, nextStatus)
+			}
+			updates := map[string]any{"status": nextStatus, "error_message": run.ErrorMessage}
+			if run.StartedAt != nil {
+				updates["started_at"] = run.StartedAt
+			}
+			if run.FinishedAt != nil {
+				updates["finished_at"] = run.FinishedAt
+			}
+			claim := tx.Model(&models.Delegation{}).Where("id = ? AND status = ?", reconciled.ID, reconciled.Status).Updates(updates)
+			if claim.Error != nil {
+				return claim.Error
+			}
+			if claim.RowsAffected == 0 {
+				return nil
+			}
+			reconciled.Status = nextStatus
+			reconciled.ErrorMessage = run.ErrorMessage
 		}
-		updates := map[string]any{"status": nextStatus, "error_message": run.ErrorMessage}
-		if run.StartedAt != nil {
-			updates["started_at"] = run.StartedAt
-		}
-		if run.FinishedAt != nil {
-			updates["finished_at"] = run.FinishedAt
-		}
-		claim := tx.Model(&models.Delegation{}).
-			Where("id = ? AND status = ?", delegation.ID, delegation.Status).
-			Updates(updates)
-		if claim.Error != nil {
-			return claim.Error
-		}
-		if claim.RowsAffected == 0 {
+		terminal = nextStatus == models.DelegationStatusSucceeded || nextStatus == models.DelegationStatusFailed || nextStatus == models.DelegationStatusCancelled
+		if !terminal {
 			return nil
 		}
-		if nextStatus != models.DelegationStatusSucceeded && nextStatus != models.DelegationStatusFailed && nextStatus != models.DelegationStatusCancelled {
-			return nil
-		}
-
-		message, outputJSON, err := ensureDelegationResultMessage(tx, &delegation, &run)
+		message, outputJSON, err := ensureDelegationResultMessage(tx, &reconciled, &run)
 		if err != nil {
 			return err
 		}
-		return tx.Model(&models.Delegation{}).
-			Where("id = ?", delegation.ID).
-			Updates(map[string]any{"result_message_id": message.MessageID, "output_json": outputJSON}).Error
+		reconciled.ResultMessageID = message.MessageID
+		reconciled.OutputJSON = outputJSON
+		return tx.Model(&models.Delegation{}).Where("id = ?", reconciled.ID).Updates(map[string]any{"result_message_id": message.MessageID, "output_json": outputJSON}).Error
 	})
+	if err != nil || !terminal || s.callbackSender == nil {
+		return err
+	}
+	return s.sendDelegationCallbacks(ctx, &reconciled)
+}
+
+func (s *RuntimeService) sendDelegationCallbacks(ctx context.Context, delegation *models.Delegation) error {
+	var configs []models.A2APushConfig
+	if err := s.database.WithContext(ctx).Where("delegation_id = ? AND status IN ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", delegation.DelegationID, []string{models.A2APushStatusPending, models.A2APushStatusFailed}, time.Now()).Find(&configs).Error; err != nil {
+		return err
+	}
+	if len(configs) == 0 {
+		return nil
+	}
+	var target models.Agent
+	if err := s.database.WithContext(ctx).First(&target, "id = ?", delegation.TargetAgentID).Error; err != nil {
+		return err
+	}
+	credentialRef := ""
+	if err := s.database.WithContext(ctx).Model(&models.AgentEndpoint{}).Where("agent_id = ? AND protocol = ? AND status = ?", target.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").Pluck("credential_ref", &credentialRef).Error; err != nil {
+		return err
+	}
+	state := DelegationCallbackStateSucceeded
+	if delegation.Status == models.DelegationStatusFailed {
+		state = DelegationCallbackStateFailed
+	}
+	if delegation.Status == models.DelegationStatusCancelled {
+		state = DelegationCallbackStateCancelled
+	}
+	var joined error
+	for i := range configs {
+		config := &configs[i]
+		delivery := DelegationCallbackDelivery{CallbackURL: config.CallbackURL, NotificationToken: config.Token, SenderAgentCode: target.AgentCode, SenderCredentialRef: credentialRef, TaskID: config.TaskID, ThreadID: delegation.ThreadID, State: state, OutputJSON: delegation.OutputJSON, ErrorMessage: delegation.ErrorMessage, TraceID: delegation.TraceID}
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runDispatchTimeout)
+		err := s.callbackSender.SendDelegationCallback(sendCtx, delivery)
+		cancel()
+		updates := map[string]any{"attempt_count": gorm.Expr("attempt_count + ?", 1)}
+		if err != nil {
+			next := time.Now().Add(time.Minute)
+			updates["status"] = models.A2APushStatusFailed
+			updates["last_error"] = err.Error()
+			updates["next_attempt_at"] = next
+			joined = errors.Join(joined, err)
+		} else {
+			now := time.Now()
+			updates["status"] = models.A2APushStatusSent
+			updates["last_error"] = ""
+			updates["sent_at"] = now
+			updates["next_attempt_at"] = nil
+		}
+		if updateErr := s.database.WithContext(context.WithoutCancel(ctx)).Model(&models.A2APushConfig{}).Where("id = ?", config.ID).Updates(updates).Error; updateErr != nil {
+			joined = errors.Join(joined, updateErr)
+		}
+	}
+	return joined
 }
 
 func delegationStatusForRun(status string) string {
@@ -582,9 +677,9 @@ func ensureDelegationResultMessage(tx *gorm.DB, delegation *models.Delegation, r
 		return nil, "", err
 	}
 	message := &models.Message{
-		MessageID:       newMessageID(),
+		MessageID:       delegationResultMessageID(delegation.DelegationID),
 		ThreadID:        delegation.ThreadID,
-		RunID:           run.RunID,
+		RunID:           delegation.ParentRunID,
 		DelegationID:    delegation.DelegationID,
 		ParentMessageID: delegation.RequestMessageID,
 		SenderType:      models.MessageSenderAgent,
@@ -597,10 +692,10 @@ func ensureDelegationResultMessage(tx *gorm.DB, delegation *models.Delegation, r
 		MetadataJSON:    "{}",
 		Status:          models.MessageStatusDelivered,
 	}
-	if err := tx.Create(message).Error; err != nil {
+	if err := tx.Where("message_id = ?", message.MessageID).FirstOrCreate(message).Error; err != nil {
 		return nil, "", err
 	}
-	return message, outputJSON, nil
+	return message, message.ContentJSON, nil
 }
 
 var _ DelegationRuntime = (*RuntimeService)(nil)

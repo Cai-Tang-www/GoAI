@@ -63,9 +63,11 @@ type Runtime interface {
 
 // RuntimeService 协调 Thread、Message 与 Run 的原子创建和查询。
 type RuntimeService struct {
-	database      *gorm.DB
-	runService    *RunService
-	observability *observability.Bundle
+	database        *gorm.DB
+	runService      *RunService
+	observability   *observability.Bundle
+	resumePublisher RunResumePublisher
+	callbackSender  DelegationCallbackSender
 }
 
 // RuntimeServiceOption 配置 RuntimeService 的可选运行时依赖。
@@ -78,6 +80,28 @@ func WithRuntimeObservability(bundle *observability.Bundle) RuntimeServiceOption
 			return errors.New("configuring runtime service: observability bundle is nil")
 		}
 		service.observability = bundle
+		return nil
+	}
+}
+
+// WithRunResumePublisher 注入 Parent Run 恢复事件发布边界。
+func WithRunResumePublisher(publisher RunResumePublisher) RuntimeServiceOption {
+	return func(service *RuntimeService) error {
+		if publisher == nil {
+			return errors.New("configuring runtime service: resume publisher is nil")
+		}
+		service.resumePublisher = publisher
+		return nil
+	}
+}
+
+// WithDelegationCallbackSender 注入 A2A 终态 callback 投递边界。
+func WithDelegationCallbackSender(sender DelegationCallbackSender) RuntimeServiceOption {
+	return func(service *RuntimeService) error {
+		if sender == nil {
+			return errors.New("configuring runtime service: callback sender is nil")
+		}
+		service.callbackSender = sender
 		return nil
 	}
 }

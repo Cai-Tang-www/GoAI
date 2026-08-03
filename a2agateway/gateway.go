@@ -96,14 +96,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	authenticatedAgent := strings.TrimSpace(r.Header.Get(a2aauth.HeaderAgentCode))
 	if g.authRequired {
-		authenticatedAgent, err := g.authenticate(r)
+		var err error
+		authenticatedAgent, err = g.authenticate(r)
 		if err != nil {
 			g.logSecurityRejection(r.Context(), targetAgent, r.Header.Get(a2aauth.HeaderAgentCode), authenticationFailureReason(err))
 			writeAuthenticationError(w, http.StatusUnauthorized, "A2A authentication failed")
 			return
 		}
 		ctx = a2aauth.WithAuthenticatedAgent(ctx, authenticatedAgent)
+	}
+	if taskID, callback := callbackTaskID(protocolPath); callback {
+		g.serveTaskCallback(ctx, w, r, targetAgent, authenticatedAgent, taskID)
+		return
 	}
 
 	cloned := r.Clone(ctx)
@@ -295,12 +301,14 @@ func buildAgentCardWithAuthentication(descriptor *services.AgentDescriptor, auth
 		Description:         descriptor.Description,
 		Version:             "1.0",
 		SupportedInterfaces: interfaces,
-		Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{
-			URI:         DelegationExtensionURI,
-			Description: "GoAI multi-agent delegation metadata and capability contracts",
-			Required:    true,
-			Params:      map[string]any{"capabilities": contracts},
-		}}},
+		Capabilities: a2a.AgentCapabilities{
+			PushNotifications: true,
+			Extensions: []a2a.AgentExtension{{
+				URI:         DelegationExtensionURI,
+				Description: "GoAI multi-agent delegation metadata and capability contracts",
+				Required:    true,
+				Params:      map[string]any{"capabilities": contracts},
+			}}},
 		DefaultInputModes:  []string{"text/plain", "application/json"},
 		DefaultOutputModes: []string{"application/json"},
 		Skills:             skills,
