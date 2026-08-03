@@ -236,7 +236,7 @@ A2A 的约束：
 - 结果回流
 - Replay
 - 本地 loopback HTTP / 远程 HTTPS 的 A2A 出站调用
-- Agent Card discovery、Capability 校验与 Task polling
+- Agent Card discovery、Capability/Push Notification 校验、异步委派与 callback 驱动恢复
 #### D. 编排能力
 - Eino Graph 接入
 - Workflow DSL 基础校验
@@ -461,14 +461,15 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - RunStep 与 Result Message 可通过官方 SSE 事件回传
 - 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放
 - 已引入平台自己的 Eino Graph executor，Runtime 可解析、校验并串行执行 Agent Workflow，将节点输入输出、重试和终态持久化为 RunStep
-- Workflow 的 `agent` 节点通过官方 A2A Go SDK 发起 Agent Card discovery、HTTP+JSON `message:send` 和 Task polling；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
-- A2A Gateway 已将协议请求映射为内部 Thread、Message、Delegation 和 Child Run；目标 Agent 执行自己的 Eino Graph 后，结果通过 A2A Task/Artifact 返回 Parent Run，并继续回流为 AG-UI SSE
+- Workflow 的 `agent` 节点通过官方 A2A Go SDK 完成 Agent Card discovery，并使用带 PushConfig 的 HTTP+JSON `message:send` 异步委派；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
+- A2A Gateway 已将协议请求映射为内部 Thread、Message、Delegation 和 Child Run；目标返回 accepted 后 Parent Run/RunStep 进入 `waiting_external` 并释放 Worker，目标 Agent 执行自己的 Eino Graph 后通过认证 callback 回流，源 Runtime 再经 Kafka `run_resume` 从持久化游标继续执行并回传 AG-UI SSE
+- callback、Result Message 与 resume 消息具备幂等收敛和持久化恢复能力，重复投递或进程重启不会重复执行后继节点
 - Agent Card 已发布 capability 版本及输入输出契约；V1 对 capability contract 使用稳定 JSON Schema 子集进行输入和终态输出校验
 
 ### 14.3 仍需扩展
 
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
-- callback 驱动的 Parent Run suspend/resume，替代当前节点内 Task polling
+- 多 Runtime 部署下 callback/resume 恢复扫描的分片与共享协调
 - 多 Child Run 并行 fan-out/fan-in 与聚合策略
 - MCP、AgentAsTool、多模态消息和远程 Agent 运维管理
 - 完整 Eval、成本分析和管理控制台

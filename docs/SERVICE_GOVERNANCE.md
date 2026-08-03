@@ -1,6 +1,6 @@
 # GoAI 服务治理
 
-更新时间：2026-08-01
+更新时间：2026-08-03
 
 GoAI 的服务治理属于 Infra 层，不改变 AG-UI、A2A、Thread、Run、Delegation 或 Workflow 的业务语义。它只保护协议入口和下游 HTTP 依赖，避免局部流量或依赖故障扩散到整个 Runtime。
 
@@ -39,9 +39,9 @@ Agent 优先读取 URL 路径参数 `agent_code`；`POST /api/runs` 没有路径
 受控 HTTP Client 只包裹出站依赖：
 
 - OpenAI-compatible Provider
-- A2A discovery、message send 和 task polling
+- A2A discovery、message send 和终态 callback 投递
 
-A2A 仍然通过官方 A2A HTTP+JSON 协议通信。Kafka 只承载 `run_execute` 等异步运行消息，不能替代 Agent-to-Agent 协议，也不参与 Delegation 业务决策。
+A2A 仍然通过官方 A2A HTTP+JSON 协议通信。Kafka 只承载 `run_execute`、`run_resume` 等内部异步调度消息，不能替代 Agent-to-Agent 协议，也不参与 Delegation 业务决策。Parent Run 等待远端 Agent 时使用持久化 `waiting_external` 状态，不占用 Worker 进行 Task polling。
 
 熔断 target 使用 scheme、host、port 作为 key，因此同一个下游服务的不同路径共享保护状态，而不同下游服务互不影响。治理层只控制 transport，不修改 A2A 或 Provider 的请求字段。
 
@@ -87,7 +87,7 @@ CIRCUIT_MAX_TARGETS=1024
 - Redis 分布式限流
 - 跨实例熔断状态共享
 - 自动切换备用模型或备用 Agent
-- 业务级补偿、Run 恢复和 callback suspend/resume
+- 超出当前 callback/resume 发布恢复范围的业务级补偿与 step 级断点续跑
 - 完整 OTel span 级治理策略
 
 这些能力应在不改变 A2A/AG-UI 协议边界的前提下单独演进。
