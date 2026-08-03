@@ -72,7 +72,7 @@ func (h *RunHandler) GetRun(c *gin.Context) {
 		middlewares.AbortWithError(c, appErr)
 		return
 	}
-	run, err := h.service.GetRunByRunID(c.Request.Context(), userID, isAdmin, runID)
+	run, err := h.service.GetRunDetailByRunID(c.Request.Context(), userID, isAdmin, runID)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return

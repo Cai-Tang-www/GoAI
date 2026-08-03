@@ -244,13 +244,14 @@ func (s *RuntimeService) publishDelegationResume(ctx context.Context, delegation
 	if s.resumePublisher == nil {
 		return errors.New("publishing run resume: publisher is nil")
 	}
-	claim := s.database.WithContext(context.WithoutCancel(ctx)).Model(&models.Delegation{}).
+	claimCtx, cancelClaim := runFailurePersistenceContext(ctx)
+	claim := s.database.WithContext(claimCtx).Model(&models.Delegation{}).
 		Where("id = ? AND resume_status IN ?", delegation.ID, []string{models.DelegationResumeStatusPending, models.DelegationResumeStatusPublishFailed}).
 		Updates(map[string]any{
 			"resume_status":        models.DelegationResumeStatusPublishing,
-			"resume_error":         "",
 			"resume_attempt_count": gorm.Expr("resume_attempt_count + ?", 1),
 		})
+	cancelClaim()
 	if claim.Error != nil {
 		return claim.Error
 	}
@@ -268,18 +269,22 @@ func (s *RuntimeService) publishDelegationResume(ctx context.Context, delegation
 	} else {
 		now := time.Now()
 		updates["resume_status"] = models.DelegationResumeStatusPublished
-		updates["resume_error"] = ""
 		updates["resume_published_at"] = now
 	}
-	persist := s.database.WithContext(context.WithoutCancel(ctx)).Model(&models.Delegation{}).
+	persistCtx, cancelPersist := runFailurePersistenceContext(ctx)
+	persist := s.database.WithContext(persistCtx).Model(&models.Delegation{}).
 		Where("id = ? AND resume_status = ?", delegation.ID, models.DelegationResumeStatusPublishing).
 		Updates(updates)
+	cancelPersist()
 	if persist.Error != nil {
 		return errors.Join(err, persist.Error)
 	}
 	if persist.RowsAffected == 0 {
 		var current models.Delegation
-		if loadErr := s.database.WithContext(context.WithoutCancel(ctx)).Select("resume_status").First(&current, "id = ?", delegation.ID).Error; loadErr != nil {
+		loadCtx, cancelLoad := runFailurePersistenceContext(ctx)
+		loadErr := s.database.WithContext(loadCtx).Select("resume_status").First(&current, "id = ?", delegation.ID).Error
+		cancelLoad()
+		if loadErr != nil {
 			return errors.Join(err, loadErr)
 		}
 		if current.ResumeStatus == models.DelegationResumeStatusClaimed || current.ResumeStatus == models.DelegationResumeStatusCompleted {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -87,15 +88,18 @@ type workflowNodeExecutor func(context.Context, *models.Run, WorkflowNode, int) 
 
 // RunService 协调 Run 持久化、入队、查询、回放和异步执行。
 type RunService struct {
-	database          *gorm.DB
-	publisher         RunEventPublisher
-	agentInvoker      AgentInvoker
-	graphExecutor     *einoexecutor.Executor
-	chatService       *ChatService
-	loopService       *LoopService
-	observability     *observability.Bundle
-	executeNode       workflowNodeExecutor
-	stepRetryBackoffs []time.Duration
+	database                 *gorm.DB
+	publisher                RunEventPublisher
+	agentInvoker             AgentInvoker
+	graphExecutor            *einoexecutor.Executor
+	chatService              *ChatService
+	loopService              *LoopService
+	observability            *observability.Bundle
+	executeNode              workflowNodeExecutor
+	stepRetryBackoffs        []time.Duration
+	resumeLeaseDuration      time.Duration
+	resumeHeartbeatInterval  time.Duration
+	resumePersistenceTimeout time.Duration
 }
 
 // NewRunService 使用显式数据库和事件发布器构造 RunService。
@@ -107,10 +111,13 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 		return nil, errors.New("creating run service: publisher is nil")
 	}
 	service := &RunService{
-		database:          database,
-		publisher:         publisher,
-		graphExecutor:     einoexecutor.New(),
-		stepRetryBackoffs: append([]time.Duration(nil), defaultStepRetryBackoffs...),
+		database:                 database,
+		publisher:                publisher,
+		graphExecutor:            einoexecutor.New(),
+		stepRetryBackoffs:        append([]time.Duration(nil), defaultStepRetryBackoffs...),
+		resumeLeaseDuration:      30 * time.Second,
+		resumeHeartbeatInterval:  10 * time.Second,
+		resumePersistenceTimeout: runFailurePersistenceTimeout,
 	}
 	service.executeNode = service.executeDefaultNode
 	for _, option := range options {
@@ -204,6 +211,25 @@ type CreateRunResponse struct {
 type RunMutationResult struct {
 	Run           *models.Run
 	IdempotentHit bool
+}
+
+// RunResumeState 描述管理端查询 Run 时可见的最近一次 Parent resume 状态。
+type RunResumeState struct {
+	DelegationID     string     `json:"delegation_id"`
+	Status           string     `json:"status"`
+	Error            string     `json:"error"`
+	PublishAttempts  int        `json:"publish_attempts"`
+	ExecutionAttempt int        `json:"execution_attempt"`
+	LeaseOwner       string     `json:"lease_owner"`
+	LeaseClaimedAt   *time.Time `json:"lease_claimed_at,omitempty"`
+	LeaseHeartbeatAt *time.Time `json:"lease_heartbeat_at,omitempty"`
+	LeaseExpiresAt   *time.Time `json:"lease_expires_at,omitempty"`
+}
+
+// RunDetail 在保持原 Run JSON 字段兼容的同时，附加可选的恢复租约信息。
+type RunDetail struct {
+	models.Run
+	Resume *RunResumeState `json:"resume,omitempty"`
 }
 
 // ValidateCreateRunRequest 校验 Run 创建请求的关键字段，避免非法输入进入执行主链路。
@@ -712,6 +738,38 @@ func (s *RunService) GetRunByRunID(ctx context.Context, userID uint64, isAdmin b
 	return run, nil
 }
 
+// GetRunDetailByRunID 返回 Run 及其最近一次可观测的 Parent resume 租约状态。
+func (s *RunService) GetRunDetailByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*RunDetail, error) {
+	run, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
+	if err != nil {
+		return nil, err
+	}
+	detail := &RunDetail{Run: *run}
+
+	var delegation models.Delegation
+	err = s.database.WithContext(ctx).
+		Where("parent_run_id = ? AND resume_status <> ?", run.RunID, models.DelegationResumeStatusNone).
+		Order("id DESC").First(&delegation).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return detail, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading run resume state: %w", err)
+	}
+	detail.Resume = &RunResumeState{
+		DelegationID:     delegation.DelegationID,
+		Status:           delegation.ResumeStatus,
+		Error:            delegation.ResumeError,
+		PublishAttempts:  delegation.ResumeAttemptCount,
+		ExecutionAttempt: delegation.ResumeExecutionAttempt,
+		LeaseOwner:       delegation.ResumeLeaseOwner,
+		LeaseClaimedAt:   delegation.ResumeLeaseClaimedAt,
+		LeaseHeartbeatAt: delegation.ResumeLeaseHeartbeatAt,
+		LeaseExpiresAt:   delegation.ResumeLeaseExpiresAt,
+	}
+	return detail, nil
+}
+
 func (s *RunService) GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.RunStep, error) {
 	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
@@ -892,7 +950,7 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 	return nil
 }
 
-// HandleRunResume 原子 claim waiting_external Parent Run，并从持久化后继节点继续执行。
+// HandleRunResume 通过带 fencing token 的租约恢复 Parent Run，并从持久化 checkpoint 继续执行。
 func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID string) error {
 	runID = strings.TrimSpace(runID)
 	delegationID = strings.TrimSpace(delegationID)
@@ -900,78 +958,106 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 		return errors.New("resuming run: run_id and delegation_id are required")
 	}
 
-	var run models.Run
-	var delegation models.Delegation
-	var callbackOutput string
-	claimed := false
-	err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("delegation_id = ? AND parent_run_id = ?", delegationID, runID).First(&delegation).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errRunNotFound
-			}
-			return err
-		}
-		if err := tx.Where("run_id = ?", runID).First(&run).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errRunNotFound
-			}
-			return err
-		}
-		if run.Status != models.RunStatusWaitingExternal {
-			return nil
-		}
-		if delegation.ResumeStatus == models.DelegationResumeStatusClaimed || delegation.ResumeStatus == models.DelegationResumeStatusCompleted {
-			return nil
-		}
-		var step models.RunStep
-		if err := tx.Where("run_id = ? AND step_key = ?", runID, delegation.ParentStepKey).Order("attempt DESC").First(&step).Error; err != nil {
-			return err
-		}
-		if step.Status != models.RunStepStatusSuccess {
-			return fmt.Errorf("resuming run %s: callback step %s is not successful", runID, step.StepKey)
-		}
-		callbackOutput = step.OutputJSON
-		claim := tx.Model(&models.Delegation{}).
-			Where("id = ? AND resume_status NOT IN ?", delegation.ID, []string{models.DelegationResumeStatusClaimed, models.DelegationResumeStatusCompleted}).
-			Updates(map[string]any{"resume_status": models.DelegationResumeStatusClaimed, "resume_error": ""})
-		if claim.Error != nil {
-			return claim.Error
-		}
-		if claim.RowsAffected != 1 {
-			return nil
-		}
-		if err := transitionRunStatus(ctx, tx, &run, models.RunStatusRunning, ""); err != nil {
-			return err
-		}
-		claimed = true
-		return nil
-	})
+	run, delegation, lease, claimed, err := s.claimRunResume(ctx, runID, delegationID)
 	if err != nil || !claimed {
 		return err
 	}
 
-	complete := func(outputJSON string) error {
-		if err := s.validateRunOutputContract(ctx, &run, outputJSON); err != nil {
-			return s.failResumedRun(ctx, &run, &delegation, err)
+	executeCtx, stopHeartbeat := s.startResumeLeaseHeartbeat(ctx, lease)
+	stopped := false
+	stopLease := func() error {
+		stopped = true
+		return stopHeartbeat()
+	}
+	defer func() {
+		if !stopped {
+			_ = stopLease()
 		}
-		if err := s.transitionRun(ctx, &run, models.RunStatusSuccess, ""); err != nil {
-			return s.failResumedRun(ctx, &run, &delegation, err)
+	}()
+
+	fail := func(operationErr error) error {
+		executionCause := context.Cause(executeCtx)
+		heartbeatErr := stopLease()
+		if executionCause != nil || heartbeatErr != nil || errors.Is(operationErr, errResumeLeaseLost) {
+			cause := errors.Join(operationErr, executionCause, heartbeatErr)
+			s.logResumeLease(executeCtx, slog.LevelWarn, "run resume execution yielded to recovery", lease, cause)
+			return nil
 		}
-		return s.completeDelegationResume(ctx, delegation.ID, "")
+		if operationErr == nil {
+			operationErr = errors.New("resumed run failed")
+		}
+		persisted, failureErr := s.failResumedRun(executeCtx, &run, &delegation, operationErr)
+		if !persisted && resumeExecutionShouldRecover(failureErr) {
+			s.logResumeLease(executeCtx, slog.LevelWarn, "run resume failure persistence lost lease", lease, failureErr)
+			return nil
+		}
+		return failureErr
+	}
+	completeDelegation := func() error {
+		executionCause := context.Cause(executeCtx)
+		heartbeatErr := stopLease()
+		if executionCause != nil || heartbeatErr != nil {
+			cause := errors.Join(executionCause, heartbeatErr)
+			s.logResumeLease(executeCtx, slog.LevelWarn, "run resume completion yielded to recovery", lease, cause)
+			return nil
+		}
+		if err := s.completeSuspendedResume(executeCtx, &run, &delegation); err != nil {
+			if resumeExecutionShouldRecover(err) {
+				s.logResumeLease(executeCtx, slog.LevelWarn, "delegation resume completion lost lease", lease, err)
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	completeRun := func(outputJSON string) error {
+		if err := s.validateRunOutputContract(executeCtx, &run, outputJSON); err != nil {
+			return fail(err)
+		}
+		executionCause := context.Cause(executeCtx)
+		heartbeatErr := stopLease()
+		if executionCause != nil || heartbeatErr != nil {
+			cause := errors.Join(executionCause, heartbeatErr)
+			s.logResumeLease(executeCtx, slog.LevelWarn, "run resume completion yielded to recovery", lease, cause)
+			return nil
+		}
+		if err := s.completeResumedRun(executeCtx, &run, &delegation); err != nil {
+			if resumeExecutionShouldRecover(err) {
+				s.logResumeLease(executeCtx, slog.LevelWarn, "run resume terminal write lost lease", lease, err)
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+
+	callbackOutput, err := s.loadResumeCallbackOutput(executeCtx, run.RunID, delegation.ParentStepKey)
+	if err != nil {
+		return fail(err)
 	}
 	if strings.TrimSpace(delegation.ResumeNodeKey) == "" {
-		return complete(callbackOutput)
+		return completeRun(callbackOutput)
+	}
+	if s.graphExecutor == nil {
+		return fail(errors.New("run service graph executor is nil"))
 	}
 
 	var workflow models.Workflow
-	if err := s.database.WithContext(ctx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
-		return s.failResumedRun(ctx, &run, &delegation, err)
+	if err := s.database.WithContext(executeCtx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
+		return fail(err)
 	}
 	def, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON)
 	if err != nil {
-		return s.failResumedRun(ctx, &run, &delegation, err)
+		return fail(err)
 	}
-	outputJSON, err := s.graphExecutor.ExecuteFrom(ctx, def, delegation.ResumeNodeKey, callbackOutput, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+	outputJSON, err := s.graphExecutor.ExecuteFrom(executeCtx, def, delegation.ResumeNodeKey, callbackOutput, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+		checkpointOutput, completed, checkpointErr := s.resumeNodeCheckpoint(nodeCtx, &run, node)
+		if checkpointErr != nil {
+			return "", checkpointErr
+		}
+		if completed {
+			return checkpointOutput, nil
+		}
 		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
 			return "", err
 		}
@@ -984,46 +1070,13 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 	if err != nil {
 		var suspended *runSuspendedError
 		if errors.As(err, &suspended) {
-			return s.completeDelegationResume(ctx, delegation.ID, "")
+			return completeDelegation()
 		}
-		return s.failResumedRun(ctx, &run, &delegation, err)
+		return fail(err)
 	}
-	return complete(outputJSON)
+	return completeRun(outputJSON)
 }
 
-func (s *RunService) completeDelegationResume(ctx context.Context, delegationID uint64, resumeError string) error {
-	persistCtx, cancel := runFailurePersistenceContext(ctx)
-	defer cancel()
-
-	result := s.database.WithContext(persistCtx).Model(&models.Delegation{}).
-		Where("id = ? AND resume_status = ?", delegationID, models.DelegationResumeStatusClaimed).
-		Updates(map[string]any{"resume_status": models.DelegationResumeStatusCompleted, "resume_error": resumeError})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 1 {
-		return nil
-	}
-
-	var current models.Delegation
-	if err := s.database.WithContext(persistCtx).Select("resume_status").First(&current, "id = ?", delegationID).Error; err != nil {
-		return err
-	}
-	if current.ResumeStatus == models.DelegationResumeStatusCompleted {
-		return nil
-	}
-	return fmt.Errorf("completing delegation resume: delegation is in status %q", current.ResumeStatus)
-}
-
-func (s *RunService) failResumedRun(ctx context.Context, run *models.Run, delegation *models.Delegation, cause error) error {
-	failErr := s.failClaimedRun(ctx, run.RunID, cause)
-	persistCtx, cancel := runFailurePersistenceContext(ctx)
-	defer cancel()
-	updateErr := s.completeDelegationResume(persistCtx, delegation.ID, cause.Error())
-	return errors.Join(failErr, updateErr)
-}
-
-// updateCurrentStep 单独提交当前节点，供协议 Gateway 实时观察执行进度。
 func workflowSuccessor(def *WorkflowDefinition, nodeKey string) (string, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	successor := ""
@@ -1040,22 +1093,29 @@ func workflowSuccessor(def *WorkflowDefinition, nodeKey string) (string, error) 
 }
 
 func (s *RunService) updateCurrentStep(ctx context.Context, runID, stepKey string) error {
-	result := s.database.WithContext(ctx).
-		Model(&models.Run{}).
-		Where("run_id = ? AND status = ?", runID, models.RunStatusRunning).
-		Update("current_step", strings.TrimSpace(stepKey))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("updating current step for run %s: run is not running", runID)
-	}
-	return nil
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
+		result := tx.Model(&models.Run{}).
+			Where("run_id = ? AND status = ?", runID, models.RunStatusRunning).
+			Update("current_step", strings.TrimSpace(stepKey))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("updating current step for run %s: run is not running", runID)
+		}
+		return nil
+	})
 }
 
 // transitionRun 使用短事务推进 Run 状态。
 func (s *RunService) transitionRun(ctx context.Context, run *models.Run, nextStatus, errMsg string) error {
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := transitionRunStatus(ctx, tx, run, nextStatus, errMsg); err != nil {
 			return err
 		}
@@ -1092,7 +1152,12 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 			}
 		}
 	}
-	for attempt := 1; attempt <= maxNodeRetries+1; attempt++ {
+	startAttempt, err := s.nextRunStepAttempt(ctx, run.RunID, node.Key)
+	if err != nil {
+		return "", err
+	}
+	for offset := 0; offset <= maxNodeRetries; offset++ {
+		attempt := startAttempt + offset
 		nodeRun := *run
 		nodeRun.InputJSON = nodeInput
 		step, err := s.startRunStep(ctx, &nodeRun, node, attempt)
@@ -1133,15 +1198,15 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 			if !isRetryableInvocationError(execErr) {
 				return "", execErr
 			}
-			if attempt > maxNodeRetries {
+			if offset >= maxNodeRetries {
 				break
 			}
 			if err := s.incrementRunRetry(ctx, run.RunID); err != nil {
 				return "", err
 			}
 			backoff := time.Duration(0)
-			if attempt-1 < len(s.stepRetryBackoffs) {
-				backoff = s.stepRetryBackoffs[attempt-1]
+			if offset < len(s.stepRetryBackoffs) {
+				backoff = s.stepRetryBackoffs[offset]
 			}
 			select {
 			case <-ctx.Done():
@@ -1181,6 +1246,9 @@ func (s *RunService) suspendRunForAgentInvocation(ctx context.Context, run *mode
 		return err
 	}
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusWaitingExternal, outputJSON, "", 0, nil); err != nil {
 			return err
 		}
@@ -1300,6 +1368,9 @@ func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node Wor
 		StartedAt:  &startedAt,
 	}
 	if err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := tx.Create(step).Error; err != nil {
 			return err
 		}
@@ -1333,6 +1404,9 @@ func (s *RunService) finishRunStep(ctx context.Context, run *models.Run, step *m
 		return err
 	}
 	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := transitionStepStatus(ctx, tx, step, status, normalizedOutput, errMsg, latencyMS, finishedAt); err != nil {
 			return err
 		}
@@ -1348,6 +1422,9 @@ func (s *RunService) completeRunStep(ctx context.Context, run *models.Run, step 
 	}
 	previousStep := *step
 	err = s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusSuccess, normalizedOutput, "", latencyMS, finishedAt); err != nil {
 			return err
 		}
@@ -1403,17 +1480,21 @@ func normalizeNodeOutput(outputJSON string) (string, error) {
 }
 
 func (s *RunService) incrementRunRetry(ctx context.Context, runID string) error {
-	result := s.database.WithContext(ctx).
-		Model(&models.Run{}).
-		Where("run_id = ? AND status = ?", runID, models.RunStatusRunning).
-		Update("retry_count", gorm.Expr("retry_count + ?", 1))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf("%w: run %s is no longer running", errInvalidRunTransition, runID)
-	}
-	return nil
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
+		result := tx.Model(&models.Run{}).
+			Where("run_id = ? AND status = ?", runID, models.RunStatusRunning).
+			Update("retry_count", gorm.Expr("retry_count + ?", 1))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("%w: run %s is no longer running", errInvalidRunTransition, runID)
+		}
+		return nil
+	})
 }
 
 // persistResultMessage 将节点输出中的文本结果写入当前事务，独立于 SSE 连接生命周期。

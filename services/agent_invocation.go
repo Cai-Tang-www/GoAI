@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"GoAI/einoexecutor"
 	"GoAI/observability"
@@ -88,6 +89,21 @@ func WithGraphExecutor(executor *einoexecutor.Executor) RunServiceOption {
 			return errors.New("configuring run service: graph executor is nil")
 		}
 		service.graphExecutor = executor
+		return nil
+	}
+}
+
+// WithRunResumeLease 配置 Parent Run 恢复执行的租约与心跳周期。
+func WithRunResumeLease(duration, heartbeat time.Duration) RunServiceOption {
+	return func(service *RunService) error {
+		if duration <= 0 {
+			return errors.New("configuring run service: resume lease duration must be positive")
+		}
+		if heartbeat <= 0 || heartbeat >= duration {
+			return errors.New("configuring run service: resume heartbeat must be positive and shorter than the lease")
+		}
+		service.resumeLeaseDuration = duration
+		service.resumeHeartbeatInterval = heartbeat
 		return nil
 	}
 }
