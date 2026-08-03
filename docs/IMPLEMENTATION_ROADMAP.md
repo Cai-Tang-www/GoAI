@@ -61,9 +61,9 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - callback/resume 发布状态、重复消息 no-op 与 RecoveryWorker 已覆盖进程重启恢复
 - Parent resume 使用带 heartbeat、expires_at 和递增 execution attempt fencing token 的执行租约，多实例并发只能有一个 worker 接管
 - 持久化 Workflow/Delegation 游标与成功 RunStep checkpoint 支持从 crash point 继续；遗留 running Step、再次 A2A 挂起和终态残留租约均可幂等收敛
+- **Issue #47 已落地**：显式 `agent_group` 支持多 Child Run fan-out/fan-in、`all`/`any`/`quorum` 聚合、部分失败收敛、group coordinator resume lease 和真实 A2A HTTP 多 Runtime 闭环
 
 后续补齐：
-- 多 Child Run fan-out/fan-in、结果聚合与部分失败策略
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - AG-UI `parentRunId` 分支和用户主动 resume
 - Supervisor / Router / Worker 协作策略
@@ -71,7 +71,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制
 - 已使用 Eino Graph 执行单个 Agent 内部的串行/可达 Workflow 节点
 - `agent` 节点必须经由 A2A Client 与目标 Agent Gateway 通信，不允许进程内 Service 直调
-- 后续扩展并行 DAG、条件分支、流式节点和节点级恢复
+- `agent_group` 是显式的并行能力边界；Parent Workflow 仍串行，后续再扩展任意并行 DAG、条件分支、流式节点和节点级恢复
 
 ### 9. Replay / Loop / Trace
 - Thread Replay

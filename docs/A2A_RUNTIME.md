@@ -162,12 +162,12 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 
 ## 当前限制
 
-- 当前只支持串行 Workflow 执行，不支持多个 Agent 子任务 fan-out/fan-in、并行聚合或部分失败策略。
+- Parent Workflow 默认按拓扑顺序串行执行；显式 `agent_group` 节点支持多个 Agent 子任务 fan-out/fan-in，并提供 `all`、`any`、`quorum` 聚合和部分失败收敛。每个 group member 都通过 A2A HTTP(S) 建立独立 Delegation、Child Run、A2A Task 和 Message；任意并行 DAG、主动取消剩余远程 Child Task 仍不在当前范围。
 - A2A 业务请求默认使用来源 Agent 自身 Endpoint 的 `credential_ref` 解析 HMAC-SHA256 密钥；Gateway 校验签名、时间窗、nonce 和来源身份，Agent Card discovery 公开且不泄露凭据。
 - V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
 - 尚未实现 mTLS/OIDC、跨副本共享 nonce store、AG-UI `parentRunId` 分支和用户主动 resume。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，但不改变现有 A2A 契约。
-- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow 执行；后续并行、条件和流式能力仍必须复用本 A2A 边界。
+- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow 与显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
 
 ## 测试契约
 

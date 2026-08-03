@@ -366,7 +366,7 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 
 ## 8. Compatibility and Current Limits
 
-- V1 只做文本消息和 callback 驱动的单 Child suspend/resume，不做多模态、A2A Cancel、多个 Child Run fan-out/fan-in 或部分失败聚合。
+- V1 只做文本消息和 callback 驱动的 Child suspend/resume；显式 `agent_group` 已支持多个 Child Run 的 `all`、`any`、`quorum` fan-out/fan-in 和部分失败聚合。不在当前范围内的是多模态、A2A Cancel、任意并行 DAG 和主动取消剩余远程 Child Task。
 - AG-UI `parentRunId` 分支和用户主动 resume 尚未开放；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，不改变当前协议字段。
 - A2A 业务请求必须携带 `Authorization`、`X-GoAI-Agent-Code`、`X-GoAI-Timestamp`、`X-GoAI-Nonce`、`X-GoAI-Content-SHA256`；来源身份必须匹配委派 metadata，Task 查询仅允许委派来源 Agent。

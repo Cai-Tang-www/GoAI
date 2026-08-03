@@ -118,16 +118,18 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Push Notification callback、Child Run、Task 状态查询与结果 Artifact 回流
 - Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、带 PushConfig 的 `message:send` 和 accepted 结果收敛
 - Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` 节点统一交给 A2A Client 委派
+- `agent_group` fan-out/fan-in：显式把一个 Workflow 节点分派给多个 Agent，每个成员都创建独立 Delegation、Child Run、A2A Task 和 Message
 - 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路
 - A2A 调用使用稳定的 TaskID/MessageID/DelegationID，节点重试不会重复创建协议任务，并透传 `traceId` 关联父子 Run
 - Target 返回 accepted 后，Parent Run 与当前 RunStep 持久化为 `waiting_external`，释放执行 Worker，不进行 Task polling
 - Target 终态通过认证 A2A callback 回流；Runtime 幂等落库后发布 Kafka `run_resume`，Resume Worker 原子 claim 并从持久化游标继续 Eino Graph
 - callback 与 resume 发布失败由 RecoveryWorker 扫描恢复，重复 callback、重复 Kafka 消息和进程重启不会重复执行后继节点
 - Parent Run resume 使用带 owner、heartbeat、expires_at 与 fencing attempt 的执行租约；过期租约可由新 Worker 原子接管，并根据成功 RunStep checkpoint 跳过已完成节点
+- `agent_group` 支持 `all`、`any`、`quorum` 三种 fan-in 策略；成员通过 A2A HTTP(S) 并行委派，结果回流后由 group coordinator 统一恢复 Parent Run
 
 ### 在建
 
-- 多 Child Run 并行执行、结果聚合与部分失败策略
+- 任意并行 DAG、条件分支、流式节点和节点级恢复
 - 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
 - 更复杂的 Eino Graph 能力扩展：并行 DAG、条件分支、流式节点和节点级恢复
 - Loop / Trace / Replay / Eval / Cost 的完整观测与评估能力
@@ -213,14 +215,16 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
     "capabilityCode": "write",
     "parentRunId": "run-parent",
     "traceId": "trace-parent",
-    "delegationId": "dlg-parent"
+    "delegationId": "dlg-parent",
+    "delegationGroupId": "group-parent",
+    "groupMemberKey": "security"
   }
 }
 ```
 
 `message:send` 会把协议请求映射为内部 `Thread + request Message + Delegation + Child Run`，并在事务提交后投递 Child Run。重复发送相同 A2A 请求会返回同一个 Child Run；复用相同标识但改变请求内容会返回冲突。Child Run 完成后，Runtime 将结果写为目标 Agent 返回给源 Agent 的 Result Message；A2A Task 查询会把结果映射为 Artifact，失败响应不会暴露 Provider 或数据库原始错误。
 
-当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，使用官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。Kafka 只承担内部恢复调度，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。当前尚未支持多个 Child Run 的并行聚合。
+当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，使用官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。`agent_group` 是显式的多 Agent 并行边界：每个成员都通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum` 聚合及失败收敛；group coordinator 负责一次性恢复 Parent Run。Kafka 只承担内部 `run_execute/run_resume` 调度与恢复，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。Parent Workflow 仍保持串行，只有 `agent_group` 节点内部允许 fan-out/fan-in。
 
 > 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；远程 Endpoint 仍必须使用 HTTPS。
 

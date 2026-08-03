@@ -463,6 +463,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - 已引入平台自己的 Eino Graph executor，Runtime 可解析、校验并串行执行 Agent Workflow，将节点输入输出、重试和终态持久化为 RunStep
 - Workflow 的 `agent` 节点通过官方 A2A Go SDK 完成 Agent Card discovery，并使用带 PushConfig 的 HTTP+JSON `message:send` 异步委派；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
 - A2A Gateway 已将协议请求映射为内部 Thread、Message、Delegation 和 Child Run；目标返回 accepted 后 Parent Run/RunStep 进入 `waiting_external` 并释放 Worker，目标 Agent 执行自己的 Eino Graph 后通过认证 callback 回流，源 Runtime 再经 Kafka `run_resume` 从持久化游标继续执行并回传 AG-UI SSE
+- `agent_group` 已实现显式多 Agent fan-out/fan-in：每个成员通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum`，group coordinator 负责聚合结果和恢复 Parent Run；late callback 仅更新审计，不改变已推进的 Parent checkpoint
 - callback、Result Message 与 resume 消息具备幂等收敛和持久化恢复能力，重复投递或进程重启不会重复执行后继节点
 - Agent Card 已发布 capability 版本及输入输出契约；V1 对 capability contract 使用稳定 JSON Schema 子集进行输入和终态输出校验
 
@@ -470,7 +471,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - 多 Runtime 部署下 callback/resume 恢复扫描的分片与共享协调
-- 多 Child Run 并行 fan-out/fan-in 与聚合策略
+- 任意并行 DAG、主动取消剩余远程 Child Task 与更复杂的跨节点补偿策略
 - MCP、AgentAsTool、多模态消息和远程 Agent 运维管理
 - 完整 Eval、成本分析和管理控制台
 
