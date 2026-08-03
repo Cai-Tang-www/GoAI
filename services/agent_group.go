@@ -13,6 +13,7 @@ import (
 	"GoAI/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type preparedAgentGroupMember struct {
@@ -33,7 +34,8 @@ type agentGroupInvocationOutcome struct {
 }
 
 type agentGroupDispatchError struct {
-	errors []error
+	groupID string
+	errors  []error
 }
 
 func (e *agentGroupDispatchError) Error() string {
@@ -147,7 +149,7 @@ func (s *RunService) executeAgentGroupNode(ctx context.Context, run *models.Run,
 		return "", &agentGroupTerminalError{status: decision.Status}
 	}
 	if len(dispatchErrs) > 0 {
-		return "", &agentGroupDispatchError{errors: dispatchErrs}
+		return "", &agentGroupDispatchError{groupID: groupID, errors: dispatchErrs}
 	}
 	coordinator := delegations[0]
 	for index := range delegations {
@@ -384,4 +386,84 @@ func (s *RunService) persistAgentGroupDecision(ctx context.Context, groupID stri
 		updates["finished_at"] = now
 	}
 	return s.database.WithContext(ctx).Model(&models.DelegationGroup{}).Where("group_id = ?", groupID).Updates(updates).Error
+}
+
+// finalizeAgentGroupDispatchFailure 在节点重试耗尽后终结未完成的委派，避免 Group 永久停留在 waiting。
+func (s *RunService) finalizeAgentGroupDispatchFailure(ctx context.Context, groupID string, cause error) error {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return errors.New("finalizing agent group dispatch failure: group id is required")
+	}
+	errorMessage := "agent group dispatch retries exhausted"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		errorMessage += ": " + cause.Error()
+	}
+	now := time.Now()
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var group models.DelegationGroup
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("group_id = ?", groupID).First(&group).Error; err != nil {
+			return fmt.Errorf("loading delegation group for dispatch failure: %w", err)
+		}
+		if group.Status != models.DelegationGroupStatusWaiting {
+			return nil
+		}
+
+		activeStatuses := []string{
+			models.DelegationStatusPending,
+			models.DelegationStatusAccepted,
+			models.DelegationStatusRunning,
+		}
+		if err := tx.Model(&models.Delegation{}).
+			Where("delegation_group_id = ? AND status IN ?", groupID, activeStatuses).
+			Updates(map[string]any{
+				"status":        models.DelegationStatusFailed,
+				"error_message": errorMessage,
+				"finished_at":   now,
+			}).Error; err != nil {
+			return fmt.Errorf("finalizing delegation group members: %w", err)
+		}
+
+		var members []models.Delegation
+		if err := tx.Where("delegation_group_id = ?", groupID).Order("group_member_position ASC").Find(&members).Error; err != nil {
+			return fmt.Errorf("loading finalized delegation group members: %w", err)
+		}
+		statuses := make([]string, 0, len(members))
+		for _, member := range members {
+			statuses = append(statuses, member.Status)
+		}
+		decision, err := delegationgroup.Evaluate(group.Strategy, group.RequiredSuccesses, statuses)
+		if err != nil {
+			return fmt.Errorf("evaluating finalized delegation group: %w", err)
+		}
+		if !decision.Ready {
+			return errors.New("finalized delegation group did not reach a terminal decision")
+		}
+		config, err := loadPersistedAgentGroupConfigTx(tx, &group, members)
+		if err != nil {
+			return fmt.Errorf("loading finalized delegation group config: %w", err)
+		}
+		aggregate, err := marshalAgentGroupResult(config, decision.Status, members)
+		if err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"status":            decision.Status,
+			"succeeded_members": decision.Counts.Succeeded,
+			"failed_members":    decision.Counts.Failed,
+			"cancelled_members": decision.Counts.Cancelled,
+			"result_json":       aggregate,
+			"error_message":     errorMessage,
+			"finished_at":       now,
+		}
+		update := tx.Model(&models.DelegationGroup{}).
+			Where("id = ? AND status = ?", group.ID, models.DelegationGroupStatusWaiting).
+			Updates(updates)
+		if update.Error != nil {
+			return fmt.Errorf("finalizing delegation group: %w", update.Error)
+		}
+		if update.RowsAffected != 1 {
+			return errors.New("finalizing delegation group affected no rows")
+		}
+		return nil
+	})
 }

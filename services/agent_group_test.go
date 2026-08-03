@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -272,6 +273,118 @@ func TestHandleRunExecuteAgentGroupRetriesOnlyPendingMembers(t *testing.T) {
 		if message.Status != models.MessageStatusDelivered {
 			t.Fatalf("request message did not recover to delivered: %+v", message)
 		}
+	}
+}
+
+func TestHandleRunExecuteAgentGroupDispatchExhaustionFinalizesGroup(t *testing.T) {
+	database, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentGroupWorkflow(t, database, "{\"entry_node\":\"parallel_review\",\"nodes\":[{\"key\":\"parallel_review\",\"type\":\"agent_group\",\"config\":{\"strategy\":\"all\",\"members\":[{\"key\":\"security\",\"target_agent\":\"security-reviewer\",\"capability\":\"review\"},{\"key\":\"quality\",\"target_agent\":\"quality-reviewer\",\"capability\":\"review\"}]}}],\"edges\":[]}")
+	invoker := newCoordinatedAgentGroupInvoker(0, func(request AgentInvocationRequest, _ int) (*AgentInvocationResult, error) {
+		if request.GroupMemberKey == "quality" {
+			return nil, errors.New("quality endpoint unavailable")
+		}
+		return &AgentInvocationResult{
+			TaskID: request.TaskID, State: AgentInvocationStateAccepted,
+			OutputJSON: "{\"accepted\":true}", NotificationToken: "token-security",
+		}, nil
+	})
+	service.agentInvoker = invoker
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+	run := models.Run{
+		RunID: "run_agent_group_exhausted", ThreadID: "thread-agent-group-exhausted", AgentID: source.ID, WorkflowID: workflow.ID,
+		UserID: 1, TriggerType: "api", InputJSON: "{\"draft\":\"review me\"}", Status: models.RunStatusQueued,
+	}
+	if err := database.Create(&run).Error; err != nil {
+		t.Fatalf("create exhausted group run failed: %v", err)
+	}
+
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err == nil {
+		t.Fatal("expected exhausted agent group execution to fail")
+	}
+	_, calls, _ := invoker.snapshot()
+	if calls["security"] != 1 || calls["quality"] != maxNodeRetries+1 {
+		t.Fatalf("unexpected exhausted dispatch calls: %v", calls)
+	}
+	var storedRun models.Run
+	if err := database.Where("run_id = ?", run.RunID).First(&storedRun).Error; err != nil {
+		t.Fatalf("reload exhausted group run failed: %v", err)
+	}
+	if storedRun.Status != models.RunStatusFailed {
+		t.Fatalf("exhausted group run status=%s want=%s", storedRun.Status, models.RunStatusFailed)
+	}
+	var group models.DelegationGroup
+	if err := database.Where("parent_run_id = ?", run.RunID).First(&group).Error; err != nil {
+		t.Fatalf("load exhausted delegation group failed: %v", err)
+	}
+	if group.Status != models.DelegationGroupStatusFailed || group.FailedMembers != 2 || group.FinishedAt == nil || group.ErrorMessage == "" {
+		t.Fatalf("exhausted group did not reach a failed terminal state: %+v", group)
+	}
+	var failedStep models.RunStep
+	if err := database.Where("run_id = ? AND step_key = ?", run.RunID, group.ParentStepKey).Order("attempt DESC").First(&failedStep).Error; err != nil {
+		t.Fatalf("load exhausted group checkpoint failed: %v", err)
+	}
+	var members []models.Delegation
+	if err := database.Where("delegation_group_id = ?", group.GroupID).Order("group_member_position ASC").Find(&members).Error; err != nil {
+		t.Fatalf("load exhausted group members failed: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("exhausted group member count=%d want=2", len(members))
+	}
+	for _, member := range members {
+		if member.Status != models.DelegationStatusFailed || member.FinishedAt == nil || member.ErrorMessage == "" {
+			t.Fatalf("exhausted group member was not finalized: %+v", member)
+		}
+	}
+
+	publisher := &recordingResumePublisher{}
+	runtimeService, err := NewRuntimeService(database, service, WithRunResumePublisher(publisher))
+	if err != nil {
+		t.Fatalf("create exhausted group runtime failed: %v", err)
+	}
+	security := members[0]
+	if security.GroupMemberKey == nil || *security.GroupMemberKey != "security" {
+		security = members[1]
+	}
+	if security.A2ATaskID == nil {
+		t.Fatal("finalized security member has no A2A task id")
+	}
+	if err := runtimeService.AcceptDelegationCallback(context.Background(), DelegationCallbackCommand{
+		SourceAgentCode: source.AgentCode, TargetAgentCode: "security-reviewer", TaskID: *security.A2ATaskID,
+		State: DelegationCallbackStateSucceeded, OutputJSON: "{\"review\":\"safe\"}",
+		NotificationToken: "token-security", EventJSON: "{\"terminal\":\"succeeded\"}",
+	}); err != nil {
+		t.Fatalf("accept late callback after group dispatch exhaustion failed: %v", err)
+	}
+	var securityAfter models.Delegation
+	if err := database.First(&securityAfter, security.ID).Error; err != nil {
+		t.Fatalf("reload late callback member failed: %v", err)
+	}
+	if securityAfter.Status != models.DelegationStatusFailed || securityAfter.OutputJSON != "{\"review\":\"safe\"}" || securityAfter.CallbackEventHash == "" || securityAfter.ErrorMessage != security.ErrorMessage {
+		t.Fatalf("late callback did not remain audit-only: %+v", securityAfter)
+	}
+	var groupAfter models.DelegationGroup
+	if err := database.First(&groupAfter, group.ID).Error; err != nil {
+		t.Fatalf("reload group after late callback failed: %v", err)
+	}
+	if groupAfter.Status != models.DelegationGroupStatusFailed || groupAfter.FailedMembers != group.FailedMembers || groupAfter.ResultJSON == group.ResultJSON || !strings.Contains(groupAfter.ResultJSON, "safe") {
+		t.Fatalf("late callback did not update only the group audit snapshot: before=%+v after=%+v", group, groupAfter)
+	}
+	var stepAfter models.RunStep
+	if err := database.First(&stepAfter, failedStep.ID).Error; err != nil {
+		t.Fatalf("reload checkpoint after late callback failed: %v", err)
+	}
+	if stepAfter.Status != failedStep.Status || stepAfter.OutputJSON != failedStep.OutputJSON || stepAfter.ErrorMessage != failedStep.ErrorMessage {
+		t.Fatalf("late callback rewrote failed checkpoint: before=%+v after=%+v", failedStep, stepAfter)
+	}
+	var runAfter models.Run
+	if err := database.Where("run_id = ?", run.RunID).First(&runAfter).Error; err != nil {
+		t.Fatalf("reload run after late callback failed: %v", err)
+	}
+	if runAfter.Status != models.RunStatusFailed {
+		t.Fatalf("late callback changed failed parent run: %+v", runAfter)
+	}
+	if calls := publisher.snapshot(); len(calls) != 0 {
+		t.Fatalf("late callback published a resume for failed group: %+v", calls)
 	}
 }
 

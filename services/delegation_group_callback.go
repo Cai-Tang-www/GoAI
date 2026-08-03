@@ -66,7 +66,8 @@ func (s *RuntimeService) acceptDelegationGroupCallbackTx(ctx context.Context, tx
 		delegationStatus = models.DelegationStatusCancelled
 		errorMessage = strings.TrimSpace(command.ErrorMessage)
 	}
-	if delegation.Status != delegationStatus {
+	preserveFinalizedMember := group.Status != models.DelegationGroupStatusWaiting && delegationTerminal(delegation.Status)
+	if delegation.Status != delegationStatus && !preserveFinalizedMember {
 		if delegationTerminal(delegation.Status) {
 			return nil, false, fmt.Errorf("%w: conflicting terminal delegation state", errInvalidDelegation)
 		}
@@ -95,8 +96,11 @@ func (s *RuntimeService) acceptDelegationGroupCallbackTx(ctx context.Context, tx
 		return nil, false, err
 	}
 	updates := map[string]any{
-		"status": delegationStatus, "output_json": outputJSON, "error_message": errorMessage,
-		"result_message_id": resultMessageID, "finished_at": now,
+		"output_json": outputJSON, "result_message_id": resultMessageID, "finished_at": now,
+	}
+	if !preserveFinalizedMember {
+		updates["status"] = delegationStatus
+		updates["error_message"] = errorMessage
 	}
 	update := tx.Model(&models.Delegation{}).Where("id = ? AND callback_event_hash = ?", delegation.ID, eventHash).Updates(updates)
 	if update.Error != nil {

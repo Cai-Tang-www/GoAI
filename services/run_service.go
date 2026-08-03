@@ -1342,6 +1342,15 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 				return "", execErr
 			}
 			if offset >= maxNodeRetries {
+				var dispatchErr *agentGroupDispatchError
+				if errors.As(execErr, &dispatchErr) {
+					finalizeCtx, finalizeCancel := runFailurePersistenceContext(ctx)
+					finalizeErr := s.finalizeAgentGroupDispatchFailure(finalizeCtx, dispatchErr.groupID, execErr)
+					finalizeCancel()
+					if finalizeErr != nil {
+						return "", errors.Join(execErr, fmt.Errorf("finalizing failed agent group: %w", finalizeErr))
+					}
+				}
 				break
 			}
 			if err := s.incrementRunRetry(ctx, run.RunID); err != nil {
