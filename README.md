@@ -301,14 +301,18 @@ Provider 调试配置：
 
 ## 服务生命周期
 
-进程使用标准 `http.Server` 并监听 `SIGINT` / `SIGTERM`：
+进程使用标准 `http.Server` 并监听 `SIGINT` / `SIGTERM`。`SERVER_SHUTDOWN_TIMEOUT_SECONDS` 是整个关闭流程共享的总预算，不会为每个阶段重复计算：
 
-1. HTTP Server 停止接收新连接，并在配置窗口内等待普通请求和 SSE 结束
-2. drain 超时后强制关闭仍存活的连接
-3. 取消 worker context，并关闭 Kafka consumer 解除阻塞读取
-4. 等待 worker 退出
-5. 依次关闭 Kafka producer、Redis 和数据库连接池
-6. 聚合并记录所有关闭错误，不因单个资源失败跳过后续清理
+1. 取消 AG-UI/Chat SSE 请求，并调用 HTTP `Shutdown` 停止接收新连接
+2. 关闭 Kafka consumer，停止拉取新消息；已经进入 handler 的消息保留 worker context 继续处理
+3. 在共享 drain 窗口内并行等待普通 HTTP 请求、当前 worker 和 consumer close 完成
+4. drain 超时后取消 worker context，并强制关闭仍存活的 HTTP 连接
+5. 只有 HTTP、consumer 和 worker 都已退出，才在剩余预算内依次关闭 Kafka producer、Redis、数据库连接池和 observability exporter
+6. 聚合并记录所有关闭错误；如果工作仍未退出，则跳过仍可能被使用的共享依赖，避免 use-after-close
+
+第一次信号进入上述优雅关闭流程；信号处理随后恢复系统默认行为，第二次 `SIGINT` / `SIGTERM` 可直接强制退出。
+
+Kafka producer、Redis 和 MySQL 的第三方 `Close()` API 不接收 context，运行时通过受总预算约束的适配器调用它们。预算耗尽后进程停止等待并跳过后续依赖关闭；Go 无法强制中断已经进入的第三方 `Close()`，最终由进程退出回收剩余描述符。
 
 ## 文档
 
