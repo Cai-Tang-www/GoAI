@@ -28,6 +28,11 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		// Restore default signal handling so a second signal forces process exit.
+		stop()
+	}()
 
 	if err := run(ctx); err != nil {
 		log.Printf("application exited with error: %v", err)
@@ -54,6 +59,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initializing observability: %w", err)
 	}
+	telemetryOwnedByLifecycle := false
 	governanceEventSink := func(event governance.Event) {
 		if telemetry.Metrics != nil {
 			metricScope := event.Target
@@ -84,6 +90,9 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("initializing service governance: %w", err)
 	}
 	defer func() {
+		if telemetryOwnedByLifecycle {
+			return
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if shutdownErr := telemetry.Shutdown(shutdownCtx); shutdownErr != nil {
@@ -158,6 +167,9 @@ func run(ctx context.Context) error {
 	}
 	log.Println("Kafka consumer initialized")
 
+	streamShutdownCtx, stopStreams := context.WithCancel(context.Background())
+	defer stopStreams()
+
 	router, err := routers.New(routers.Dependencies{
 		Database:         database,
 		RunService:       runService,
@@ -167,27 +179,34 @@ func run(ctx context.Context) error {
 		Observability:    telemetry,
 		Governance:       governanceService,
 		GovernanceScopes: cfg.RateLimitScopes,
+		StreamShutdown:   streamShutdownCtx,
 	})
 	if err != nil {
 		return errors.Join(err, consumer.Close(), producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
+	connectionTracker := newHTTPConnectionTracker()
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		ConnState:         connectionTracker.Track,
 	}
 
 	runtime := runtimeLifecycle{
 		server:          server,
 		address:         server.Addr,
 		shutdownTimeout: cfg.ServerShutdownTimeout,
+		waitHTTP:        connectionTracker.Wait,
 		runWorker:       consumer.Start,
+		stopStreams:     stopStreams,
 		closeConsumer:   consumer.Close,
-		closeProducer:   producer.Close,
-		closeRedis:      func() error { return redisinfra.Close(redisClient) },
-		closeDB:         func() error { return db.Close(database) },
+		closeProducer:   contextCloser(producer.Close),
+		closeRedis:      contextCloser(func() error { return redisinfra.Close(redisClient) }),
+		closeDB:         contextCloser(func() error { return db.Close(database) }),
+		closeTelemetry:  telemetry.Shutdown,
 		logger:          log.Default(),
 	}
+	telemetryOwnedByLifecycle = true
 	return runtime.Run(ctx)
 }

@@ -1,6 +1,7 @@
 package routers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -25,6 +26,7 @@ type Dependencies struct {
 	Observability    *observability.Bundle
 	Governance       *governance.Service
 	GovernanceScopes []string
+	StreamShutdown   context.Context
 }
 
 // New 使用显式依赖创建完整 API 路由。
@@ -98,8 +100,16 @@ func New(deps Dependencies) (*gin.Engine, error) {
 				"user_id": userID,
 			}, "success")
 		})
-		apiGroup.POST("/chat", middlewares.RequirePermission(models.PermissionChatUse), chatHandler.Serve)
-		apiGroup.POST("/agents/:agent_code/agui", middlewares.RequirePermission(models.PermissionRunCreate), aguiHandler.RunAgent)
+		apiGroup.POST("/chat",
+			middlewares.RequirePermission(models.PermissionChatUse),
+			middlewares.StreamShutdownMiddleware(deps.StreamShutdown),
+			chatHandler.Serve,
+		)
+		apiGroup.POST("/agents/:agent_code/agui",
+			middlewares.RequirePermission(models.PermissionRunCreate),
+			middlewares.StreamShutdownMiddleware(deps.StreamShutdown),
+			aguiHandler.RunAgent,
+		)
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)
