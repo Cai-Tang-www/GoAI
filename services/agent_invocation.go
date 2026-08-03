@@ -26,6 +26,8 @@ type AgentInvocationRequest struct {
 	ParentRunID         string
 	TraceID             string
 	DelegationID        string
+	DelegationGroupID   string
+	GroupMemberKey      string
 	ThreadID            string
 	TaskID              string
 	MessageID           string

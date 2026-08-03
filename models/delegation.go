@@ -38,6 +38,9 @@ type Delegation struct {
 	ResultMessageID        string  `gorm:"size:64;index"`
 	ParentStepKey          string  `gorm:"size:128;index"`
 	ResumeNodeKey          string  `gorm:"size:128"`
+	DelegationGroupID      *string `gorm:"size:64;index:idx_delegation_group_member,priority:1;uniqueIndex:uidx_delegation_group_member,priority:1"`
+	GroupMemberKey         *string `gorm:"size:64;index:idx_delegation_group_member,priority:2;uniqueIndex:uidx_delegation_group_member,priority:2"`
+	GroupMemberPosition    int     `gorm:"not null;default:0"`
 	InputJSON              string  `gorm:"type:json;not null"`
 	OutputJSON             string  `gorm:"type:json"`
 	Status                 string  `gorm:"size:20;not null;index"`

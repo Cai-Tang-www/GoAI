@@ -21,6 +21,7 @@ import (
 	"GoAI/requestctx"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -46,6 +47,7 @@ type agentInvocationAcceptedError struct {
 	CapabilityCode    string
 	OutputJSON        string
 	CallbackTokenHash string
+	GroupID           string
 }
 
 func (e *agentInvocationAcceptedError) Error() string {
@@ -61,6 +63,31 @@ type runSuspendedError struct {
 
 func (e *runSuspendedError) Error() string {
 	return fmt.Sprintf("run suspended waiting for A2A task %s", e.TaskID)
+}
+
+// runExternallyTerminatedError 表示 A2A 聚合在父 Run 挂起前已失败或取消，执行器应停止当前 Graph。
+type runExternallyTerminatedError struct {
+	GroupID string
+	Status  string
+}
+
+func (e *runExternallyTerminatedError) Error() string {
+	return fmt.Sprintf("agent group %s terminated parent run with status %s", e.GroupID, e.Status)
+}
+
+func runExecutionStopped(err error) bool {
+	var suspended *runSuspendedError
+	if errors.As(err, &suspended) {
+		return true
+	}
+	var terminated *runExternallyTerminatedError
+	return errors.As(err, &terminated)
+}
+
+type agentInvocationSettlement struct {
+	OutputJSON     string
+	Suspended      bool
+	TerminalStatus string
 }
 
 var defaultStepRetryBackoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
@@ -226,10 +253,42 @@ type RunResumeState struct {
 	LeaseExpiresAt   *time.Time `json:"lease_expires_at,omitempty"`
 }
 
-// RunDetail 在保持原 Run JSON 字段兼容的同时，附加可选的恢复租约信息。
+// RunDelegationMemberState 描述 agent_group 中一个独立 A2A 委派成员的管理视图。
+type RunDelegationMemberState struct {
+	MemberKey    string `json:"member_key"`
+	Position     int    `json:"position"`
+	DelegationID string `json:"delegation_id"`
+	ChildRunID   string `json:"child_run_id"`
+	A2ATaskID    string `json:"a2a_task_id,omitempty"`
+	TargetAgent  string `json:"target_agent"`
+	Capability   string `json:"capability"`
+	Status       string `json:"status"`
+	OutputJSON   string `json:"output_json"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// RunDelegationGroupState 描述一个 agent_group 的策略、聚合计数和成员结果。
+type RunDelegationGroupState struct {
+	GroupID                 string                     `json:"group_id"`
+	ParentStepKey           string                     `json:"parent_step_key"`
+	Strategy                string                     `json:"strategy"`
+	RequiredSuccesses       int                        `json:"required_successes"`
+	TotalMembers            int                        `json:"total_members"`
+	SucceededMembers        int                        `json:"succeeded_members"`
+	FailedMembers           int                        `json:"failed_members"`
+	CancelledMembers        int                        `json:"cancelled_members"`
+	Status                  string                     `json:"status"`
+	ResultJSON              string                     `json:"result_json"`
+	ErrorMessage            string                     `json:"error_message,omitempty"`
+	CoordinatorDelegationID string                     `json:"coordinator_delegation_id"`
+	Members                 []RunDelegationMemberState `json:"members"`
+}
+
+// RunDetail 在保持原 Run JSON 字段兼容的同时，附加恢复租约和 fan-out 协调信息。
 type RunDetail struct {
 	models.Run
-	Resume *RunResumeState `json:"resume,omitempty"`
+	Resume           *RunResumeState           `json:"resume,omitempty"`
+	DelegationGroups []RunDelegationGroupState `json:"delegation_groups,omitempty"`
 }
 
 // ValidateCreateRunRequest 校验 Run 创建请求的关键字段，避免非法输入进入执行主链路。
@@ -738,13 +797,17 @@ func (s *RunService) GetRunByRunID(ctx context.Context, userID uint64, isAdmin b
 	return run, nil
 }
 
-// GetRunDetailByRunID 返回 Run 及其最近一次可观测的 Parent resume 租约状态。
+// GetRunDetailByRunID 返回 Run、最近一次 Parent resume 租约和 fan-out 协调状态。
 func (s *RunService) GetRunDetailByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*RunDetail, error) {
 	run, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
 	if err != nil {
 		return nil, err
 	}
 	detail := &RunDetail{Run: *run}
+	detail.DelegationGroups, err = s.loadRunDelegationGroups(ctx, run.RunID)
+	if err != nil {
+		return nil, err
+	}
 
 	var delegation models.Delegation
 	err = s.database.WithContext(ctx).
@@ -768,6 +831,70 @@ func (s *RunService) GetRunDetailByRunID(ctx context.Context, userID uint64, isA
 		LeaseExpiresAt:   delegation.ResumeLeaseExpiresAt,
 	}
 	return detail, nil
+}
+
+func (s *RunService) loadRunDelegationGroups(ctx context.Context, runID string) ([]RunDelegationGroupState, error) {
+	var groups []models.DelegationGroup
+	if err := s.database.WithContext(ctx).Where("parent_run_id = ?", runID).Order("id ASC").Find(&groups).Error; err != nil {
+		return nil, fmt.Errorf("loading run delegation groups: %w", err)
+	}
+	if len(groups) == 0 {
+		return nil, nil
+	}
+
+	groupIDs := make([]string, 0, len(groups))
+	for _, group := range groups {
+		groupIDs = append(groupIDs, group.GroupID)
+	}
+	var delegations []models.Delegation
+	if err := s.database.WithContext(ctx).Where("delegation_group_id IN ?", groupIDs).Order("delegation_group_id ASC").Order("group_member_position ASC").Find(&delegations).Error; err != nil {
+		return nil, fmt.Errorf("loading run delegation group members: %w", err)
+	}
+	targetIDs := make([]uint64, 0, len(delegations))
+	for _, delegation := range delegations {
+		targetIDs = append(targetIDs, delegation.TargetAgentID)
+	}
+	var targets []models.Agent
+	if len(targetIDs) > 0 {
+		if err := s.database.WithContext(ctx).Select("id", "agent_code").Where("id IN ?", targetIDs).Find(&targets).Error; err != nil {
+			return nil, fmt.Errorf("loading delegation group target agents: %w", err)
+		}
+	}
+	targetCodes := make(map[uint64]string, len(targets))
+	for _, target := range targets {
+		targetCodes[target.ID] = target.AgentCode
+	}
+	membersByGroup := make(map[string][]RunDelegationMemberState, len(groups))
+	for _, delegation := range delegations {
+		if delegation.DelegationGroupID == nil {
+			continue
+		}
+		memberKey, taskID := "", ""
+		if delegation.GroupMemberKey != nil {
+			memberKey = *delegation.GroupMemberKey
+		}
+		if delegation.A2ATaskID != nil {
+			taskID = *delegation.A2ATaskID
+		}
+		groupID := *delegation.DelegationGroupID
+		membersByGroup[groupID] = append(membersByGroup[groupID], RunDelegationMemberState{
+			MemberKey: memberKey, Position: delegation.GroupMemberPosition, DelegationID: delegation.DelegationID,
+			ChildRunID: delegation.ChildRunID, A2ATaskID: taskID, TargetAgent: targetCodes[delegation.TargetAgentID],
+			Capability: delegation.CapabilityCode, Status: delegation.Status, OutputJSON: delegation.OutputJSON, ErrorMessage: delegation.ErrorMessage,
+		})
+	}
+
+	states := make([]RunDelegationGroupState, 0, len(groups))
+	for _, group := range groups {
+		states = append(states, RunDelegationGroupState{
+			GroupID: group.GroupID, ParentStepKey: group.ParentStepKey, Strategy: group.Strategy,
+			RequiredSuccesses: group.RequiredSuccesses, TotalMembers: group.TotalMembers,
+			SucceededMembers: group.SucceededMembers, FailedMembers: group.FailedMembers, CancelledMembers: group.CancelledMembers,
+			Status: group.Status, ResultJSON: group.ResultJSON, ErrorMessage: group.ErrorMessage,
+			CoordinatorDelegationID: group.CoordinatorDelegationID, Members: membersByGroup[group.GroupID],
+		})
+	}
+	return states, nil
 }
 
 func (s *RunService) GetRunStepsByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.RunStep, error) {
@@ -934,8 +1061,7 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 		return s.executeNodeWithRetryInputAt(nodeCtx, run, node, input, resumeNodeKey)
 	})
 	if err != nil {
-		var suspended *runSuspendedError
-		if errors.As(err, &suspended) {
+		if runExecutionStopped(err) {
 			return nil
 		}
 		return s.failClaimedRun(observedCtx, run.RunID, err)
@@ -1068,8 +1194,7 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 		return s.executeNodeWithRetryInputAt(nodeCtx, &run, node, input, next)
 	})
 	if err != nil {
-		var suspended *runSuspendedError
-		if errors.As(err, &suspended) {
+		if runExecutionStopped(err) {
 			return completeDelegation()
 		}
 		return fail(err)
@@ -1140,16 +1265,27 @@ func (s *RunService) executeNodeWithRetryInput(ctx context.Context, run *models.
 
 func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *models.Run, node WorkflowNode, nodeInput, resumeNodeKey string) (string, error) {
 	var lastErr error
-	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+	nodeType := strings.ToLower(strings.TrimSpace(node.Type))
+	var explicitInputs bool
+	switch nodeType {
+	case "agent":
 		config, err := ParseAgentNodeConfig(node)
 		if err != nil {
 			return "", err
 		}
-		if len(config.InputFrom) > 0 {
-			nodeInput, err = s.resolveNodeInput(ctx, run, node)
-			if err != nil {
-				return "", err
-			}
+		explicitInputs = len(config.InputFrom) > 0
+	case "agent_group":
+		config, err := ParseAgentGroupNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		explicitInputs = len(config.InputFrom) > 0
+	}
+	if explicitInputs {
+		var err error
+		nodeInput, err = s.resolveNodeInput(ctx, run, node)
+		if err != nil {
+			return "", err
 		}
 	}
 	startAttempt, err := s.nextRunStepAttempt(ctx, run.RunID, node.Key)
@@ -1177,8 +1313,15 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 		if execErr != nil {
 			var accepted *agentInvocationAcceptedError
 			if errors.As(execErr, &accepted) {
-				if err := s.suspendRunForAgentInvocation(ctx, run, step, node, resumeNodeKey, accepted); err != nil {
+				settlement, err := s.suspendRunForAgentInvocation(ctx, run, step, node, resumeNodeKey, accepted)
+				if err != nil {
 					return "", errors.Join(execErr, fmt.Errorf("persisting suspended run: %w", err))
+				}
+				if settlement.TerminalStatus != "" {
+					return "", &runExternallyTerminatedError{GroupID: accepted.GroupID, Status: settlement.TerminalStatus}
+				}
+				if !settlement.Suspended {
+					return settlement.OutputJSON, nil
 				}
 				return "", &runSuspendedError{TaskID: accepted.TaskID, DelegationID: accepted.DelegationID, StepKey: node.Key, ResumeNodeKey: resumeNodeKey}
 			}
@@ -1236,19 +1379,40 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 	return "", lastErr
 }
 
-// suspendRunForAgentInvocation 原子持久化外部 A2A 等待点和恢复游标。
-func (s *RunService) suspendRunForAgentInvocation(ctx context.Context, run *models.Run, step *models.RunStep, node WorkflowNode, resumeNodeKey string, accepted *agentInvocationAcceptedError) error {
+// suspendRunForAgentInvocation 在同一事务中决定父 Run 进入等待态，或收敛已提前完成的 agent_group。
+func (s *RunService) suspendRunForAgentInvocation(ctx context.Context, run *models.Run, step *models.RunStep, node WorkflowNode, resumeNodeKey string, accepted *agentInvocationAcceptedError) (agentInvocationSettlement, error) {
 	if run == nil || step == nil || accepted == nil {
-		return errors.New("suspending run: run, step and invocation are required")
+		return agentInvocationSettlement{}, errors.New("suspending run: run, step and invocation are required")
 	}
 	outputJSON, err := normalizeNodeOutput(accepted.OutputJSON)
 	if err != nil {
-		return err
+		return agentInvocationSettlement{}, err
 	}
-	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	settlement := agentInvocationSettlement{OutputJSON: outputJSON, Suspended: true}
+	err = s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
 			return err
 		}
+
+		if accepted.GroupID != "" {
+			var group models.DelegationGroup
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("group_id = ?", accepted.GroupID).First(&group).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&models.DelegationGroup{}).Where("id = ?", group.ID).Updates(map[string]any{
+				"loop_id": step.LoopID, "resume_node_key": resumeNodeKey,
+			}).Error; err != nil {
+				return err
+			}
+			group.LoopID = step.LoopID
+			group.ResumeNodeKey = resumeNodeKey
+			if group.Status != models.DelegationGroupStatusWaiting {
+				var settleErr error
+				settlement, settleErr = s.settleTerminalAgentGroupBeforeSuspendTx(ctx, tx, run, step, &group)
+				return settleErr
+			}
+		}
+
 		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusWaitingExternal, outputJSON, "", 0, nil); err != nil {
 			return err
 		}
@@ -1297,6 +1461,73 @@ func (s *RunService) suspendRunForAgentInvocation(ctx context.Context, run *mode
 		}
 		return tx.Create(&delegation).Error
 	})
+	return settlement, err
+}
+
+func (s *RunService) settleTerminalAgentGroupBeforeSuspendTx(ctx context.Context, tx *gorm.DB, run *models.Run, step *models.RunStep, group *models.DelegationGroup) (agentInvocationSettlement, error) {
+	resultJSON, err := normalizeNodeOutput(group.ResultJSON)
+	if err != nil {
+		return agentInvocationSettlement{}, err
+	}
+	var storedRun models.Run
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("run_id = ?", run.RunID).First(&storedRun).Error; err != nil {
+		return agentInvocationSettlement{}, err
+	}
+	var storedStep models.RunStep
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", step.ID).First(&storedStep).Error; err != nil {
+		return agentInvocationSettlement{}, err
+	}
+	if storedRun.Status != models.RunStatusRunning || storedStep.Status != models.RunStepStatusRunning {
+		return agentInvocationSettlement{}, fmt.Errorf("settling terminal agent group %s requires running parent run and step, got run=%s step=%s", group.GroupID, storedRun.Status, storedStep.Status)
+	}
+
+	now := time.Now()
+	latency := int64(0)
+	if storedStep.StartedAt != nil {
+		latency = now.Sub(*storedStep.StartedAt).Milliseconds()
+	}
+	settlement := agentInvocationSettlement{OutputJSON: resultJSON}
+	switch group.Status {
+	case models.DelegationGroupStatusSucceeded:
+		if err := transitionStepStatus(ctx, tx, &storedStep, models.RunStepStatusSuccess, resultJSON, "", latency, &now); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		if err := s.finishRunStepLoopTx(ctx, tx, &storedRun, &storedStep, models.RunStepStatusSuccess, resultJSON, "", latency, &now); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		if err := s.persistResultMessage(ctx, tx, &storedRun, &storedStep, resultJSON); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+	case models.DelegationGroupStatusFailed, models.DelegationGroupStatusCancelled:
+		errMsg := strings.TrimSpace(group.ErrorMessage)
+		if errMsg == "" {
+			errMsg = "agent group " + group.Status
+		}
+		stepStatus := models.RunStepStatusFailed
+		runStatus := models.RunStatusFailed
+		if group.Status == models.DelegationGroupStatusCancelled {
+			stepStatus = models.RunStepStatusSkipped
+			runStatus = models.RunStatusCancelled
+		}
+		if err := transitionStepStatus(ctx, tx, &storedStep, stepStatus, resultJSON, errMsg, latency, &now); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		if err := s.finishRunStepLoopTx(ctx, tx, &storedRun, &storedStep, stepStatus, resultJSON, errMsg, latency, &now); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		if err := transitionRunStatus(ctx, tx, &storedRun, runStatus, errMsg); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		if err := s.finishRunLoopTx(ctx, tx, &storedRun, runStatus, errMsg); err != nil {
+			return agentInvocationSettlement{}, err
+		}
+		settlement.TerminalStatus = runStatus
+	default:
+		return agentInvocationSettlement{}, fmt.Errorf("unsupported terminal agent group status %s", group.Status)
+	}
+	*run = storedRun
+	*step = storedStep
+	return settlement, nil
 }
 
 func (s *RunService) startRunLoopTx(ctx context.Context, tx *gorm.DB, run *models.Run) error {
@@ -1559,22 +1790,33 @@ func (s *RunService) persistResultMessage(ctx context.Context, tx *gorm.DB, run 
 }
 
 func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {
-	if strings.ToLower(strings.TrimSpace(node.Type)) != "agent" {
+	nodeType := strings.ToLower(strings.TrimSpace(node.Type))
+	var inputFrom []string
+	switch nodeType {
+	case "agent":
+		config, err := ParseAgentNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		inputFrom = config.InputFrom
+	case "agent_group":
+		config, err := ParseAgentGroupNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		inputFrom = config.InputFrom
+	default:
 		return run.InputJSON, nil
 	}
-	config, err := ParseAgentNodeConfig(node)
-	if err != nil {
-		return "", err
-	}
-	if len(config.InputFrom) == 0 {
+	if len(inputFrom) == 0 {
 		return run.InputJSON, nil
 	}
 	var runInput any
 	if err := json.Unmarshal([]byte(run.InputJSON), &runInput); err != nil {
 		return "", fmt.Errorf("decoding run input for node %s: %w", node.Key, err)
 	}
-	outputs := make(map[string]any, len(config.InputFrom))
-	for _, reference := range config.InputFrom {
+	outputs := make(map[string]any, len(inputFrom))
+	for _, reference := range inputFrom {
 		var step models.RunStep
 		if err := s.database.WithContext(ctx).Where("run_id = ? AND step_key = ? AND status = ?", run.RunID, reference, models.RunStepStatusSuccess).Order("attempt DESC").First(&step).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1599,16 +1841,24 @@ func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node
 func (s *RunService) executeWorkflowNodeWithInput(ctx context.Context, run *models.Run, node WorkflowNode, attempt int, input string) (string, error) {
 	nodeRun := *run
 	nodeRun.InputJSON = input
-	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+	switch strings.ToLower(strings.TrimSpace(node.Type)) {
+	case "agent":
 		return s.executeAgentNode(ctx, &nodeRun, node)
+	case "agent_group":
+		return s.executeAgentGroupNode(ctx, &nodeRun, node)
+	default:
+		return s.executeNode(ctx, &nodeRun, node, attempt)
 	}
-	return s.executeNode(ctx, &nodeRun, node, attempt)
 }
 func (s *RunService) executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
-	if strings.ToLower(strings.TrimSpace(node.Type)) == "agent" {
+	switch strings.ToLower(strings.TrimSpace(node.Type)) {
+	case "agent":
 		return s.executeAgentNode(ctx, run, node)
+	case "agent_group":
+		return s.executeAgentGroupNode(ctx, run, node)
+	default:
+		return s.executeNode(ctx, run, node, attempt)
 	}
-	return s.executeNode(ctx, run, node, attempt)
 }
 
 func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {

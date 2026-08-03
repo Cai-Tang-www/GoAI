@@ -35,6 +35,22 @@ type AgentNodeConfig struct {
 	TimeoutMS   int      `json:"timeout_ms,omitempty"`
 }
 
+// AgentGroupMember 定义 agent_group 节点中的一个稳定委派成员。
+type AgentGroupMember struct {
+	Key         string `json:"key"`
+	TargetAgent string `json:"target_agent"`
+	Capability  string `json:"capability"`
+	TimeoutMS   int    `json:"timeout_ms,omitempty"`
+}
+
+// AgentGroupNodeConfig 定义并行 A2A 委派及其 fan-in 聚合策略。
+type AgentGroupNodeConfig struct {
+	Members           []AgentGroupMember `json:"members"`
+	Strategy          string             `json:"strategy"`
+	RequiredSuccesses int                `json:"required_successes,omitempty"`
+	InputFrom         []string           `json:"input_from,omitempty"`
+}
+
 // ParseAgentNodeConfig 解析并校验单个 agent 节点的配置结构。
 func ParseAgentNodeConfig(node Node) (*AgentNodeConfig, error) {
 	if strings.TrimSpace(node.Type) != "agent" {
@@ -65,6 +81,72 @@ func ParseAgentNodeConfig(node Node) (*AgentNodeConfig, error) {
 		}
 		if config.InputFrom[index] == node.Key {
 			return nil, fmt.Errorf("agent node %s input_from cannot reference itself", node.Key)
+		}
+	}
+	return &config, nil
+}
+
+// ParseAgentGroupNodeConfig 解析并校验 agent_group 节点配置。
+func ParseAgentGroupNodeConfig(node Node) (*AgentGroupNodeConfig, error) {
+	if strings.TrimSpace(node.Type) != "agent_group" {
+		return nil, fmt.Errorf("node %s is not an agent_group node", node.Key)
+	}
+	var config AgentGroupNodeConfig
+	if len(node.Config) == 0 {
+		return nil, fmt.Errorf("agent_group node %s config is required", node.Key)
+	}
+	if err := json.Unmarshal(node.Config, &config); err != nil {
+		return nil, fmt.Errorf("agent_group node %s config is invalid: %w", node.Key, err)
+	}
+	if len(config.Members) < 2 || len(config.Members) > 16 {
+		return nil, fmt.Errorf("agent_group node %s members must contain between 2 and 16 entries", node.Key)
+	}
+	memberKeys := make(map[string]struct{}, len(config.Members))
+	targets := make(map[string]struct{}, len(config.Members))
+	for index := range config.Members {
+		member := &config.Members[index]
+		member.Key = strings.TrimSpace(member.Key)
+		member.TargetAgent = strings.TrimSpace(member.TargetAgent)
+		member.Capability = strings.TrimSpace(member.Capability)
+		if member.Key == "" || len(member.Key) > 64 {
+			return nil, fmt.Errorf("agent_group node %s member key is required and must be at most 64 characters", node.Key)
+		}
+		if _, exists := memberKeys[member.Key]; exists {
+			return nil, fmt.Errorf("agent_group node %s has duplicate member key: %s", node.Key, member.Key)
+		}
+		memberKeys[member.Key] = struct{}{}
+		if member.TargetAgent == "" || member.Capability == "" {
+			return nil, fmt.Errorf("agent_group node %s member %s target_agent and capability are required", node.Key, member.Key)
+		}
+		if member.TimeoutMS < 0 || member.TimeoutMS > 300000 {
+			return nil, fmt.Errorf("agent_group node %s member %s timeout_ms must be between 0 and 300000", node.Key, member.Key)
+		}
+		targetKey := member.TargetAgent + "\x00" + member.Capability
+		if _, exists := targets[targetKey]; exists {
+			return nil, fmt.Errorf("agent_group node %s repeats target %s capability %s", node.Key, member.TargetAgent, member.Capability)
+		}
+		targets[targetKey] = struct{}{}
+	}
+	config.Strategy = strings.ToLower(strings.TrimSpace(config.Strategy))
+	switch config.Strategy {
+	case "all":
+		config.RequiredSuccesses = len(config.Members)
+	case "any":
+		config.RequiredSuccesses = 1
+	case "quorum":
+		if config.RequiredSuccesses < 1 || config.RequiredSuccesses > len(config.Members) {
+			return nil, fmt.Errorf("agent_group node %s required_successes must be between 1 and %d", node.Key, len(config.Members))
+		}
+	default:
+		return nil, fmt.Errorf("agent_group node %s strategy must be all, any or quorum", node.Key)
+	}
+	for index, reference := range config.InputFrom {
+		config.InputFrom[index] = strings.TrimSpace(reference)
+		if config.InputFrom[index] == "" {
+			return nil, fmt.Errorf("agent_group node %s input_from contains an empty step", node.Key)
+		}
+		if config.InputFrom[index] == node.Key {
+			return nil, fmt.Errorf("agent_group node %s input_from cannot reference itself", node.Key)
 		}
 	}
 	return &config, nil
@@ -116,16 +198,26 @@ func Validate(def *Definition) error {
 	}
 
 	for _, node := range nodeSet {
-		if node.Type != "agent" {
+		var inputFrom []string
+		switch node.Type {
+		case "agent":
+			config, err := ParseAgentNodeConfig(node)
+			if err != nil {
+				return err
+			}
+			inputFrom = config.InputFrom
+		case "agent_group":
+			config, err := ParseAgentGroupNodeConfig(node)
+			if err != nil {
+				return err
+			}
+			inputFrom = config.InputFrom
+		default:
 			continue
 		}
-		config, err := ParseAgentNodeConfig(node)
-		if err != nil {
-			return err
-		}
-		for _, reference := range config.InputFrom {
+		for _, reference := range inputFrom {
 			if _, exists := nodeSet[reference]; !exists {
-				return fmt.Errorf("agent node %s input_from node not found: %s", node.Key, reference)
+				return fmt.Errorf("%s node %s input_from node not found: %s", node.Type, node.Key, reference)
 			}
 		}
 	}

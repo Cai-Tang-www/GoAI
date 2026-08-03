@@ -165,6 +165,9 @@ func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationReq
 				slog.String("target_agent", request.TargetAgentCode),
 				slog.String("capability", request.CapabilityCode),
 				slog.String("parent_run_id", request.ParentRunID),
+				slog.String("delegation_group_id", request.DelegationGroupID),
+				slog.String("delegation_id", request.DelegationID),
+				slog.String("member_key", request.GroupMemberKey),
 				slog.String("status", status),
 				slog.Int64("latency_ms", time.Since(startedAt).Milliseconds()),
 			)
@@ -233,11 +236,13 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 		Extensions: []string{a2aprotocol.DelegationExtensionURI},
 		Metadata: map[string]any{
 			a2aprotocol.DelegationExtensionURI: map[string]any{
-				"sourceAgentCode": request.SourceAgentCode,
-				"capabilityCode":  request.CapabilityCode,
-				"parentRunId":     request.ParentRunID,
-				"traceId":         request.TraceID,
-				"delegationId":    request.DelegationID,
+				"sourceAgentCode":   request.SourceAgentCode,
+				"capabilityCode":    request.CapabilityCode,
+				"parentRunId":       request.ParentRunID,
+				"traceId":           request.TraceID,
+				"delegationId":      request.DelegationID,
+				"delegationGroupId": request.DelegationGroupID,
+				"groupMemberKey":    request.GroupMemberKey,
 			},
 		},
 	}

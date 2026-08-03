@@ -292,18 +292,13 @@ func (s *RunService) resumeNodeCheckpoint(ctx context.Context, run *models.Run, 
 	case models.RunStepStatusSuccess:
 		return step.OutputJSON, true, nil
 	case models.RunStepStatusWaitingExternal:
-		if strings.ToLower(strings.TrimSpace(node.Type)) != "agent" {
+		nodeType := strings.ToLower(strings.TrimSpace(node.Type))
+		if nodeType != "agent" && nodeType != "agent_group" {
 			return "", false, fmt.Errorf("resume checkpoint step %s waits externally but is not an agent node", step.StepKey)
 		}
-		var delegation models.Delegation
-		if err := s.database.WithContext(ctx).
-			Where("parent_run_id = ? AND parent_step_key = ? AND status IN ?", run.RunID, node.Key, []string{
-				models.DelegationStatusPending,
-				models.DelegationStatusAccepted,
-				models.DelegationStatusRunning,
-			}).
-			Order("id DESC").First(&delegation).Error; err != nil {
-			return "", false, fmt.Errorf("loading suspended delegation checkpoint: %w", err)
+		delegation, err := s.loadSuspendedNodeCoordinator(ctx, run.RunID, node.Key, nodeType)
+		if err != nil {
+			return "", false, err
 		}
 		taskID := delegation.ChildRunID
 		if delegation.A2ATaskID != nil && strings.TrimSpace(*delegation.A2ATaskID) != "" {
@@ -336,6 +331,32 @@ func (s *RunService) resumeNodeCheckpoint(ctx context.Context, run *models.Run, 
 	default:
 		return "", false, fmt.Errorf("resume checkpoint step %s has incompatible status %q", step.StepKey, step.Status)
 	}
+}
+
+func (s *RunService) loadSuspendedNodeCoordinator(ctx context.Context, runID, stepKey, nodeType string) (models.Delegation, error) {
+	if nodeType == "agent_group" {
+		var group models.DelegationGroup
+		if err := s.database.WithContext(ctx).Where("parent_run_id = ? AND parent_step_key = ?", runID, stepKey).First(&group).Error; err != nil {
+			return models.Delegation{}, fmt.Errorf("loading suspended delegation group checkpoint: %w", err)
+		}
+		var coordinator models.Delegation
+		if err := s.database.WithContext(ctx).Where("delegation_id = ?", group.CoordinatorDelegationID).First(&coordinator).Error; err != nil {
+			return models.Delegation{}, fmt.Errorf("loading suspended delegation group coordinator: %w", err)
+		}
+		return coordinator, nil
+	}
+
+	var delegation models.Delegation
+	if err := s.database.WithContext(ctx).
+		Where("parent_run_id = ? AND parent_step_key = ? AND status IN ?", runID, stepKey, []string{
+			models.DelegationStatusPending,
+			models.DelegationStatusAccepted,
+			models.DelegationStatusRunning,
+		}).
+		Order("id DESC").First(&delegation).Error; err != nil {
+		return models.Delegation{}, fmt.Errorf("loading suspended delegation checkpoint: %w", err)
+	}
+	return delegation, nil
 }
 
 func (s *RunService) resumePersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {

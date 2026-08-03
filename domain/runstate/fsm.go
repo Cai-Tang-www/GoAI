@@ -65,6 +65,7 @@ func IsValidDelegationTransition(from, to string) bool {
 	transitions := map[string]map[string]struct{}{
 		models.DelegationStatusPending: {
 			models.DelegationStatusAccepted:  {},
+			models.DelegationStatusSucceeded: {},
 			models.DelegationStatusFailed:    {},
 			models.DelegationStatusCancelled: {},
 		},

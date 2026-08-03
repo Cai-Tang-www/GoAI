@@ -70,7 +70,8 @@ func (s *RuntimeService) RecoverPendingResumes(ctx context.Context, limit int) e
 	var delegations []models.Delegation
 	if err := s.database.WithContext(ctx).
 		Joins("JOIN runs ON runs.run_id = delegations.parent_run_id").
-		Where(`delegations.callback_event_hash <> '' AND (
+		Joins("LEFT JOIN delegation_groups ON delegation_groups.coordinator_delegation_id = delegations.delegation_id").
+		Where(`(delegations.callback_event_hash <> '' OR delegation_groups.status = ?) AND (
 			(runs.status = ? AND (
 				delegations.resume_status IN ? OR
 				(delegations.resume_status = ? AND delegations.updated_at <= ?) OR
@@ -84,6 +85,7 @@ func (s *RuntimeService) RecoverPendingResumes(ctx context.Context, limit int) e
 				(delegations.resume_status = ? AND (delegations.resume_lease_expires_at IS NULL OR delegations.resume_lease_expires_at <= ?))
 			))
 		)`,
+			models.DelegationGroupStatusSucceeded,
 			models.RunStatusWaitingExternal,
 			[]string{models.DelegationResumeStatusPending, models.DelegationResumeStatusPublishFailed},
 			models.DelegationResumeStatusPublishing,

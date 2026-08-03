@@ -110,6 +110,14 @@ func (s *RuntimeService) AcceptDelegationCallback(ctx context.Context, command D
 		if !callbackTokenMatches(delegation.CallbackTokenHash, command.NotificationToken) {
 			return errDelegationForbidden
 		}
+		if delegation.DelegationGroupID != nil && strings.TrimSpace(*delegation.DelegationGroupID) != "" {
+			coordinator, publish, err := s.acceptDelegationGroupCallbackTx(ctx, tx, &delegation, command, outputJSON, hash)
+			if coordinator != nil {
+				delegation = *coordinator
+			}
+			publishResume = publish
+			return err
+		}
 		now := time.Now()
 		if delegation.CallbackEventHash != "" {
 			if delegation.CallbackEventHash != hash {
