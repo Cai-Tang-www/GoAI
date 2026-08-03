@@ -32,3 +32,45 @@ func TestIsValidDelegationTransition(t *testing.T) {
 		})
 	}
 }
+
+func TestRunWaitingExternalTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		from string
+		to   string
+		want bool
+	}{
+		{name: "running can suspend", from: models.RunStatusRunning, to: models.RunStatusWaitingExternal, want: true},
+		{name: "waiting can resume", from: models.RunStatusWaitingExternal, to: models.RunStatusRunning, want: true},
+		{name: "waiting cannot skip claim", from: models.RunStatusWaitingExternal, to: models.RunStatusSuccess, want: false},
+		{name: "terminal cannot suspend", from: models.RunStatusSuccess, to: models.RunStatusWaitingExternal, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsValidRunTransition(test.from, test.to); got != test.want {
+				t.Fatalf("IsValidRunTransition(%q, %q)=%v want=%v", test.from, test.to, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRunStepWaitingExternalTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		from string
+		to   string
+		want bool
+	}{
+		{name: "running can suspend", from: models.RunStepStatusRunning, to: models.RunStepStatusWaitingExternal, want: true},
+		{name: "waiting can complete", from: models.RunStepStatusWaitingExternal, to: models.RunStepStatusSuccess, want: true},
+		{name: "waiting can fail", from: models.RunStepStatusWaitingExternal, to: models.RunStepStatusFailed, want: true},
+		{name: "completed cannot suspend", from: models.RunStepStatusSuccess, to: models.RunStepStatusWaitingExternal, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsValidRunStepTransition(test.from, test.to); got != test.want {
+				t.Fatalf("IsValidRunStepTransition(%q, %q)=%v want=%v", test.from, test.to, got, test.want)
+			}
+		})
+	}
+}

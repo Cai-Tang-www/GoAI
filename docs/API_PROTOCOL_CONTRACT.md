@@ -13,7 +13,7 @@
 - `/ping`、`/auth/register`、`/auth/login` 不需要 JWT。
 - `/api/*` 需要 `Authorization: Bearer <jwt>`。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
-- A2A Agent Card discovery 公开；`message:send`、Task 查询及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
+- A2A Agent Card discovery 公开；`message:send`、Task 查询、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
 
@@ -37,6 +37,7 @@
 | `GET` | `/a2a/agents/:agent_code/.well-known/agent-card.json` | protocol gateway | A2A Agent Card |
 | `POST` | `/a2a/agents/:agent_code/message:send` | protocol gateway | A2A Task |
 | `GET` | `/a2a/agents/:agent_code/tasks/:task_id` | protocol gateway | A2A Task |
+| `POST` | `/a2a/agents/:source_agent_code/callbacks/tasks/:task_id` | protocol gateway | callback accepted |
 
 ## 3. Authentication Examples
 
@@ -214,6 +215,7 @@ Accept: application/json
     }
   ],
   "capabilities": {
+    "pushNotifications": true,
     "extensions": [
       {
         "uri": "https://goai.dev/extensions/delegation/v1",
@@ -264,7 +266,9 @@ Content-Type: application/json
 }
 ```
 
-成功响应是官方 A2A Task：
+出站 Runtime 会在官方 SendMessageConfig 中设置 `returnImmediately=true`，并携带由 `A2A_CALLBACK_BASE_URL`、源 Agent code 和稳定 Task ID 生成的 PushConfig。远程 callback URL 必须使用 HTTPS，本地开发只允许 loopback HTTP。
+
+成功响应是官方 A2A Task；accepted/working 表示目标已持久化委派，不表示业务已经完成：
 
 ```json
 {
@@ -284,7 +288,31 @@ GET /a2a/agents/writer/tasks/run-child-001?historyLength=10 HTTP/1.1
 Accept: application/json
 ```
 
-返回的 Task 状态由 Child Run 和 Delegation 快照映射而来。当前 V1 支持查询和轮询，不支持取消、Push Notification 或流式 A2A 消息。
+返回的 Task 状态由 Child Run 和 Delegation 快照映射而来。Task 查询保留为诊断与兼容接口；Parent Worker 不轮询该接口等待终态，主链路使用 Push Notification callback。
+
+### Terminal Callback and Parent Resume
+
+Target Child Run 进入 `completed / failed / canceled / rejected` 后，将官方 A2A `StreamResponse` 事件发送到：
+
+```http
+POST /a2a/agents/planner/callbacks/tasks/run-child-001 HTTP/1.1
+Authorization: GoAI-HMAC-SHA256 ...
+X-GoAI-Agent-Code: writer
+A2A-Notification-Token: <task-bound-token>
+X-Trace-ID: trace-parent
+Content-Type: application/json
+```
+
+callback 处理规则：
+
+- Gateway 先校验 HMAC 机器身份，再校验 PushConfig 中绑定的 notification token、来源/目标 Agent、Task ID 和 Delegation。
+- 只接受终态事件；相同终态事件通过事件哈希幂等返回 `202`，同一 Task 的冲突终态返回 `409`。
+- 成功事件幂等写入跨 Runtime 一致的 Result Message，并发布内部 Kafka `run_resume` 消息。
+- 失败或取消事件终结 Parent Run，不发布成功 resume。
+- Resume Worker 原子 claim `waiting_external` Parent Run，并从 Delegation 保存的后继节点游标继续 Eino Graph；重复消息安全 no-op。
+- callback 或 resume 发布失败由 RecoveryWorker 基于持久化状态恢复，进程重启不丢失恢复意图。
+
+Parent Run 等待 callback 时，AG-UI SSE 继续观察持久化快照；AG-UI 客户端断开不会取消已持久化的 Child Run 或 Delegation。
 
 ### A2A Errors
 
@@ -310,6 +338,8 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 
 ## 8. Compatibility and Current Limits
 
-- V1 只做文本消息和同步轮询式 A2A 结果收敛，不做多模态、Push、Cancel、callback suspend/resume 或多个 Child Run 并行聚合。
+- V1 只做文本消息和 callback 驱动的单 Child suspend/resume，不做多模态、A2A Cancel、多个 Child Run fan-out/fan-in 或部分失败聚合。
+- AG-UI `parentRunId` 分支和用户主动 resume 尚未开放；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。
+- 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，不改变当前协议字段。
 - A2A 业务请求必须携带 `Authorization`、`X-GoAI-Agent-Code`、`X-GoAI-Timestamp`、`X-GoAI-Nonce`、`X-GoAI-Content-SHA256`；来源身份必须匹配委派 metadata，Task 查询仅允许委派来源 Agent。
 - 外部协议版本升级时，先更新 Gateway 适配和本文件，再变更内部领域模型；不要把 SDK 类型直接作为 Service 接口。

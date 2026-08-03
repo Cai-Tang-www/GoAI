@@ -38,6 +38,8 @@ func setupDelegationFixture(t *testing.T) delegationFixture {
 		&models.RunStep{},
 		&models.RunIdempotency{},
 		&models.Delegation{},
+		&models.Message{},
+		&models.A2APushConfig{},
 	); err != nil {
 		t.Fatalf("auto migrate delegation fixture failed: %v", err)
 	}

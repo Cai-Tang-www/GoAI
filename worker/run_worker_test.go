@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"GoAI/kafka"
 	"GoAI/models"
@@ -247,5 +249,83 @@ func TestRunWorkerPreservesExecutionAndReconcileErrors(t *testing.T) {
 	err = worker.HandleRunExecuteMessage(ctx, kafka.RunExecuteMessage{RunID: run.RunID})
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, reconcileErr) {
 		t.Fatalf("joined error lost cause: %v", err)
+	}
+}
+
+func TestRunWorkerResumesParentRunOnceAndReconciles(t *testing.T) {
+	database := openWorkerTestDB(t)
+	service, run := createWorkerRun(t, database)
+	if err := database.Model(&models.Run{}).Where("run_id = ?", run.RunID).Updates(map[string]any{
+		"status": models.RunStatusWaitingExternal, "current_step": "delegate",
+	}).Error; err != nil {
+		t.Fatalf("mark parent run waiting failed: %v", err)
+	}
+	startedAt := time.Now().Add(-time.Second)
+	step := models.RunStep{
+		RunID: run.RunID, StepKey: "delegate", StepType: "agent", Attempt: 1,
+		Status: models.RunStepStatusSuccess, InputJSON: "{}", OutputJSON: `{"answer":"done"}`, StartedAt: &startedAt,
+	}
+	if err := database.Create(&step).Error; err != nil {
+		t.Fatalf("create callback step failed: %v", err)
+	}
+	var agent models.Agent
+	if err := database.Where("id = ?", run.AgentID).First(&agent).Error; err != nil {
+		t.Fatalf("load agent failed: %v", err)
+	}
+	taskID := "remote-task"
+	delegation := models.Delegation{
+		DelegationID: "dlg-resume", ThreadID: run.ThreadID, ParentRunID: run.RunID, ChildRunID: taskID, A2ATaskID: &taskID,
+		SourceAgentID: agent.ID, TargetAgentID: agent.ID, CapabilityCode: "work", RequestMessageID: "msg-delegate",
+		ParentStepKey: step.StepKey, InputJSON: "{}", OutputJSON: step.OutputJSON, Status: models.DelegationStatusSucceeded,
+		CallbackEventHash: "callback-hash", ResumeStatus: models.DelegationResumeStatusPublished,
+	}
+	if err := database.Create(&delegation).Error; err != nil {
+		t.Fatalf("create resumable delegation failed: %v", err)
+	}
+	reconciler := noopDelegationReconciler{}
+	worker, err := NewRunWorker(service, reconciler)
+	if err != nil {
+		t.Fatalf("create run worker failed: %v", err)
+	}
+	message := kafka.RunResumeMessage{RunID: run.RunID, DelegationID: delegation.DelegationID, TraceID: "trace-resume"}
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("get worker SQL database failed: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	const consumers = 8
+	var wait sync.WaitGroup
+	errorsCh := make(chan error, consumers)
+	for range consumers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errorsCh <- worker.HandleRunResumeMessage(context.Background(), message)
+		}()
+	}
+	wait.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent resume message failed: %v", err)
+		}
+	}
+	var storedRun models.Run
+	if err := database.Where("run_id = ?", run.RunID).First(&storedRun).Error; err != nil {
+		t.Fatalf("load resumed run failed: %v", err)
+	}
+	var storedDelegation models.Delegation
+	if err := database.Where("delegation_id = ?", delegation.DelegationID).First(&storedDelegation).Error; err != nil {
+		t.Fatalf("load resumed delegation failed: %v", err)
+	}
+	if storedRun.Status != models.RunStatusSuccess || storedDelegation.ResumeStatus != models.DelegationResumeStatusCompleted {
+		t.Fatalf("unexpected resumed state run=%s delegation=%+v", storedRun.Status, storedDelegation)
+	}
+	var stepCount int64
+	if err := database.Model(&models.RunStep{}).Where("run_id = ?", run.RunID).Count(&stepCount).Error; err != nil {
+		t.Fatalf("count run steps failed: %v", err)
+	}
+	if stepCount != 1 {
+		t.Fatalf("duplicate resume repeated workflow prefix: steps=%d", stepCount)
 	}
 }

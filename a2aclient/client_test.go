@@ -19,7 +19,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
-func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
+func TestClientInvokeReturnsAcceptedTaskWithoutPolling(t *testing.T) {
 	var sendCount atomic.Int32
 	var pollCount atomic.Int32
 	var transportCount atomic.Int32
@@ -41,6 +41,13 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 			metadata, ok := request.Message.Metadata[a2aprotocol.DelegationExtensionURI].(map[string]any)
 			if !ok || metadata["traceId"] != "trace-parent" || metadata["delegationId"] != "dlg-parent" || metadata["parentRunId"] != "run-parent" {
 				t.Fatalf("A2A delegation metadata not propagated: %#v", request.Message.Metadata)
+			}
+			if request.Config == nil || !request.Config.ReturnImmediately || request.Config.PushConfig == nil {
+				t.Fatalf("A2A asynchronous configuration missing: %+v", request.Config)
+			}
+			push := request.Config.PushConfig
+			if string(push.TaskID) != "a2a_task_123" || push.ID != "dlg-parent" || push.URL != "http://127.0.0.1/a2a/agents/planner/callbacks/tasks/a2a_task_123" {
+				t.Fatalf("unexpected A2A push config: %+v", push)
 			}
 			response := &a2a.StreamResponse{Event: &a2a.Task{
 				ID:        request.Message.TaskID,
@@ -69,7 +76,7 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 			calls: &transportCount,
 		},
 	}
-	client, err := New(injectedClient, time.Second, time.Millisecond)
+	client, err := New(injectedClient, time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -89,14 +96,14 @@ func TestClientInvokeDiscoversSendsAndPollsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke: %v", err)
 	}
-	if result.State != services.AgentInvocationStateCompleted || result.OutputJSON != `{"answer":"ok"}` {
+	if result.State != services.AgentInvocationStateAccepted || result.OutputJSON != "{}" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if sendCount.Load() != 1 || pollCount.Load() != 1 {
+	if sendCount.Load() != 1 || pollCount.Load() != 0 {
 		t.Fatalf("unexpected request counts: send=%d poll=%d", sendCount.Load(), pollCount.Load())
 	}
-	if transportCount.Load() != 3 {
-		t.Fatalf("injected transport calls = %d, want 3", transportCount.Load())
+	if transportCount.Load() != 2 {
+		t.Fatalf("injected transport calls = %d, want 2", transportCount.Load())
 	}
 }
 
@@ -111,7 +118,7 @@ func (t countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 }
 
 func TestClientRejectsRemoteHTTPEndpoint(t *testing.T) {
-	client, err := New(nil, time.Second, time.Millisecond)
+	client, err := New(nil, time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -142,7 +149,7 @@ func TestClientRejectsMissingDelegationExtension(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	client, _ := New(server.Client(), time.Second, time.Millisecond)
+	client, _ := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	_, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
 		SourceAgentCode: "planner", TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "run-parent",
 		TaskID: "task", MessageID: "message", InputJSON: `{}`,
@@ -211,7 +218,7 @@ func TestClientAuthenticationSignsBusinessRequestsWithFreshNonces(t *testing.T) 
 	}))
 	defer server.Close()
 
-	client, err := New(server.Client(), time.Second, time.Millisecond, WithAuthentication(resolver, true))
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"), WithAuthentication(resolver, true))
 	if err != nil {
 		t.Fatalf("new authenticated client: %v", err)
 	}
@@ -224,7 +231,7 @@ func TestClientAuthenticationSignsBusinessRequestsWithFreshNonces(t *testing.T) 
 	if err != nil {
 		t.Fatalf("invoke authenticated endpoint: %v", err)
 	}
-	if result.OutputJSON != `{"answer":"signed"}` {
+	if result.State != services.AgentInvocationStateAccepted || result.OutputJSON != "{}" {
 		t.Fatalf("unexpected authenticated result: %+v", result)
 	}
 
@@ -233,8 +240,8 @@ func TestClientAuthenticationSignsBusinessRequestsWithFreshNonces(t *testing.T) 
 	if discoveryHeaders.Get("Authorization") != "" || discoveryHeaders.Get(a2aauth.HeaderAgentCode) != "" {
 		t.Fatalf("public discovery carried authentication headers: %v", discoveryHeaders)
 	}
-	if len(businessNonces) != 2 || businessNonces[0] == "" || businessNonces[1] == "" || businessNonces[0] == businessNonces[1] {
-		t.Fatalf("business requests must use distinct nonces: %v", businessNonces)
+	if len(businessNonces) != 1 || businessNonces[0] == "" {
+		t.Fatalf("business request must be signed with a nonce: %v", businessNonces)
 	}
 }
 
@@ -279,7 +286,7 @@ func TestClientAuthenticationRejectsMissingSourceConfigAndUnsecuredCard(t *testi
 			}))
 			defer server.Close()
 
-			client, newErr := New(server.Client(), time.Second, time.Millisecond, WithAuthentication(resolver, true))
+			client, newErr := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"), WithAuthentication(resolver, true))
 			if newErr != nil {
 				t.Fatalf("new authenticated client: %v", newErr)
 			}
@@ -350,7 +357,7 @@ func TestClientRejectsTaskIDMismatch(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.Client(), time.Second, time.Millisecond)
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -377,7 +384,7 @@ func TestClientReturnsNonRetryableFailedTask(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.Client(), time.Second, time.Millisecond)
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -393,50 +400,34 @@ func TestClientReturnsNonRetryableFailedTask(t *testing.T) {
 	}
 }
 
-func TestClientStopsPollingWhenContextIsCanceled(t *testing.T) {
-	serverReady := make(chan struct{})
+func TestClientReturnsAcceptedTaskBeforeCallerContextEnds(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/a2a/agents/writer/.well-known/agent-card.json":
 			_ = json.NewEncoder(w).Encode(testCard(serverBaseURL(r), "write"))
 		case "/a2a/agents/writer/message:send":
-			close(serverReady)
 			_ = json.NewEncoder(w).Encode(&a2a.StreamResponse{Event: &a2a.Task{ID: "working-task", Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}})
-		case "/a2a/agents/writer/tasks/working-task":
-			<-r.Context().Done()
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.Client(), time.Second, time.Second)
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resultCh := make(chan error, 1)
-	go func() {
-		_, invokeErr := client.Invoke(ctx, services.AgentInvocationRequest{
-			SourceAgentCode: "planner", TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "parent",
-			TaskID: "working-task", MessageID: "message", InputJSON: `{}`, Endpoints: []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
-		})
-		resultCh <- invokeErr
-	}()
-	select {
-	case <-serverReady:
-	case <-time.After(time.Second):
-		t.Fatal("A2A send request was not received")
+	result, err := client.Invoke(ctx, services.AgentInvocationRequest{
+		SourceAgentCode: "planner", TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "parent",
+		TaskID: "working-task", MessageID: "message", InputJSON: `{}`, Endpoints: []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
 	}
-	cancel()
-	select {
-	case invokeErr := <-resultCh:
-		if !errors.Is(invokeErr, context.Canceled) {
-			t.Fatalf("expected context cancellation, got %v", invokeErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("invoke did not stop after context cancellation")
+	if result.State != services.AgentInvocationStateAccepted {
+		t.Fatalf("state=%s, want accepted", result.State)
 	}
 }
 
@@ -449,7 +440,7 @@ func TestClientRejectsUnsafeRedirect(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	client, err := New(server.Client(), time.Second, time.Millisecond)
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -482,7 +473,7 @@ func TestClientSupportsHTTPSAgentEndpoint(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.Client(), time.Second, time.Millisecond)
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -525,7 +516,7 @@ func TestClientFallsBackToNextEndpointAndRecordsOverallSuccess(t *testing.T) {
 	defer successServer.Close()
 
 	bundle := observability.NewNoop()
-	client, err := New(successServer.Client(), time.Second, time.Millisecond, WithObservability(bundle))
+	client, err := New(successServer.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"), WithObservability(bundle))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -563,8 +554,16 @@ func TestNilClientInvokeReturnsError(t *testing.T) {
 	}
 }
 
+func TestWithCallbackBaseURLRejectsQueryAndFragment(t *testing.T) {
+	for _, rawURL := range []string{"https://agents.example.com?token=secret", "https://agents.example.com#callback"} {
+		if _, err := New(nil, time.Second, WithCallbackBaseURL(rawURL)); err == nil || !contains(err.Error(), "query and fragment are not allowed") {
+			t.Fatalf("callback base URL %q error=%v", rawURL, err)
+		}
+	}
+}
+
 func TestNewDoesNotOverrideManagedTransportTimeout(t *testing.T) {
-	client, err := New(&http.Client{Transport: managedTimeoutRoundTripper{}}, time.Second, time.Millisecond)
+	client, err := New(&http.Client{Transport: managedTimeoutRoundTripper{}}, time.Second, WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

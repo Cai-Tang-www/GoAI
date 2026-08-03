@@ -27,16 +27,20 @@ type messageReader interface {
 // RunMessageHandler 处理一个反序列化后的 Run 执行事件。
 type RunMessageHandler func(context.Context, RunExecuteMessage) error
 
+// RunResumeMessageHandler 处理一个反序列化后的 Parent Run 恢复事件。
+type RunResumeMessageHandler func(context.Context, RunResumeMessage) error
+
 // Consumer 持有 Kafka Reader 和对应的业务消息处理器。
 type Consumer struct {
-	reader    messageReader
-	handler   RunMessageHandler
-	logger    *log.Logger
-	telemetry *observability.Bundle
-	topic     string
-	closed    atomic.Bool
-	closeOnce sync.Once
-	closeErr  error
+	reader        messageReader
+	handler       RunMessageHandler
+	resumeHandler RunResumeMessageHandler
+	logger        *log.Logger
+	telemetry     *observability.Bundle
+	topic         string
+	closed        atomic.Bool
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // ConsumerOption 配置 Kafka 消费者的可选依赖。
@@ -53,24 +57,36 @@ func WithConsumerObservability(bundle *observability.Bundle) ConsumerOption {
 	}
 }
 
-// NewConsumer 创建 Run topic 消费者。业务处理器由调用方显式注入。
+// NewConsumer 创建 Run 首次执行 topic 消费者。业务处理器由调用方显式注入。
 func NewConsumer(cfg *config.Config, handler RunMessageHandler, options ...ConsumerOption) (*Consumer, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("creating Kafka consumer: config is nil")
-	}
 	if handler == nil {
 		return nil, fmt.Errorf("creating Kafka consumer: handler is nil")
 	}
+	return newConsumer(cfg, cfgTopic(cfg, false), cfgGroup(cfg, false), handler, nil, options...)
+}
+
+// NewResumeConsumer 创建 Parent Run 恢复 topic 消费者。
+func NewResumeConsumer(cfg *config.Config, handler RunResumeMessageHandler, options ...ConsumerOption) (*Consumer, error) {
+	if handler == nil {
+		return nil, fmt.Errorf("creating Kafka resume consumer: handler is nil")
+	}
+	return newConsumer(cfg, cfgTopic(cfg, true), cfgGroup(cfg, true), nil, handler, options...)
+}
+
+func newConsumer(cfg *config.Config, topic, groupID string, handler RunMessageHandler, resumeHandler RunResumeMessageHandler, options ...ConsumerOption) (*Consumer, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("creating Kafka consumer: config is nil")
+	}
 	reader := kgo.NewReader(kgo.ReaderConfig{
 		Brokers:        []string{cfg.KafkaBootstrapServers},
-		Topic:          cfg.KafkaRunTopic,
-		GroupID:        cfg.KafkaRunGroupID,
+		Topic:          topic,
+		GroupID:        groupID,
 		MinBytes:       10e3,
 		MaxBytes:       10e6,
 		MaxWait:        10 * time.Second,
 		CommitInterval: time.Second,
 	})
-	consumer := &Consumer{reader: reader, handler: handler, logger: log.Default(), topic: cfg.KafkaRunTopic}
+	consumer := &Consumer{reader: reader, handler: handler, resumeHandler: resumeHandler, logger: log.Default(), topic: topic}
 	for _, option := range options {
 		if option == nil {
 			continue
@@ -105,61 +121,109 @@ func (c *Consumer) Start(ctx context.Context) error {
 			logger.Printf("kafka read failed trace_id=%s err=%v", requestctx.TraceIDFromContext(ctx), err)
 			return fmt.Errorf("reading Kafka message: %w", err)
 		}
-
-		var payload RunExecuteMessage
-		if err := json.Unmarshal(message.Value, &payload); err != nil {
+		if err := c.handleMessage(ctx, logger, message); err != nil {
 			c.observe("consume", message.Topic, "error")
-			logger.Printf("parse run message failed err=%v", err)
-			continue
-		}
-		if payload.RunID == "" {
-			c.observe("consume", message.Topic, "error")
-			logger.Println("Run 消息缺少 run_id，跳过")
-			continue
-		}
-		msgCtx := ctx
-		if payload.TraceID != "" {
-			msgCtx = requestctx.WithTraceID(ctx, payload.TraceID)
-		}
-		traceCtx := observability.ContextWithTraceID(msgCtx, requestctx.TraceIDFromContext(msgCtx))
-		startedAt := time.Now()
-		status := "success"
-		var span oteltrace.Span
-		if c.telemetry != nil && c.telemetry.Tracer != nil {
-			traceCtx, span = c.telemetry.Tracer.Start(traceCtx, "kafka.consume", observability.SpanAttributes(
-				requestctx.TraceIDFromContext(msgCtx), payload.RunID, "", "")...)
-		}
-		if c.telemetry != nil && c.telemetry.Logger != nil {
-			c.telemetry.Logger.InfoContext(traceCtx, "kafka consume",
-				slog.String("trace_id", requestctx.TraceIDFromContext(msgCtx)),
-				slog.String("topic", message.Topic),
-				slog.Int("partition", message.Partition),
-				slog.Int64("offset", message.Offset),
-				slog.String("run_id", payload.RunID),
-			)
-		} else {
-			logger.Printf("kafka consume trace_id=%s topic=%s partition=%d offset=%d run_id=%s", requestctx.TraceIDFromContext(msgCtx), message.Topic, message.Partition, message.Offset, payload.RunID)
-		}
-		if err := c.handler(traceCtx, payload); err != nil {
-			status = "error"
-			if span != nil {
-				observability.MarkSpanError(span, err)
-			}
-			logger.Printf("handle run message failed trace_id=%s run_id=%s err=%v", requestctx.TraceIDFromContext(msgCtx), payload.RunID, err)
-		}
-		if span != nil {
-			span.End()
-		}
-		c.observe("consume", message.Topic, status)
-		if c.telemetry != nil && c.telemetry.Logger != nil {
-			c.telemetry.Logger.InfoContext(traceCtx, "kafka consume finished",
-				slog.String("trace_id", requestctx.TraceIDFromContext(msgCtx)),
-				slog.String("run_id", payload.RunID),
-				slog.String("status", status),
-				slog.Int64("latency_ms", time.Since(startedAt).Milliseconds()),
-			)
+			logger.Printf("parse Kafka run message failed topic=%s err=%v", message.Topic, err)
 		}
 	}
+}
+
+func (c *Consumer) handleMessage(ctx context.Context, logger *log.Logger, message kgo.Message) error {
+	runID, traceID, handle, err := c.decodeMessage(message.Value)
+	if err != nil {
+		return err
+	}
+	msgCtx := ctx
+	if traceID != "" {
+		msgCtx = requestctx.WithTraceID(ctx, traceID)
+	}
+	traceCtx := observability.ContextWithTraceID(msgCtx, requestctx.TraceIDFromContext(msgCtx))
+	startedAt := time.Now()
+	status := "success"
+	var span oteltrace.Span
+	if c.telemetry != nil && c.telemetry.Tracer != nil {
+		traceCtx, span = c.telemetry.Tracer.Start(traceCtx, "kafka.consume", observability.SpanAttributes(
+			requestctx.TraceIDFromContext(msgCtx), runID, "", "")...)
+	}
+	if c.telemetry != nil && c.telemetry.Logger != nil {
+		c.telemetry.Logger.InfoContext(traceCtx, "kafka consume",
+			slog.String("trace_id", requestctx.TraceIDFromContext(msgCtx)),
+			slog.String("topic", message.Topic),
+			slog.Int("partition", message.Partition),
+			slog.Int64("offset", message.Offset),
+			slog.String("run_id", runID),
+		)
+	} else {
+		logger.Printf("kafka consume trace_id=%s topic=%s partition=%d offset=%d run_id=%s", requestctx.TraceIDFromContext(msgCtx), message.Topic, message.Partition, message.Offset, runID)
+	}
+	if err := handle(traceCtx); err != nil {
+		status = "error"
+		if span != nil {
+			observability.MarkSpanError(span, err)
+		}
+		logger.Printf("handle run message failed trace_id=%s run_id=%s err=%v", requestctx.TraceIDFromContext(msgCtx), runID, err)
+	}
+	if span != nil {
+		span.End()
+	}
+	c.observe("consume", message.Topic, status)
+	if c.telemetry != nil && c.telemetry.Logger != nil {
+		c.telemetry.Logger.InfoContext(traceCtx, "kafka consume finished",
+			slog.String("trace_id", requestctx.TraceIDFromContext(msgCtx)),
+			slog.String("run_id", runID),
+			slog.String("status", status),
+			slog.Int64("latency_ms", time.Since(startedAt).Milliseconds()),
+		)
+	}
+	return nil
+}
+
+func (c *Consumer) decodeMessage(value []byte) (string, string, func(context.Context) error, error) {
+	if c.resumeHandler != nil {
+		var payload RunResumeMessage
+		if err := json.Unmarshal(value, &payload); err != nil {
+			return "", "", nil, err
+		}
+		if payload.RunID == "" || payload.DelegationID == "" {
+			return "", "", nil, errors.New("Run 恢复消息缺少 run_id 或 delegation_id")
+		}
+		return payload.RunID, payload.TraceID, func(ctx context.Context) error {
+			return c.resumeHandler(ctx, payload)
+		}, nil
+	}
+	var payload RunExecuteMessage
+	if err := json.Unmarshal(value, &payload); err != nil {
+		return "", "", nil, err
+	}
+	if payload.RunID == "" {
+		return "", "", nil, errors.New("Run 消息缺少 run_id")
+	}
+	if c.handler == nil {
+		return "", "", nil, errors.New("Run 消息处理器未配置")
+	}
+	return payload.RunID, payload.TraceID, func(ctx context.Context) error {
+		return c.handler(ctx, payload)
+	}, nil
+}
+
+func cfgTopic(cfg *config.Config, resume bool) string {
+	if cfg == nil {
+		return ""
+	}
+	if resume {
+		return cfg.KafkaRunResumeTopic
+	}
+	return cfg.KafkaRunTopic
+}
+
+func cfgGroup(cfg *config.Config, resume bool) string {
+	if cfg == nil {
+		return ""
+	}
+	if resume {
+		return cfg.KafkaRunResumeGroupID
+	}
+	return cfg.KafkaRunGroupID
 }
 
 func (c *Consumer) observe(operation, topic, status string) {

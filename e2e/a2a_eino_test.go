@@ -39,6 +39,29 @@ func (p syncRunPublisher) PublishRunExecute(ctx context.Context, runID string) e
 	return p.execute(ctx, runID)
 }
 
+type queuedRunPublisher struct {
+	runIDs chan string
+}
+
+func (p queuedRunPublisher) PublishRunExecute(ctx context.Context, runID string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case p.runIDs <- runID:
+		return nil
+	}
+}
+
+type runResumePublisherFunc func(context.Context, string, string) error
+
+type httpHandlerHolder struct {
+	handler http.Handler
+}
+
+func (f runResumePublisherFunc) PublishRunResume(ctx context.Context, runID, delegationID string) error {
+	return f(ctx, runID, delegationID)
+}
+
 func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T) {
 	databaseA := openE2EDB(t, "agent_a")
 	databaseB := openE2EDB(t, "agent_b")
@@ -81,21 +104,6 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 		t.Fatalf("create child chat service: %v", err)
 	}
 
-	var childService *services.RunService
-	childPublisher := syncRunPublisher{execute: func(ctx context.Context, runID string) error {
-		if childService == nil {
-			return fmt.Errorf("child run service is not initialized")
-		}
-		return childService.HandleRunExecute(ctx, runID)
-	}}
-	childService, err = services.NewRunService(databaseB, childPublisher, services.WithChatService(chatService))
-	if err != nil {
-		t.Fatalf("create child run service: %v", err)
-	}
-	runtimeB, err := services.NewRuntimeService(databaseB, childService)
-	if err != nil {
-		t.Fatalf("create target runtime: %v", err)
-	}
 	credentialResolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{
 		"planner-key": "test-only-planner-a2a-secret-at-least-32-bytes",
 		"writer-key":  "test-only-writer-a2a-secret-at-least-32-bytes",
@@ -107,27 +115,53 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	if err != nil {
 		t.Fatalf("create A2A verifier: %v", err)
 	}
+
+	var sourceHandler atomic.Value
+	sourceHandler.Store(httpHandlerHolder{handler: http.NotFoundHandler()})
+	var sourcePathsMu sync.Mutex
+	var sourcePaths []string
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourcePathsMu.Lock()
+		sourcePaths = append(sourcePaths, r.URL.Path)
+		sourcePathsMu.Unlock()
+		sourceHandler.Load().(httpHandlerHolder).handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(serverA.Close)
+
+	callbackSender, err := a2aclient.NewCallbackSender(serverA.Client(), credentialResolver, true)
+	if err != nil {
+		t.Fatalf("create A2A callback sender: %v", err)
+	}
+	childRunIDs := make(chan string, 1)
+	childService, err := services.NewRunService(databaseB, queuedRunPublisher{runIDs: childRunIDs}, services.WithChatService(chatService))
+	if err != nil {
+		t.Fatalf("create child run service: %v", err)
+	}
+	runtimeB, err := services.NewRuntimeService(databaseB, childService, services.WithDelegationCallbackSender(callbackSender))
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
 	gatewayB, err := a2agateway.New(runtimeB, a2agateway.WithAuthentication(verifier, true))
 	if err != nil {
 		t.Fatalf("create target gateway: %v", err)
 	}
 
-	var pathsMu sync.Mutex
-	var paths []string
+	var targetPathsMu sync.Mutex
+	var targetPaths []string
 	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pathsMu.Lock()
-		paths = append(paths, r.URL.Path)
-		pathsMu.Unlock()
+		targetPathsMu.Lock()
+		targetPaths = append(targetPaths, r.URL.Path)
+		targetPathsMu.Unlock()
 		gatewayB.ServeHTTP(w, r)
 	}))
 	t.Cleanup(serverB.Close)
 
 	seedEndpoint(t, databaseB, agentB, serverB.URL+"/a2a/agents/writer", "writer-key")
-	seedEndpoint(t, databaseB, plannerB, serverB.URL+"/a2a/agents/planner", "planner-key")
+	seedEndpoint(t, databaseB, plannerB, serverA.URL+"/a2a/agents/planner", "planner-key")
 	seedEndpoint(t, databaseA, agentBInA, serverB.URL+"/a2a/agents/writer", "writer-key")
-	seedEndpoint(t, databaseA, agentA, "http://127.0.0.1:1/a2a/agents/planner", "planner-key")
+	seedEndpoint(t, databaseA, agentA, serverA.URL+"/a2a/agents/planner", "planner-key")
 
-	outbound, err := a2aclient.New(serverB.Client(), 5*time.Second, time.Millisecond, a2aclient.WithAuthentication(credentialResolver, true))
+	outbound, err := a2aclient.New(serverB.Client(), 5*time.Second, a2aclient.WithCallbackBaseURL(serverA.URL), a2aclient.WithAuthentication(credentialResolver, true))
 	if err != nil {
 		t.Fatalf("create A2A client: %v", err)
 	}
@@ -142,9 +176,16 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	if err != nil {
 		t.Fatalf("create parent run service: %v", err)
 	}
-	runtimeA, err := services.NewRuntimeService(databaseA, parentService)
+	resumePublisher := runResumePublisherFunc(func(ctx context.Context, runID, delegationID string) error {
+		return parentService.HandleRunResume(ctx, runID, delegationID)
+	})
+	runtimeA, err := services.NewRuntimeService(databaseA, parentService, services.WithRunResumePublisher(resumePublisher))
 	if err != nil {
 		t.Fatalf("create source runtime: %v", err)
+	}
+	gatewayA, err := a2agateway.New(runtimeA, a2agateway.WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create source gateway: %v", err)
 	}
 	aguiHandler, err := handlers.NewAGUIHandler(runtimeA)
 	if err != nil {
@@ -158,35 +199,80 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 		c.Next()
 	})
 	routerA.POST("/api/agents/:agent_code/agui", aguiHandler.RunAgent)
-	serverA := httptest.NewServer(routerA)
-	t.Cleanup(serverA.Close)
+	muxA := http.NewServeMux()
+	muxA.Handle("/api/", routerA)
+	muxA.Handle("/a2a/", gatewayA)
+	sourceHandler.Store(httpHandlerHolder{handler: muxA})
 
-	requestBody := `{"threadId":"thread-e2e","runId":"run-parent-e2e","state":{},"messages":[{"id":"message-user-e2e","role":"user","content":"draft a release note"}],"tools":[],"context":[]}`
-	request, err := http.NewRequest(http.MethodPost, serverA.URL+"/api/agents/planner/agui", strings.NewReader(requestBody))
-	if err != nil {
-		t.Fatalf("create AG-UI request: %v", err)
+	type aguiResult struct {
+		status int
+		header http.Header
+		body   []byte
+		err    error
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Trace-ID", "trace-e2e")
-	response, err := serverA.Client().Do(request)
-	if err != nil {
-		t.Fatalf("send AG-UI request: %v", err)
+	responseCh := make(chan aguiResult, 1)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	go func() {
+		requestBody := `{"threadId":"thread-e2e","runId":"run-parent-e2e","state":{},"messages":[{"id":"message-user-e2e","role":"user","content":"draft a release note"}],"tools":[],"context":[]}`
+		request, requestErr := http.NewRequestWithContext(requestCtx, http.MethodPost, serverA.URL+"/api/agents/planner/agui", strings.NewReader(requestBody))
+		if requestErr != nil {
+			responseCh <- aguiResult{err: requestErr}
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Trace-ID", "trace-e2e")
+		response, requestErr := serverA.Client().Do(request)
+		if requestErr != nil {
+			responseCh <- aguiResult{err: requestErr}
+			return
+		}
+		defer response.Body.Close()
+		body, readErr := io.ReadAll(response.Body)
+		responseCh <- aguiResult{status: response.StatusCode, header: response.Header.Clone(), body: body, err: readErr}
+	}()
+
+	var childRunID string
+	select {
+	case childRunID = <-childRunIDs:
+	case <-time.After(3 * time.Second):
+		t.Fatal("target A2A gateway did not enqueue child run")
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatalf("read AG-UI stream: %v", err)
+	waitForRunStatus(t, databaseA, "run-parent-e2e", models.RunStatusWaitingExternal)
+	var waitingStep models.RunStep
+	if err := databaseA.Where("run_id = ? AND step_key = ?", "run-parent-e2e", "delegate").First(&waitingStep).Error; err != nil {
+		t.Fatalf("load waiting parent step: %v", err)
 	}
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("AG-UI status=%d body=%s", response.StatusCode, body)
+	if waitingStep.Status != models.RunStepStatusWaitingExternal {
+		t.Fatalf("parent step status before callback=%s want=%s", waitingStep.Status, models.RunStepStatusWaitingExternal)
 	}
-	if contentType := response.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+
+	if err := childService.HandleRunExecute(context.Background(), childRunID); err != nil {
+		t.Fatalf("execute child run: %v", err)
+	}
+	if err := runtimeB.ReconcileDelegation(context.Background(), childRunID); err != nil {
+		t.Fatalf("reconcile child delegation and send callback: %v", err)
+	}
+
+	var agui aguiResult
+	select {
+	case agui = <-responseCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("AG-UI stream did not finish after A2A callback")
+	}
+	if agui.err != nil {
+		t.Fatalf("AG-UI request failed: %v", agui.err)
+	}
+	if agui.status != http.StatusOK {
+		t.Fatalf("AG-UI status=%d body=%s", agui.status, agui.body)
+	}
+	if contentType := agui.header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
 		t.Fatalf("unexpected AG-UI content type %q", contentType)
 	}
-	if traceID := response.Header.Get("X-Trace-ID"); traceID != "trace-e2e" {
+	if traceID := agui.header.Get("X-Trace-ID"); traceID != "trace-e2e" {
 		t.Fatalf("unexpected AG-UI trace id %q", traceID)
 	}
-	assertAGUIResultStream(t, string(body), "release note ready")
+	assertAGUIResultStream(t, string(agui.body), "release note ready")
 	if providerCalls.Load() != 1 {
 		t.Fatalf("Agent B Eino LLM node provider calls=%d, want 1", providerCalls.Load())
 	}
@@ -206,19 +292,24 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 		t.Fatalf("unexpected parent step: %+v", parentStep)
 	}
 
-	var delegation models.Delegation
-	if err := databaseB.Where("parent_run_id = ?", storedParent.RunID).First(&delegation).Error; err != nil {
-		t.Fatalf("load delegation: %v", err)
+	var sourceDelegation models.Delegation
+	if err := databaseA.Where("parent_run_id = ?", storedParent.RunID).First(&sourceDelegation).Error; err != nil {
+		t.Fatalf("load source delegation: %v", err)
 	}
-	if delegation.Status != models.DelegationStatusSucceeded || delegation.TraceID != "trace-e2e" || delegation.ThreadID != "thread-e2e" {
-		t.Fatalf("unexpected delegation: %+v", delegation)
+	if sourceDelegation.Status != models.DelegationStatusSucceeded || sourceDelegation.ResumeStatus != models.DelegationResumeStatusCompleted || sourceDelegation.CallbackEventHash == "" {
+		t.Fatalf("source callback did not complete resume: %+v", sourceDelegation)
 	}
-	if delegation.SourceAgentID == 0 || delegation.TargetAgentID != agentB.ID {
-		t.Fatalf("delegation agent links missing: %+v", delegation)
+
+	var targetDelegation models.Delegation
+	if err := databaseB.Where("child_run_id = ?", childRunID).First(&targetDelegation).Error; err != nil {
+		t.Fatalf("load target delegation: %v", err)
+	}
+	if targetDelegation.Status != models.DelegationStatusSucceeded || targetDelegation.TraceID != "trace-e2e" || targetDelegation.ThreadID != "thread-e2e" {
+		t.Fatalf("unexpected target delegation: %+v", targetDelegation)
 	}
 
 	var childRun models.Run
-	if err := databaseB.Where("run_id = ?", delegation.ChildRunID).First(&childRun).Error; err != nil {
+	if err := databaseB.Where("run_id = ?", childRunID).First(&childRun).Error; err != nil {
 		t.Fatalf("load child run: %v", err)
 	}
 	if childRun.Status != models.RunStatusSuccess || childRun.AgentID != agentB.ID || childRun.WorkflowID != workflowB.ID || childRun.TraceID != "trace-e2e" {
@@ -232,33 +323,51 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 		t.Fatalf("unexpected child steps: %+v", childSteps)
 	}
 
-	var childMessages []models.Message
-	if err := databaseB.Where("delegation_id = ?", delegation.DelegationID).Order("id ASC").Find(&childMessages).Error; err != nil {
-		t.Fatalf("load delegation messages: %v", err)
+	var targetMessages []models.Message
+	if err := databaseB.Where("delegation_id = ?", targetDelegation.DelegationID).Order("id ASC").Find(&targetMessages).Error; err != nil {
+		t.Fatalf("load target delegation messages: %v", err)
 	}
-	if len(childMessages) != 2 || childMessages[0].RunID != childRun.RunID || childMessages[1].RunID != childRun.RunID {
-		t.Fatalf("unexpected delegation messages: %+v", childMessages)
+	if len(targetMessages) != 2 || targetMessages[0].RunID != childRun.RunID || targetMessages[1].RunID != storedParent.RunID {
+		t.Fatalf("unexpected target delegation messages: %+v", targetMessages)
 	}
-	if !strings.Contains(childMessages[0].MetadataJSON, "traceId") || !strings.Contains(childMessages[0].MetadataJSON, "delegationId") || !strings.Contains(childMessages[1].ContentJSON, "release note ready") {
-		t.Fatalf("delegation correlation or result missing: %+v", childMessages)
+	var sourceResult models.Message
+	if err := databaseA.Where("delegation_id = ? AND message_type = ?", sourceDelegation.DelegationID, models.MessageTypeResult).First(&sourceResult).Error; err != nil {
+		t.Fatalf("load source callback result message: %v", err)
 	}
-
-	var parentMessages []models.Message
-	if err := databaseA.Where("run_id = ?", storedParent.RunID).Order("id ASC").Find(&parentMessages).Error; err != nil {
-		t.Fatalf("load parent messages: %v", err)
-	}
-	if len(parentMessages) != 2 || parentMessages[0].MessageType != models.MessageTypeInput || parentMessages[1].MessageType != models.MessageTypeResult || !strings.Contains(parentMessages[1].ContentJSON, "release note ready") {
-		t.Fatalf("unexpected parent messages: %+v", parentMessages)
+	if sourceResult.MessageID != targetMessages[1].MessageID || sourceResult.RunID != storedParent.RunID || !strings.Contains(sourceResult.ContentJSON, "release note ready") {
+		t.Fatalf("callback result message is not correlated across runtimes: source=%+v target=%+v", sourceResult, targetMessages[1])
 	}
 
-	pathsMu.Lock()
-	seenPaths := append([]string(nil), paths...)
-	pathsMu.Unlock()
-	if !containsPath(seenPaths, "/a2a/agents/writer/.well-known/agent-card.json") {
-		t.Fatalf("A2A Agent Card discovery did not reach target gateway: %v", seenPaths)
+	targetPathsMu.Lock()
+	seenTargetPaths := append([]string(nil), targetPaths...)
+	targetPathsMu.Unlock()
+	if !containsPath(seenTargetPaths, "/a2a/agents/writer/.well-known/agent-card.json") {
+		t.Fatalf("A2A Agent Card discovery did not reach target gateway: %v", seenTargetPaths)
 	}
-	if !containsPath(seenPaths, "/a2a/agents/writer/message:send") {
-		t.Fatalf("A2A message:send did not reach target gateway: %v", seenPaths)
+	if !containsPath(seenTargetPaths, "/a2a/agents/writer/message:send") {
+		t.Fatalf("A2A message:send did not reach target gateway: %v", seenTargetPaths)
+	}
+	sourcePathsMu.Lock()
+	seenSourcePaths := append([]string(nil), sourcePaths...)
+	sourcePathsMu.Unlock()
+	callbackPath := "/a2a/agents/planner/callbacks/tasks/" + sourceDelegation.ChildRunID
+	if !containsPath(seenSourcePaths, callbackPath) {
+		t.Fatalf("A2A callback did not reach source gateway: want=%s paths=%v", callbackPath, seenSourcePaths)
+	}
+}
+
+func waitForRunStatus(t *testing.T, database *gorm.DB, runID, status string) models.Run {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var run models.Run
+		if err := database.Where("run_id = ?", runID).First(&run).Error; err == nil && run.Status == status {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not reach status %s", runID, status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -316,6 +425,7 @@ func migrateE2ADB(t *testing.T, database *gorm.DB) {
 		&models.Thread{},
 		&models.Message{},
 		&models.Delegation{},
+		&models.A2APushConfig{},
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},

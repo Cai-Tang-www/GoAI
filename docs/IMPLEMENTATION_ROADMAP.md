@@ -1,6 +1,6 @@
 # GoAI 实施路线图
 
-更新时间：2026-07-31
+更新时间：2026-08-03
 
 ## 当前判断
 
@@ -50,17 +50,20 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 ## P1：多 Agent 运行时闭环
 
-### 7. 多 Agent 协作运行时（Issue #37，核心闭环已落地）
+### 7. 多 Agent 协作运行时（Issue #37 + Issue #43，异步闭环已落地）
 已落地：
 - Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调
-- 官方 A2A Go SDK Client 完成 Agent Card discovery、能力/扩展校验、`message:send`、Task polling 和 Artifact/Message 结果收敛
-- 本地目标只允许 loopback HTTP，远程目标必须使用 HTTPS；Kafka 只承载 Run 执行消息，不承担 Agent 协议通信
-- `input_from` 支持从成功的上游 RunStep 聚合输入；TaskID/MessageID 基于 Parent Run + 节点稳定生成，重试不重复创建子任务
+- 官方 A2A Go SDK Client 完成 Agent Card discovery、能力/扩展/Push Notification 校验，并使用 `ReturnImmediately + PushConfig` 提交委派
+- 本地目标只允许 loopback HTTP，远程目标必须使用 HTTPS；Kafka 只承载 `run_execute / run_resume` 内部调度消息，不承担 Agent 协议通信
+- `input_from` 支持从成功的上游 RunStep 聚合输入；TaskID/MessageID/DelegationID 基于 Parent Run + 节点稳定生成，重试不重复创建子任务
+- Target 返回 accepted 后，Parent Run/RunStep 持久化为 `waiting_external` 并释放 Worker，不进行 Task polling
+- Target 终态通过认证 A2A callback 回流；源 Runtime 幂等写 Result Message，发布 `run_resume`，并从持久化游标继续 Eino Graph
+- callback/resume 发布状态、原子 claim、重复消息 no-op 与 RecoveryWorker 已覆盖进程重启恢复
 
 后续补齐：
-- callback 驱动的 Parent Run suspend/resume；当前 V1 是 Worker 内阻塞轮询
-- 多 Child Run 并行执行、结果聚合与部分失败策略
+- 多 Child Run fan-out/fan-in、结果聚合与部分失败策略
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
+- AG-UI `parentRunId` 分支和用户主动 resume
 - Supervisor / Router / Worker 协作策略
 ### 8. Eino Graph 能力化接入（Issue #37，V1 已落地）
 - 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制

@@ -274,7 +274,7 @@ func newA2ATargetFixture(t *testing.T, definition string) *a2aTargetFixture {
 
 func newA2AClient(t *testing.T, httpClient *http.Client, timeout time.Duration) *a2aclient.Client {
 	t.Helper()
-	client, err := a2aclient.New(httpClient, timeout, time.Millisecond)
+	client, err := a2aclient.New(httpClient, timeout, a2aclient.WithCallbackBaseURL("http://127.0.0.1"))
 	if err != nil {
 		t.Fatalf("create A2A client: %v", err)
 	}

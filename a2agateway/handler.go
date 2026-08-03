@@ -5,6 +5,8 @@ import (
 	"errors"
 	"iter"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"GoAI/a2aauth"
 	"GoAI/requestctx"
@@ -85,20 +87,86 @@ func (h *requestHandler) SendStreamingMessage(context.Context, *a2a.SendMessageR
 	return unsupportedEventSequence()
 }
 
-func (h *requestHandler) GetTaskPushConfig(context.Context, *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {
-	return nil, a2a.ErrPushNotificationNotSupported
+func (h *requestHandler) GetTaskPushConfig(ctx context.Context, request *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {
+	target, source, err := h.pushConfigAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if request == nil || strings.TrimSpace(string(request.TaskID)) == "" || strings.TrimSpace(request.ID) == "" {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "taskId and id are required")
+	}
+	config, err := h.runtime.GetDelegationPushConfig(ctx, target, source, string(request.TaskID), request.ID)
+	if err != nil {
+		return nil, mapRuntimeError(err)
+	}
+	return pushConfigToProtocol(config), nil
 }
 
-func (h *requestHandler) ListTaskPushConfigs(context.Context, *a2a.ListTaskPushConfigRequest) (*a2a.ListTaskPushConfigResponse, error) {
-	return nil, a2a.ErrPushNotificationNotSupported
+func (h *requestHandler) ListTaskPushConfigs(ctx context.Context, request *a2a.ListTaskPushConfigRequest) (*a2a.ListTaskPushConfigResponse, error) {
+	target, source, err := h.pushConfigAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if request == nil || strings.TrimSpace(string(request.TaskID)) == "" || request.PageSize < 0 {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "taskId is required and pageSize must not be negative")
+	}
+	configs, err := h.runtime.ListDelegationPushConfigs(ctx, target, source, string(request.TaskID))
+	if err != nil {
+		return nil, mapRuntimeError(err)
+	}
+	start := 0
+	if token := strings.TrimSpace(request.PageToken); token != "" {
+		start, err = strconv.Atoi(token)
+		if err != nil || start < 0 || start > len(configs) {
+			return nil, a2a.NewError(a2a.ErrInvalidParams, "pageToken is invalid")
+		}
+	}
+	end := len(configs)
+	if request.PageSize > 0 && start+request.PageSize < end {
+		end = start + request.PageSize
+	}
+	result := &a2a.ListTaskPushConfigResponse{Configs: make([]*a2a.PushConfig, 0, end-start)}
+	for i := start; i < end; i++ {
+		result.Configs = append(result.Configs, pushConfigToProtocol(&configs[i]))
+	}
+	if end < len(configs) {
+		result.NextPageToken = strconv.Itoa(end)
+	}
+	return result, nil
 }
 
-func (h *requestHandler) CreateTaskPushConfig(context.Context, *a2a.PushConfig) (*a2a.PushConfig, error) {
-	return nil, a2a.ErrPushNotificationNotSupported
+func (h *requestHandler) CreateTaskPushConfig(ctx context.Context, request *a2a.PushConfig) (*a2a.PushConfig, error) {
+	target, source, err := h.pushConfigAgents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if request == nil || strings.TrimSpace(string(request.TaskID)) == "" || strings.TrimSpace(request.URL) == "" {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "taskId and url are required")
+	}
+	if request.Auth != nil {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "push config authentication is managed by the GoAI A2A machine identity")
+	}
+	config, err := h.runtime.CreateDelegationPushConfig(ctx, target, source, services.DelegationPushConfig{
+		ConfigID:    request.ID,
+		TaskID:      string(request.TaskID),
+		CallbackURL: request.URL,
+		Token:       request.Token,
+	})
+	if err != nil {
+		return nil, mapRuntimeError(err)
+	}
+	return pushConfigToProtocol(config), nil
 }
 
-func (h *requestHandler) DeleteTaskPushConfig(context.Context, *a2a.DeleteTaskPushConfigRequest) error {
-	return a2a.ErrPushNotificationNotSupported
+func (h *requestHandler) DeleteTaskPushConfig(ctx context.Context, request *a2a.DeleteTaskPushConfigRequest) error {
+	target, source, err := h.pushConfigAgents(ctx)
+	if err != nil {
+		return err
+	}
+	if request == nil || strings.TrimSpace(string(request.TaskID)) == "" || strings.TrimSpace(request.ID) == "" {
+		return a2a.NewError(a2a.ErrInvalidParams, "taskId and id are required")
+	}
+	return mapRuntimeError(h.runtime.DeleteDelegationPushConfig(ctx, target, source, string(request.TaskID), request.ID))
 }
 
 func (h *requestHandler) GetExtendedAgentCard(ctx context.Context, _ *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
@@ -115,6 +183,30 @@ func (h *requestHandler) GetExtendedAgentCard(ctx context.Context, _ *a2a.GetExt
 		return nil, a2a.NewError(a2a.ErrInternalError, "agent card is unavailable")
 	}
 	return card, nil
+}
+
+func (h *requestHandler) pushConfigAgents(ctx context.Context) (string, string, error) {
+	target, err := targetAgentFromContext(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	source, err := h.authenticatedSource(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	return target, source, nil
+}
+
+func pushConfigToProtocol(config *services.DelegationPushConfig) *a2a.PushConfig {
+	if config == nil {
+		return nil
+	}
+	return &a2a.PushConfig{
+		TaskID: a2a.TaskID(config.TaskID),
+		ID:     config.ConfigID,
+		URL:    config.CallbackURL,
+		Token:  config.Token,
+	}
 }
 
 func (h *requestHandler) logAuthorizationRejection(ctx context.Context, targetAgent, sourceAgent, reason string) {
@@ -149,7 +241,7 @@ func mapRuntimeError(err error) error {
 	switch {
 	case errors.Is(err, services.ErrDelegationForbidden()):
 		return a2a.ErrUnauthorized
-	case errors.Is(err, services.ErrDelegationNotFound()), errors.Is(err, services.ErrRunNotFound()):
+	case errors.Is(err, services.ErrDelegationNotFound()), errors.Is(err, services.ErrRunNotFound()), errors.Is(err, services.ErrPushConfigNotFound()):
 		return a2a.NewError(a2a.ErrTaskNotFound, "task not found")
 	case errors.Is(err, services.ErrAgentNotFound()):
 		return a2a.NewError(a2a.ErrInvalidParams, "source or target agent not found")

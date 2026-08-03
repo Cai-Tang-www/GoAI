@@ -47,6 +47,7 @@ func Migrate(database *gorm.DB) error {
 		&models.Thread{},
 		&models.Message{},
 		&models.Delegation{},
+		&models.A2APushConfig{},
 		&models.Run{},
 		&models.RunStep{},
 		&models.RunIdempotency{},

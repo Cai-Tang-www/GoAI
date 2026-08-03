@@ -53,15 +53,21 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 
 ## 目标主链路
 ```text
-AG-UI / A2A Request
-        -> Protocol Gateway
-        -> Thread / Message / Run
-        -> Runtime Coordination
-        -> Delegation / Child Run
-        -> Eino Graph / MCP Tool / LLM
-        -> RunStep / Message persistence
-        -> Protocol event / callback
-        -> Trace / Replay / Eval
+AG-UI Client
+    -> AG-UI Gateway
+    -> Thread / Message / Parent Run
+    -> Coordinator Agent Eino Graph
+    -> Workflow agent node
+    -> AgentAsTool / A2A Client
+    -> loopback HTTP or remote HTTPS
+    -> Target Agent A2A Gateway
+    -> Delegation / Child Run
+    -> Target Eino Graph / Tool / LLM
+    -> authenticated A2A callback
+    -> Parent Run resume from persisted cursor
+    -> RunStep / Message persistence
+    -> AG-UI SSE
+    -> Trace / Replay / Eval
 ```
 
 ### A2A 通信约束
@@ -109,15 +115,17 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - db / redis / kafka 显式依赖装配
 - `Thread / Message / Delegation / AgentEndpoint / AgentCapability` 统一领域模型与迁移
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
-- 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Child Run、Task 状态查询与结果 Artifact 回流
-- Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、`message:send`、Task polling 和结果收敛
+- 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Push Notification callback、Child Run、Task 状态查询与结果 Artifact 回流
+- Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、带 PushConfig 的 `message:send` 和 accepted 结果收敛
 - Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` 节点统一交给 A2A Client 委派
 - 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路
 - A2A 调用使用稳定的 TaskID/MessageID/DelegationID，节点重试不会重复创建协议任务，并透传 `traceId` 关联父子 Run
+- Target 返回 accepted 后，Parent Run 与当前 RunStep 持久化为 `waiting_external`，释放执行 Worker，不进行 Task polling
+- Target 终态通过认证 A2A callback 回流；Runtime 幂等落库后发布 Kafka `run_resume`，Resume Worker 原子 claim 并从持久化游标继续 Eino Graph
+- callback 与 resume 发布失败由 RecoveryWorker 扫描恢复，重复 callback、重复 Kafka 消息和进程重启不会重复执行后继节点
 
 ### 在建
 
-- callback 驱动的 Parent Run suspend/resume，当前 V1 使用 Worker 内阻塞轮询
 - 多 Child Run 并行执行、结果聚合与部分失败策略
 - 多 Agent Runtime 的 Supervisor / Router / Worker 协作策略
 - 更复杂的 Eino Graph 能力扩展：并行 DAG、条件分支、流式节点和节点级恢复
@@ -186,6 +194,7 @@ data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
 GET  /a2a/agents/:agent_code/.well-known/agent-card.json
 POST /a2a/agents/:agent_code/message:send
 GET  /a2a/agents/:agent_code/tasks/:task_id
+POST /a2a/agents/:source_agent_code/callbacks/tasks/:task_id
 ```
 
 Agent Card 从目标 Agent 的活跃 `AgentCapability` 与 A2A `AgentEndpoint` 构造。Endpoint 必须满足以下传输边界：
@@ -201,14 +210,16 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
   "https://goai.dev/extensions/delegation/v1": {
     "sourceAgentCode": "planner",
     "capabilityCode": "write",
-    "parentRunId": "run-parent"
+    "parentRunId": "run-parent",
+    "traceId": "trace-parent",
+    "delegationId": "dlg-parent"
   }
 }
 ```
 
 `message:send` 会把协议请求映射为内部 `Thread + request Message + Delegation + Child Run`，并在事务提交后投递 Child Run。重复发送相同 A2A 请求会返回同一个 Child Run；复用相同标识但改变请求内容会返回冲突。Child Run 完成后，Runtime 将结果写为目标 Agent 返回给源 Agent 的 Result Message；A2A Task 查询会把结果映射为 Artifact，失败响应不会暴露 Provider 或数据库原始错误。
 
-当前实现已经覆盖带机器身份认证的入站与出站 A2A 最小闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，通过官方 A2A HTTP+JSON Client 发起 `message:send`，再轮询 Task 直到终态并将 Artifact/Message 收敛为父 RunStep 输出。当前父 Worker 在节点执行期间阻塞轮询，尚未实现 callback 驱动的 suspend/resume，也尚未支持多个 Child Run 的并行聚合；这些属于后续运行时增强。无论后续如何扩展，都不允许通过进程内 service 直调或 Kafka 投递绕过 A2A。
+当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，使用官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。Kafka 只承担内部恢复调度，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。当前尚未支持多个 Child Run 的并行聚合。
 
 > 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；远程 Endpoint 仍必须使用 HTTPS。
 
@@ -218,7 +229,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `POST /auth/login`
 - `POST /api/chat`：单 Agent / Provider 流式调试入口
 - `POST /api/agents/:agent_code/agui`：AG-UI 标准协议入口
-- `/a2a/agents/:agent_code/*`：A2A Agent Card、委派与 Task 查询入口
+- `/a2a/agents/:agent_code/*`：A2A Agent Card、委派、Task 查询与终态 callback 入口
 - `POST /api/runs`
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
@@ -279,6 +290,8 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `MYSQL_HOST` `MYSQL_PORT` `MYSQL_USER` `MYSQL_ROOT_PASSWORD` `MYSQL_DATABASE`
 - `REDIS_HOST` `REDIS_PORT` `REDIS_PASSWORD`
 - `KAFKA_BOOTSTRAP_SERVERS` `KAFKA_RUN_TOPIC` `KAFKA_RUN_GROUP_ID`
+- `KAFKA_RUN_RESUME_TOPIC` `KAFKA_RUN_RESUME_GROUP_ID`
+- `A2A_CALLBACK_BASE_URL`：源 Runtime 暴露给目标 Agent 的 callback 基地址；本地默认 loopback HTTP，远程部署必须配置 HTTPS
 - `JWT_SECRET`
 - `SERVER_PORT`
 - `SERVER_SHUTDOWN_TIMEOUT_SECONDS`，默认 15 秒且必须大于 0
@@ -304,8 +317,8 @@ Provider 调试配置：
 进程使用标准 `http.Server` 并监听 `SIGINT` / `SIGTERM`。`SERVER_SHUTDOWN_TIMEOUT_SECONDS` 是整个关闭流程共享的总预算，不会为每个阶段重复计算：
 
 1. 取消 AG-UI/Chat SSE 请求，并调用 HTTP `Shutdown` 停止接收新连接
-2. 关闭 Kafka consumer，停止拉取新消息；已经进入 handler 的消息保留 worker context 继续处理
-3. 在共享 drain 窗口内并行等待普通 HTTP 请求、当前 worker 和 consumer close 完成
+2. 关闭 Run execute / resume Kafka consumer 与 RecoveryWorker，停止拉取新消息和恢复扫描；已经进入 handler 的消息保留 worker context 继续处理
+3. 在共享 drain 窗口内并行等待普通 HTTP 请求、当前 worker、consumer close 和恢复循环完成
 4. drain 超时后取消 worker context，并强制关闭仍存活的 HTTP 连接
 5. 只有 HTTP、consumer 和 worker 都已退出，才在剩余预算内依次关闭 Kafka producer、Redis、数据库连接池和 observability exporter
 6. 聚合并记录所有关闭错误；如果工作仍未退出，则跳过仍可能被使用的共享依赖，避免 use-after-close

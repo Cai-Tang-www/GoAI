@@ -70,3 +70,45 @@ func TestExecutePropagatesHandlerError(t *testing.T) {
 		t.Fatalf("expected handler error, got %v", err)
 	}
 }
+
+func TestExecuteFromRunsOnlyWorkflowSuffix(t *testing.T) {
+	definition := &workflow.Definition{
+		EntryNode: "prepare",
+		Nodes: []workflow.Node{
+			{Key: "prepare", Type: "tool"},
+			{Key: "delegate", Type: "agent", Config: []byte(`{"target_agent":"writer","capability":"write"}`)},
+			{Key: "summarize", Type: "llm"},
+		},
+		Edges: []workflow.Edge{{From: "prepare", To: "delegate"}, {From: "delegate", To: "summarize"}},
+	}
+	var executed []string
+	output, err := New().ExecuteFrom(context.Background(), definition, "summarize", `{"child":"done"}`, func(_ context.Context, node workflow.Node, input string) (string, error) {
+		executed = append(executed, node.Key)
+		if input != `{"child":"done"}` {
+			t.Fatalf("resume input = %s", input)
+		}
+		return `{"parent":"done"}`, nil
+	})
+	if err != nil {
+		t.Fatalf("ExecuteFrom failed: %v", err)
+	}
+	if !reflect.DeepEqual(executed, []string{"summarize"}) {
+		t.Fatalf("executed nodes = %v", executed)
+	}
+	if output != `{"parent":"done"}` {
+		t.Fatalf("output = %s", output)
+	}
+}
+
+func TestExecuteFromRejectsUnreachableResumeNode(t *testing.T) {
+	definition := &workflow.Definition{
+		EntryNode: "prepare",
+		Nodes:     []workflow.Node{{Key: "prepare", Type: "tool"}},
+	}
+	_, err := New().ExecuteFrom(context.Background(), definition, "missing", `{}`, func(context.Context, workflow.Node, string) (string, error) {
+		return `{}`, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "resume node missing is not reachable") {
+		t.Fatalf("ExecuteFrom error = %v", err)
+	}
+}

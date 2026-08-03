@@ -51,6 +51,14 @@ func New(options ...Option) *Executor {
 // 没有定义 fan-in 合并规则时错误地合并多个 Agent 输出。后续增加并行编排
 // 时，应显式增加 Eino fan-in 合并策略，而不是隐式覆盖输出。
 func (e *Executor) Execute(ctx context.Context, definition *workflow.Definition, input string, handler NodeHandler) (string, error) {
+	if definition == nil {
+		return "", errors.New("workflow definition is nil")
+	}
+	return e.ExecuteFrom(ctx, definition, definition.EntryNode, input, handler)
+}
+
+// ExecuteFrom 从指定节点开始执行串行 Workflow 后缀，用于 Parent Run 从持久化游标恢复。
+func (e *Executor) ExecuteFrom(ctx context.Context, definition *workflow.Definition, startNode, input string, handler NodeHandler) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -73,9 +81,13 @@ func (e *Executor) Execute(ctx context.Context, definition *workflow.Definition,
 	if err := validateSerialGraph(definition, order); err != nil {
 		return "", err
 	}
+	executionOrder, err := executionOrderFrom(order, startNode)
+	if err != nil {
+		return "", err
+	}
 
 	graph := compose.NewGraph[string, string]()
-	for _, node := range order {
+	for _, node := range executionOrder {
 		current := node
 		if err := graph.AddLambdaNode(current.Key, compose.InvokableLambda(func(ctx context.Context, value string) (string, error) {
 			return handler(ctx, current, value)
@@ -83,18 +95,18 @@ func (e *Executor) Execute(ctx context.Context, definition *workflow.Definition,
 			return "", fmt.Errorf("add Eino node %s: %w", current.Key, err)
 		}
 	}
-	if err := graph.AddEdge(compose.START, definition.EntryNode); err != nil {
+	if err := graph.AddEdge(compose.START, startNode); err != nil {
 		return "", fmt.Errorf("connect workflow entry node: %w", err)
 	}
 	for _, edge := range definition.Edges {
-		if !containsNode(order, edge.From) || !containsNode(order, edge.To) {
+		if !containsNode(executionOrder, edge.From) || !containsNode(executionOrder, edge.To) {
 			continue
 		}
 		if err := graph.AddEdge(edge.From, edge.To); err != nil {
 			return "", fmt.Errorf("connect workflow edge %s -> %s: %w", edge.From, edge.To, err)
 		}
 	}
-	last := order[len(order)-1]
+	last := executionOrder[len(executionOrder)-1]
 	if err := graph.AddEdge(last.Key, compose.END); err != nil {
 		return "", fmt.Errorf("connect workflow end node: %w", err)
 	}
@@ -114,6 +126,18 @@ func (e *Executor) Execute(ctx context.Context, definition *workflow.Definition,
 	return output, nil
 }
 
+func executionOrderFrom(order []workflow.Node, startNode string) ([]workflow.Node, error) {
+	startNode = strings.TrimSpace(startNode)
+	if startNode == "" {
+		return nil, errors.New("workflow resume node is required")
+	}
+	for index, node := range order {
+		if node.Key == startNode {
+			return order[index:], nil
+		}
+	}
+	return nil, fmt.Errorf("workflow resume node %s is not reachable", startNode)
+}
 func validateSerialGraph(definition *workflow.Definition, reachable []workflow.Node) error {
 	reachableSet := make(map[string]struct{}, len(reachable))
 	for _, node := range reachable {

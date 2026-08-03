@@ -32,20 +32,23 @@ type AgentInvocationRequest struct {
 	Endpoints           []AgentInvocationEndpoint
 }
 
-// AgentInvocationState 表示跨 Agent 调用映射到 Runtime 后的协议无关终态。
+// AgentInvocationState 表示跨 Agent 调用映射到 Runtime 后的协议无关状态。
 type AgentInvocationState string
 
 const (
-	// AgentInvocationStateCompleted 表示目标 Agent 已成功完成委派。
+	// AgentInvocationStateAccepted 表示目标 Agent 已接受异步委派，结果将通过 A2A callback 返回。
+	AgentInvocationStateAccepted AgentInvocationState = "accepted"
+	// AgentInvocationStateCompleted 表示目标 Agent 已在首次响应中同步完成委派。
 	AgentInvocationStateCompleted AgentInvocationState = "completed"
 )
 
 // AgentInvocationResult 是 A2A Task 终态映射到平台内部的协议无关结果。
 type AgentInvocationResult struct {
-	TaskID     string
-	State      AgentInvocationState
-	OutputJSON string
-	Message    string
+	TaskID            string
+	State             AgentInvocationState
+	OutputJSON        string
+	Message           string
+	NotificationToken string
 }
 
 // AgentInvoker 是 RunService 消费的跨 Agent 调用边界，实现必须通过 A2A 协议访问目标 Agent。
@@ -117,6 +120,7 @@ func normalizeInvocationResult(result *AgentInvocationResult) *AgentInvocationRe
 	result.State = AgentInvocationState(strings.TrimSpace(string(result.State)))
 	result.OutputJSON = strings.TrimSpace(result.OutputJSON)
 	result.Message = strings.TrimSpace(result.Message)
+	result.NotificationToken = strings.TrimSpace(result.NotificationToken)
 	if result.OutputJSON == "" {
 		result.OutputJSON = "{}"
 	}

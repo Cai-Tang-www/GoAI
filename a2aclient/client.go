@@ -3,6 +3,9 @@ package a2aclient
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,11 +32,11 @@ const defaultRequestTimeout = 30 * time.Second
 
 // Client 使用 Agent Card 发现和官方 HTTP+JSON transport 执行跨 Agent 委派。
 type Client struct {
-	httpClient   *http.Client
-	pollInterval time.Duration
-	telemetry    *observability.Bundle
-	resolver     a2aauth.CredentialResolver
-	authRequired bool
+	httpClient      *http.Client
+	callbackBaseURL *url.URL
+	telemetry       *observability.Bundle
+	resolver        a2aauth.CredentialResolver
+	authRequired    bool
 }
 
 // Option 配置 A2A 出站客户端的可选依赖。
@@ -62,13 +65,28 @@ func WithAuthentication(resolver a2aauth.CredentialResolver, required bool) Opti
 	}
 }
 
+// WithCallbackBaseURL 配置来源 Agent 接收 A2A Push Notification 的公开或 loopback Gateway 地址。
+func WithCallbackBaseURL(rawURL string) Option {
+	return func(client *Client) error {
+		parsed, err := url.Parse(strings.TrimSpace(rawURL))
+		if err != nil {
+			return fmt.Errorf("configuring A2A callback base URL: %w", err)
+		}
+		if err := validateURL(parsed); err != nil {
+			return fmt.Errorf("configuring A2A callback base URL: %w", err)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("configuring A2A callback base URL: query and fragment are not allowed")
+		}
+		client.callbackBaseURL = parsed
+		return nil
+	}
+}
+
 // New 创建安全的 A2A 出站客户端。HTTP 仅允许 loopback，远程地址必须使用 HTTPS。
-func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, options ...Option) (*Client, error) {
+func New(httpClient *http.Client, requestTimeout time.Duration, options ...Option) (*Client, error) {
 	if requestTimeout <= 0 {
 		requestTimeout = defaultRequestTimeout
-	}
-	if pollInterval <= 0 {
-		return nil, errors.New("creating A2A client: poll interval must be greater than zero")
 	}
 	if httpClient == nil {
 		httpClient = &http.Client{}
@@ -92,7 +110,7 @@ func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, op
 		}
 		return nil
 	}
-	client := &Client{httpClient: &cloned, pollInterval: pollInterval}
+	client := &Client{httpClient: &cloned}
 	for _, option := range options {
 		if option == nil {
 			continue
@@ -101,10 +119,13 @@ func New(httpClient *http.Client, requestTimeout, pollInterval time.Duration, op
 			return nil, err
 		}
 	}
+	if client.callbackBaseURL == nil {
+		return nil, errors.New("creating A2A client: callback base URL is required")
+	}
 	return client, nil
 }
 
-// Invoke 发现目标 Agent、校验能力并等待 A2A Task 进入终态。
+// Invoke 发现目标 Agent、校验能力并通过 PushConfig 异步接收非终态 Task 结果。
 func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationRequest) (result *services.AgentInvocationResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -220,18 +241,55 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 			},
 		},
 	}
-	result, err := client.SendMessage(ctx, &a2a.SendMessageRequest{Message: message})
+	callbackURL := c.callbackURL(request.SourceAgentCode, request.TaskID)
+	notificationToken, err := c.notificationToken(ctx, request)
+	if err != nil {
+		return nil, invocationError(fmt.Errorf("creating callback notification token: %w", err), false)
+	}
+	result, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+		Message: message,
+		Config: &a2a.SendMessageConfig{
+			ReturnImmediately: true,
+			PushConfig: &a2a.PushConfig{
+				TaskID: a2a.TaskID(request.TaskID),
+				ID:     request.DelegationID,
+				URL:    callbackURL,
+				Token:  notificationToken,
+			},
+		},
+	})
 	if err != nil {
 		return nil, invocationError(fmt.Errorf("sending A2A message: %w", err), true)
 	}
+	var mapped *services.AgentInvocationResult
 	switch value := result.(type) {
 	case *a2a.Message:
-		return resultFromMessage(request.TaskID, value)
+		mapped, err = resultFromMessage(request.TaskID, value)
 	case *a2a.Task:
-		return c.waitForTask(ctx, client, request.TaskID, value)
+		mapped, err = resultFromTaskResponse(request.TaskID, value)
 	default:
 		return nil, invocationError(fmt.Errorf("unsupported A2A response type %T", result), false)
 	}
+	if err != nil {
+		return nil, err
+	}
+	mapped.NotificationToken = notificationToken
+	return mapped, nil
+}
+
+func (c *Client) notificationToken(ctx context.Context, request services.AgentInvocationRequest) (string, error) {
+	payload := []byte("callback\x00" + request.TaskID + "\x00" + request.DelegationID)
+	if c.authRequired {
+		secret, err := c.resolver.Resolve(ctx, request.SourceCredentialRef)
+		if err != nil {
+			return "", err
+		}
+		mac := hmac.New(sha256.New, secret)
+		_, _ = mac.Write(payload)
+		return hex.EncodeToString(mac.Sum(nil)), nil
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (c *Client) businessHTTPClient(request services.AgentInvocationRequest, card *a2a.AgentCard) (*http.Client, error) {
@@ -273,31 +331,29 @@ func cardRequiresHMAC(card *a2a.AgentCard) bool {
 	}
 	return false
 }
-func (c *Client) waitForTask(ctx context.Context, client *sdkclient.Client, expectedTaskID string, task *a2a.Task) (*services.AgentInvocationResult, error) {
-	for {
-		if task == nil {
-			return nil, invocationError(errors.New("target agent returned an empty task"), true)
-		}
-		if string(task.ID) != expectedTaskID {
-			return nil, invocationError(fmt.Errorf("target task id mismatch: expected %s, got %s", expectedTaskID, task.ID), false)
-		}
-		if task.Status.State.Terminal() {
-			return resultFromTask(task)
-		}
-		if task.Status.State == a2a.TaskStateInputRequired || task.Status.State == a2a.TaskStateAuthRequired {
-			return nil, invocationError(fmt.Errorf("target agent requires unsupported interaction: %s", task.Status.State), false)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(c.pollInterval):
-		}
-		var err error
-		task, err = client.GetTask(ctx, &a2a.GetTaskRequest{ID: a2a.TaskID(expectedTaskID)})
-		if err != nil {
-			return nil, invocationError(fmt.Errorf("polling A2A task: %w", err), true)
-		}
+func (c *Client) callbackURL(sourceAgentCode, taskID string) string {
+	base := strings.TrimRight(c.callbackBaseURL.String(), "/")
+	return fmt.Sprintf("%s/a2a/agents/%s/callbacks/tasks/%s", base, url.PathEscape(sourceAgentCode), url.PathEscape(taskID))
+}
+
+func resultFromTaskResponse(expectedTaskID string, task *a2a.Task) (*services.AgentInvocationResult, error) {
+	if task == nil {
+		return nil, invocationError(errors.New("target agent returned an empty task"), true)
 	}
+	if string(task.ID) != expectedTaskID {
+		return nil, invocationError(fmt.Errorf("target task id mismatch: expected %s, got %s", expectedTaskID, task.ID), false)
+	}
+	if task.Status.State.Terminal() {
+		return resultFromTask(task)
+	}
+	if task.Status.State == a2a.TaskStateInputRequired || task.Status.State == a2a.TaskStateAuthRequired {
+		return nil, invocationError(fmt.Errorf("target agent requires unsupported interaction: %s", task.Status.State), false)
+	}
+	return &services.AgentInvocationResult{
+		TaskID:     string(task.ID),
+		State:      services.AgentInvocationStateAccepted,
+		OutputJSON: "{}",
+	}, nil
 }
 
 func resultFromTask(task *a2a.Task) (*services.AgentInvocationResult, error) {

@@ -2,6 +2,7 @@ package runstate
 
 import "GoAI/models"
 
+// IsValidRunTransition 判断 Run 状态是否允许显式迁移。
 func IsValidRunTransition(from, to string) bool {
 	transitions := map[string]map[string]struct{}{
 		models.RunStatusPending: {
@@ -13,7 +14,13 @@ func IsValidRunTransition(from, to string) bool {
 			models.RunStatusCancelled: {},
 		},
 		models.RunStatusRunning: {
-			models.RunStatusSuccess:   {},
+			models.RunStatusWaitingExternal: {},
+			models.RunStatusSuccess:         {},
+			models.RunStatusFailed:          {},
+			models.RunStatusCancelled:       {},
+		},
+		models.RunStatusWaitingExternal: {
+			models.RunStatusRunning:   {},
 			models.RunStatusFailed:    {},
 			models.RunStatusCancelled: {},
 		},
@@ -26,6 +33,7 @@ func IsValidRunTransition(from, to string) bool {
 	return allowed
 }
 
+// IsValidRunStepTransition 判断 RunStep 状态是否允许显式迁移。
 func IsValidRunStepTransition(from, to string) bool {
 	transitions := map[string]map[string]struct{}{
 		models.RunStepStatusPending: {
@@ -33,6 +41,12 @@ func IsValidRunStepTransition(from, to string) bool {
 			models.RunStepStatusSkipped: {},
 		},
 		models.RunStepStatusRunning: {
+			models.RunStepStatusWaitingExternal: {},
+			models.RunStepStatusSuccess:         {},
+			models.RunStepStatusFailed:          {},
+			models.RunStepStatusSkipped:         {},
+		},
+		models.RunStepStatusWaitingExternal: {
 			models.RunStepStatusSuccess: {},
 			models.RunStepStatusFailed:  {},
 			models.RunStepStatusSkipped: {},
