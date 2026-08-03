@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -82,10 +83,13 @@ func NewConsumer(cfg *config.Config, handler RunMessageHandler, options ...Consu
 	return consumer, nil
 }
 
-// Start 持续消费消息，直到上下文取消或 Reader 被关闭。
-func (c *Consumer) Start(ctx context.Context) {
+// Start 持续消费消息，直到上下文取消或 Reader 被关闭，并向生命周期返回启动错误。
+func (c *Consumer) Start(ctx context.Context) error {
 	if c == nil || c.reader == nil {
-		return
+		return errors.New("starting Kafka consumer: consumer is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	logger := c.logger
 	if logger == nil {
@@ -96,10 +100,10 @@ func (c *Consumer) Start(ctx context.Context) {
 		if err != nil {
 			if ctx.Err() != nil || c.closed.Load() {
 				logger.Printf("Kafka 消费者停止消费 reason=%v", ctx.Err())
-				return
+				return nil
 			}
 			logger.Printf("kafka read failed trace_id=%s err=%v", requestctx.TraceIDFromContext(ctx), err)
-			continue
+			return fmt.Errorf("reading Kafka message: %w", err)
 		}
 
 		var payload RunExecuteMessage

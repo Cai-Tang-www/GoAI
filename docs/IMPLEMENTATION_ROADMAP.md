@@ -12,9 +12,10 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 ## P0：主线纠偏与运行时基础
 
-### 1. 服务优雅关闭（已完成，Issue #13）
+### 1. 服务优雅关闭（Issue #13 建立基线，Issue #41 完成补强）
 - HTTP / SSE / Kafka / Worker 生命周期已经收口
-- 在途请求、流式响应与异步消费者具备超时关闭语义
+- SSE、新 Kafka 拉取、在途普通 HTTP 与当前 Worker 具备明确的 drain / force-stop 顺序
+- 关闭流程共享一个总超时预算；未退出的工作不会继续访问已关闭的 Kafka、Redis、MySQL 或 observability 依赖
 
 ### 2. 命名与地基清理（已完成，Issue #14）
 - 旧 Task 模型与入口已经清理

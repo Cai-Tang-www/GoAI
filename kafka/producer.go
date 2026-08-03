@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"sync"
 	"time"
 
 	"GoAI/config"
@@ -26,6 +27,8 @@ type Producer struct {
 	writer    messageWriter
 	topic     string
 	telemetry *observability.Bundle
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // ProducerOption 配置 Kafka 生产者的可选依赖。
@@ -148,15 +151,17 @@ func (p *Producer) Send(ctx context.Context, key, value []byte) error {
 	return nil
 }
 
-// Close 关闭 Kafka 生产者。
+// Close 幂等关闭 Kafka 生产者；重复调用返回首次关闭结果。
 func (p *Producer) Close() error {
 	if p == nil || p.writer == nil {
 		return nil
 	}
-	if err := p.writer.Close(); err != nil {
-		return fmt.Errorf("closing Kafka producer: %w", err)
-	}
-	return nil
+	p.closeOnce.Do(func() {
+		if err := p.writer.Close(); err != nil {
+			p.closeErr = fmt.Errorf("closing Kafka producer: %w", err)
+		}
+	})
+	return p.closeErr
 }
 
 // newRunExecuteMessage 构造包含 trace_id 的 Run 执行消息。
