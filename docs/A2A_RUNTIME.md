@@ -31,6 +31,16 @@ graph LR
 
 本地和远程使用同一套 A2A HTTP+JSON 请求、Task 状态和结果 Artifact 契约，区别只在传输安全边界。
 
+## Registry 发布门禁
+
+Agent Registry 是 A2A Runtime 的管理面前置条件，不是新的执行 transport。
+
+- 所有可委派 Agent 必须先注册，Workflow 的 `agent` / `agent_group` 节点只能引用 Registry 中的 Agent 与 Capability，不接受任意 URL
+- Agent 默认 inactive；V1 至少需要一个由当前 Agent 的 active Workflow 支撑、版本一致的 active Capability，以及通过 Agent Card 身份校验的 active Endpoint 和完整凭据配置，才能发布
+- `tool/custom` Capability 在 V1 仅作为管理资产，不能单独满足发布门禁，也不会进入 Agent Card；Agent Card 的 Delegation extension 必须声明与 Registry 相同的 `agentCode`，防止 Endpoint 地址指向错误 Agent
+- Endpoint 变更后健康状态重置，必须重新 discovery；健康失败会标记 unhealthy，最后一个健康 Endpoint 失效时 Agent 自动停用；`config_json` 仅允许非敏感元数据，认证材料必须使用 `credential_ref`
+- Registry API 只改变管理资产和发布状态，跨 Agent 任务仍只通过 A2A HTTP(S) 发生
+
 ## 出站调用流程
 
 1. `RunService` 执行 Workflow 的 `agent` 节点。

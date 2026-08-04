@@ -86,6 +86,11 @@ func ensurePermissions(database *gorm.DB) (map[string]uint64, error) {
 		{Code: models.PermissionUserUpdateSelf, Description: "Update self profile"},
 		{Code: models.PermissionUserManage, Description: "Manage users"},
 		{Code: models.PermissionChatUse, Description: "Use chat api"},
+		{Code: models.PermissionAgentCreate, Description: "Create agents"},
+		{Code: models.PermissionAgentRead, Description: "Read agents"},
+		{Code: models.PermissionAgentUpdate, Description: "Update owned agents"},
+		{Code: models.PermissionAgentActivate, Description: "Activate owned agents"},
+		{Code: models.PermissionAgentManage, Description: "Manage all agents"},
 	}
 	result := make(map[string]uint64, len(seeds))
 	for _, seed := range seeds {
@@ -115,6 +120,11 @@ func ensureRolePermissions(database *gorm.DB, roleIDs map[string]uint64, permiss
 		models.PermissionUserUpdateSelf,
 		models.PermissionUserManage,
 		models.PermissionChatUse,
+		models.PermissionAgentCreate,
+		models.PermissionAgentRead,
+		models.PermissionAgentUpdate,
+		models.PermissionAgentActivate,
+		models.PermissionAgentManage,
 	}
 	memberPerms := []string{
 		models.PermissionRunCreate,
@@ -123,6 +133,10 @@ func ensureRolePermissions(database *gorm.DB, roleIDs map[string]uint64, permiss
 		models.PermissionUserReadSelf,
 		models.PermissionUserUpdateSelf,
 		models.PermissionChatUse,
+		models.PermissionAgentCreate,
+		models.PermissionAgentRead,
+		models.PermissionAgentUpdate,
+		models.PermissionAgentActivate,
 	}
 
 	if err := bindRolePermissions(database, roleIDs[models.RoleAdmin], adminPerms, permissionIDs); err != nil {

@@ -13,6 +13,7 @@
 - `/ping`、`/auth/register`、`/auth/login` 不需要 JWT。
 - `/api/*` 需要 `Authorization: Bearer <jwt>`。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
+- Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
 - A2A Agent Card discovery 公开；`message:send`、Task 查询、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
@@ -30,6 +31,12 @@
 | `POST` | `/auth/login` | public | JSON envelope with JWT |
 | `POST` | `/api/chat` | JWT + `chat:use` | debug SSE |
 | `POST` | `/api/agents/:agent_code/agui` | JWT + `run:create` | AG-UI SSE |
+| `POST/GET` | `/api/agents` | JWT + `agent:create` / `agent:read` | create or list managed Agents |
+| `GET/PUT` | `/api/agents/:agent_code` | JWT + `agent:read` / `agent:update` | Agent detail or metadata update |
+| `POST` | `/api/agents/:agent_code/activate` | JWT + `agent:activate` | validate and publish Agent |
+| `POST` | `/api/agents/:agent_code/deactivate` | JWT + `agent:activate` | deactivate Agent |
+| `POST/GET/PUT` | `/api/agents/:agent_code/capabilities[...]` | JWT + `agent:update` / `agent:read` | manage Capability assets |
+| `POST/GET/PUT` | `/api/agents/:agent_code/endpoints[...]` | JWT + `agent:update` / `agent:read` | manage and health-check A2A Endpoints |
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
 | `GET` | `/api/runs/:run_id/steps` | JWT + `run:read` | JSON envelope |
@@ -165,7 +172,62 @@ Run 查询保持既有 Run 字段格式，并在 Parent resume 存在时增加�
 
 `resume` 是受 JWT、RBAC 和 owner/admin 约束的管理诊断信息。租约字段不会进入公开 A2A Task metadata；没有恢复记录时该字段省略。
 
-## 5. AG-UI Gateway
+## 5. Agent Registry Management API
+
+Agent Registry is the management plane. It controls which Agent identities, capabilities, and protocol endpoints are eligible for discovery. It never replaces A2A execution: local Agents still use loopback HTTP and remote Agents use HTTPS through the same A2A Gateway contract.
+
+### Create and publish an Agent
+
+1. POST /api/agents creates an inactive Agent owned by the current user.
+2. POST /api/agents/:agent_code/capabilities adds a capability asset. V1 publication requires at least one active Workflow capability backed by the same Agent's active Workflow; Tool and Custom assets are not advertised as executable Agent Card skills yet.
+3. POST /api/agents/:agent_code/endpoints adds an inactive A2A endpoint.
+4. POST /api/agents/:agent_code/endpoints/:endpoint_code/health-check discovers the Agent Card, validates its declared agentCode, transport, binding, and Delegation extension, then marks the endpoint active.
+5. POST /api/agents/:agent_code/activate validates all publication invariants and publishes the Agent.
+
+~~~http
+POST /api/agents HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{"agent_code":"writer","name":"Writer","description":"Generates articles"}
+~~~
+
+~~~http
+POST /api/agents/writer/capabilities HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "capability_code": "write",
+  "name": "Write",
+  "capability_type": "workflow",
+  "workflow_id": 42,
+  "version": "1",
+  "input_schema_json": "{\"type\":\"object\"}",
+  "output_schema_json": "{\"type\":\"object\"}"
+}
+~~~
+
+~~~http
+POST /api/agents/writer/endpoints HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "endpoint_code": "primary",
+  "protocol": "a2a",
+  "transport": "https",
+  "address": "https://agents.example.com/a2a/agents/writer",
+  "auth_type": "goai_hmac_sha256",
+  "credential_ref": "writer-a2a-key"
+}
+~~~
+
+The API returns only credential_ref; the referenced secret is never stored in or returned by Registry records. Endpoint config_json is restricted to non-sensitive transport metadata; secret, password, token, private-key, authorization, and credential fields are rejected. Endpoint updates reset health to inactive. An active Agent cannot lose its last executable Workflow Capability or healthy Endpoint without first being deactivated.
+
+Member access is owner-scoped. A caller with the separate agent:manage permission can bypass ownership, but still needs the route-specific action permission.
+
+## 6. AG-UI Gateway
 
 ### Request
 
@@ -217,7 +279,7 @@ data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
 
 当前可能出现的事件包括 `RUN_STARTED`、`STEP_STARTED`、`STEP_FINISHED`、`TEXT_MESSAGE_START`、`TEXT_MESSAGE_CONTENT`、`TEXT_MESSAGE_END`、`RUN_FINISHED` 和 `RUN_ERROR`。流开始前的参数错误使用普通 JSON envelope；流开始后的失败使用 AG-UI `RUN_ERROR`。
 
-## 6. A2A Gateway
+## 7. A2A Gateway
 
 A2A 是 Agent 与 Agent 之间的语义通信协议。Kafka 只能承载 GoAI 内部异步执行消息，不能替代 A2A；本地 Agent 和远程 Agent 必须经过同一 A2A Gateway 契约。
 
@@ -351,7 +413,7 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 - 稳定 Task、Message 或 Delegation 标识冲突：`InvalidRequest`
 - 未映射 Runtime 错误：`InternalError`
 
-## 7. Protocol-to-Domain Mapping
+## 8. Protocol-to-Domain Mapping
 
 | External concept | Internal model |
 | --- | --- |
@@ -364,7 +426,7 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 
 协议 Gateway 不允许通过进程内 Service 直调绕过 A2A。Workflow 的 Agent 节点必须经过 A2A Client；这样本地和远程 Agent 执行的通信语义一致。
 
-## 8. Compatibility and Current Limits
+## 9. Compatibility and Current Limits
 
 - V1 只做文本消息和 callback 驱动的 Child suspend/resume；显式 `agent_group` 已支持多个 Child Run 的 `all`、`any`、`quorum` fan-out/fan-in 和部分失败聚合。不在当前范围内的是多模态、A2A Cancel、任意并行 DAG 和主动取消剩余远程 Child Task。
 - AG-UI `parentRunId` 分支和用户主动 resume 尚未开放；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。

@@ -67,6 +67,11 @@ func openSQLiteTestDB(t *testing.T) *gorm.DB {
 
 func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher) *gin.Engine {
 	t.Helper()
+	return newTestRouterWithRegistryChecker(t, database, publisher, nil)
+}
+
+func newTestRouterWithRegistryChecker(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher, checker services.AgentCardHealthChecker) *gin.Engine {
+	t.Helper()
 	if database == nil {
 		database = openSQLiteTestDB(t)
 		if err := database.AutoMigrate(
@@ -76,6 +81,8 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 			&models.UserRole{},
 			&models.RolePermission{},
 			&models.Agent{},
+			&models.AgentCapability{},
+			&models.AgentEndpoint{},
 			&models.Workflow{},
 			&models.Thread{},
 			&models.Message{},
@@ -106,12 +113,20 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 	if err != nil {
 		t.Fatalf("create chat service failed: %v", err)
 	}
+	if checker == nil {
+		checker = services.AgentCardHealthCheckerFunc(func(context.Context, services.AgentCardHealthCheckRequest) error { return nil })
+	}
+	agentRegistry, err := services.NewAgentRegistryService(database, checker, nil, false)
+	if err != nil {
+		t.Fatalf("create agent registry service failed: %v", err)
+	}
 	router, err := routers.New(routers.Dependencies{
-		Database:    database,
-		RunService:  runService,
-		ChatService: chatService,
-		Runtime:     runtimeService,
-		A2AGateway:  http.NotFoundHandler(),
+		Database:      database,
+		RunService:    runService,
+		ChatService:   chatService,
+		AgentRegistry: agentRegistry,
+		Runtime:       runtimeService,
+		A2AGateway:    http.NotFoundHandler(),
 	})
 	if err != nil {
 		t.Fatalf("create router failed: %v", err)

@@ -134,7 +134,20 @@ Thread 内的通信单元，既可以是用户消息，也可以是 Agent 间消
 
 ## 8. 产品边界与层次
 
-### 8.1 Protocol Layer
+### 8.1 Management Plane
+
+负责管理哪些 Agent 可以被发现和委派。
+
+包含：
+
+- Agent Registry
+- Capability 与 Endpoint 管理
+- 健康检查与发布校验
+- owner / RBAC 治理
+
+管理面只维护身份、能力、协议入口和发布状态，不直接执行跨 Agent 任务。所有本地与远程 Agent 都必须先注册，Workflow 不能填写任意未治理 URL；真正的协作请求仍统一进入 A2A Gateway。
+
+### 8.2 Protocol Layer
 
 负责协议接入与协议适配。
 
@@ -165,7 +178,7 @@ A2A 的约束：
 - 每次跨 Agent 调用必须持久化 Message、Delegation、Child Run，并关联 Trace
 - 不允许用 service 直接调用或只投递一个 Kafka run_id 来替代 A2A 协作语义
 
-### 8.2 Runtime Layer
+### 8.3 Runtime Layer
 
 负责 Thread / Run / Delegation 的业务运行时协调。
 
@@ -180,7 +193,7 @@ A2A 的约束：
 
 这是平台中心。
 
-### 8.3 Capability Layer
+### 8.4 Capability Layer
 
 负责 Agent 真正会做什么。
 
@@ -194,7 +207,7 @@ A2A 的约束：
 
 这里的能力可以扩展，但不应把能力层反客为主变成产品本体。
 
-### 8.4 Infra Layer
+### 8.5 Infra Layer
 
 负责基础设施与观测底座。
 
@@ -301,20 +314,20 @@ A2A 的约束：
 - `address`
 - `auth_type`
 - `credential_ref`，只保存凭据引用，不保存真实密钥
-- `config_json`
+- `config_json`，仅保存非敏感传输元数据；认证材料必须使用 `credential_ref`
 - `status`
 - `last_healthy_at`
 
 ### 11.3 agent_capabilities
 
-表示 Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力。能力可以由 Workflow、Tool 或自定义执行器实现，但 Provider 不作为平台主能力对外暴露。
+表示 Agent 对 Runtime 和其他 Agent 暴露的业务能力资产。能力可以由 Workflow、Tool 或自定义执行器实现，但 Provider 不作为平台主能力对外暴露；V1 只有由当前 Agent active Workflow 支撑且版本一致的 active Workflow Capability 会进入 Agent Card 并满足发布门禁，`tool/custom` 暂只参与管理。
 
 关键字段：
 - `agent_id`
 - `capability_code`，在同一 Agent 内唯一
 - `name` / `description`
 - `capability_type` (`workflow` / `tool` / `custom`)
-- `workflow_id`，Workflow 类型能力可选关联具体编排定义
+- `workflow_id`，V1 的 Workflow 类型能力必须关联当前 Agent 的 active Workflow
 - `version`
 - `input_schema_json` / `output_schema_json`
 - `config_json`
@@ -466,13 +479,14 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - `agent_group` 已实现显式多 Agent fan-out/fan-in：每个成员通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum`，group coordinator 负责聚合结果和恢复 Parent Run；late callback 仅更新审计，不改变已推进的 Parent checkpoint
 - callback、Result Message 与 resume 消息具备幂等收敛和持久化恢复能力，重复投递或进程重启不会重复执行后继节点
 - Agent Card 已发布 capability 版本及输入输出契约；V1 对 capability contract 使用稳定 JSON Schema 子集进行输入和终态输出校验
+- Agent Registry 管理 API 已覆盖 Agent、Capability、Endpoint 的 owner-scoped CRUD、Agent Card 健康检查、发布校验和启停；V1 仅发布可执行的 Workflow Capability，Endpoint `config_json` 拒绝敏感字段；管理员通过独立 `agent:manage` 权限跨 owner 管理，真实凭据不进入 API 响应
 
 ### 14.3 仍需扩展
 
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - 多 Runtime 部署下 callback/resume 恢复扫描的分片与共享协调
 - 任意并行 DAG、主动取消剩余远程 Child Task 与更复杂的跨节点补偿策略
-- MCP、AgentAsTool、多模态消息和远程 Agent 运维管理
+- MCP、AgentAsTool、多模态消息，以及完整前端管理控制台、批量运维和跨租户治理
 - 完整 Eval、成本分析和管理控制台
 
 ## 15. 交付标准

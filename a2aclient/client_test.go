@@ -316,7 +316,7 @@ func testCard(baseURL, capability string) *a2a.AgentCard {
 	return &a2a.AgentCard{
 		Name: "writer", Description: "writer agent", Version: "1.0",
 		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(baseURL, a2a.TransportProtocolHTTPJSON)},
-		Capabilities:        a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{URI: a2aprotocol.DelegationExtensionURI}}},
+		Capabilities:        a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{URI: a2aprotocol.DelegationExtensionURI, Params: map[string]any{"agentCode": "writer"}}}},
 		Skills:              []a2a.AgentSkill{{ID: capability, Name: capability}},
 		DefaultInputModes:   []string{"application/json"}, DefaultOutputModes: []string{"application/json"},
 	}

@@ -219,10 +219,21 @@ func TestBuildAgentCardValidatesTransportBoundary(t *testing.T) {
 			if len(card.Capabilities.Extensions) != 1 || card.Capabilities.Extensions[0].URI != DelegationExtensionURI {
 				t.Fatalf("delegation extension missing: %+v", card.Capabilities.Extensions)
 			}
+			if card.Capabilities.Extensions[0].Params["agentCode"] != descriptor.Code {
+				t.Fatalf("delegation extension agentCode mismatch: %+v", card.Capabilities.Extensions[0].Params)
+			}
 			if len(card.Skills) != 1 || card.Skills[0].ID != "write" {
 				t.Fatalf("agent skills mismatch: %+v", card.Skills)
 			}
 		})
+	}
+}
+
+func TestBuildAgentCardRejectsAgentWithoutExecutableCapability(t *testing.T) {
+	descriptor := validDescriptor()
+	descriptor.Capabilities = nil
+	if _, err := buildAgentCard(descriptor); err == nil || !strings.Contains(err.Error(), "no active executable capability") {
+		t.Fatalf("build card error = %v", err)
 	}
 }
 

@@ -69,6 +69,15 @@ Content-Type: application/json
 | `USER_NOT_FOUND` | 404 | User does not exist |
 | `USER_ALREADY_EXISTS` | 409 | Username or email is already registered |
 | `RUN_NOT_FOUND` | 404 | Run does not exist or is not accessible |
+| `AGENT_NOT_FOUND` | 404 | Agent does not exist |
+| `AGENT_ALREADY_EXISTS` | 409 | Agent code is already registered |
+| `AGENT_INVALID_STATE` | 409 | Agent or Endpoint changed during the requested state transition |
+| `AGENT_PUBLISH_VALIDATION_FAILED` | 422 | Agent publication assets are incomplete or inconsistent |
+| `CAPABILITY_NOT_FOUND` | 404 | Agent capability does not exist |
+| `CAPABILITY_ALREADY_EXISTS` | 409 | Capability code already exists for the Agent |
+| `ENDPOINT_NOT_FOUND` | 404 | Agent endpoint does not exist |
+| `ENDPOINT_ALREADY_EXISTS` | 409 | Endpoint code already exists for the Agent |
+| `ENDPOINT_HEALTH_CHECK_FAILED` | 502 | A2A Agent Card discovery or identity validation failed |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | The same idempotency key was reused for another request |
 | `PROVIDER_NOT_FOUND` | 404 | Requested provider is not registered |
 | `PROVIDER_DRIVER_NOT_FOUND` | 500 | Provider has no usable driver |
