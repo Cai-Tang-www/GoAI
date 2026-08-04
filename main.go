@@ -136,6 +136,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
+	agentRegistry, err := services.NewAgentRegistryService(database, agentInvoker, credentialResolver, cfg.A2AAuthRequired)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
 	callbackSender, err := a2aclient.NewCallbackSender(governedHTTPClient, credentialResolver, cfg.A2AAuthRequired)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
@@ -193,6 +197,7 @@ func run(ctx context.Context) error {
 		Runtime:          runtimeService,
 		A2AGateway:       a2aGateway,
 		ChatService:      chatService,
+		AgentRegistry:    agentRegistry,
 		Observability:    telemetry,
 		Governance:       governanceService,
 		GovernanceScopes: cfg.RateLimitScopes,

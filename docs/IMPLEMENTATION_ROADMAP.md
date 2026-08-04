@@ -50,6 +50,13 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 ## P1：多 Agent 运行时闭环
 
+### Agent Registry 管理面（Issue #49，已实现）
+- Agent、Capability、A2A Endpoint 的注册、查询、更新、启停和 owner-scoped 管理已落地
+- Agent 发布前强制校验至少一个可执行的 active Workflow Capability、健康 A2A Endpoint、Workflow 归属/版本和凭据引用；`tool/custom` 暂不满足 V1 发布门禁
+- Endpoint 健康检查使用 Agent Card discovery 并绑定声明的 `agentCode`，更新后必须重新检查；`config_json` 只允许非敏感元数据
+- 本地只允许 loopback HTTP，远程强制 HTTPS；管理 API 不提供 Service 直调或 Kafka 通信旁路
+- member 拥有自己的 Agent 管理权限，`agent:manage` 仅作为管理员跨 owner bypass
+
 ### 7. 多 Agent 协作运行时（Issue #37 + Issue #43 + Issue #45，可靠异步闭环已落地）
 已落地：
 - Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调

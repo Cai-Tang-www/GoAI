@@ -16,33 +16,41 @@ import (
 const (
 	contextTraceIDKey = "trace_id"
 
-	CodeOK                     = "OK"
-	CodeAuthMissingToken       = "AUTH_MISSING_TOKEN"
-	CodeAuthInvalidToken       = "AUTH_INVALID_TOKEN"
-	CodeAuthInvalidCredentials = "AUTH_INVALID_CREDENTIALS"
-	CodeAuthForbidden          = "AUTH_FORBIDDEN"
-	CodeValidationFailed       = "VALIDATION_FAILED"
-	CodeInvalidID              = "INVALID_ID"
-	CodeUserNotFound           = "USER_NOT_FOUND"
-	CodeUserAlreadyExists      = "USER_ALREADY_EXISTS"
-	CodeRunNotFound            = "RUN_NOT_FOUND"
-	CodeRunAlreadyExists       = "RUN_ALREADY_EXISTS"
-	CodeThreadUnavailable      = "THREAD_UNAVAILABLE"
-	CodeMessageConflict        = "MESSAGE_CONFLICT"
-	CodeAgentNotFound          = "AGENT_NOT_FOUND"
-	CodeWorkflowNotFound       = "WORKFLOW_NOT_FOUND"
-	CodeProviderNotFound       = "PROVIDER_NOT_FOUND"
-	CodeProviderDriverNotFound = "PROVIDER_DRIVER_NOT_FOUND"
-	CodeProviderInvalidConfig  = "PROVIDER_INVALID_CONFIG"
-	CodeModelNotConfigured     = "MODEL_NOT_CONFIGURED"
-	CodeStreamInterrupted      = "STREAM_INTERRUPTED"
-	CodeRateLimited            = "RATE_LIMITED"
-	CodeServiceUnavailable     = "SERVICE_UNAVAILABLE"
-	CodeDownstreamTimeout      = "DOWNSTREAM_TIMEOUT"
-	CodeInternalError          = "INTERNAL_ERROR"
-	CodeRBACPermissionLoad     = "RBAC_PERMISSION_LOAD_FAILED"
-	CodeKafkaPublishFailed     = "KAFKA_PUBLISH_FAILED"
-	CodeIdempotencyKeyReused   = "IDEMPOTENCY_KEY_REUSED"
+	CodeOK                        = "OK"
+	CodeAuthMissingToken          = "AUTH_MISSING_TOKEN"
+	CodeAuthInvalidToken          = "AUTH_INVALID_TOKEN"
+	CodeAuthInvalidCredentials    = "AUTH_INVALID_CREDENTIALS"
+	CodeAuthForbidden             = "AUTH_FORBIDDEN"
+	CodeValidationFailed          = "VALIDATION_FAILED"
+	CodeInvalidID                 = "INVALID_ID"
+	CodeUserNotFound              = "USER_NOT_FOUND"
+	CodeUserAlreadyExists         = "USER_ALREADY_EXISTS"
+	CodeRunNotFound               = "RUN_NOT_FOUND"
+	CodeRunAlreadyExists          = "RUN_ALREADY_EXISTS"
+	CodeThreadUnavailable         = "THREAD_UNAVAILABLE"
+	CodeMessageConflict           = "MESSAGE_CONFLICT"
+	CodeAgentNotFound             = "AGENT_NOT_FOUND"
+	CodeAgentAlreadyExists        = "AGENT_ALREADY_EXISTS"
+	CodeAgentInvalidState         = "AGENT_INVALID_STATE"
+	CodeAgentPublishValidation    = "AGENT_PUBLISH_VALIDATION_FAILED"
+	CodeCapabilityNotFound        = "CAPABILITY_NOT_FOUND"
+	CodeCapabilityAlreadyExists   = "CAPABILITY_ALREADY_EXISTS"
+	CodeEndpointNotFound          = "ENDPOINT_NOT_FOUND"
+	CodeEndpointAlreadyExists     = "ENDPOINT_ALREADY_EXISTS"
+	CodeEndpointHealthCheckFailed = "ENDPOINT_HEALTH_CHECK_FAILED"
+	CodeWorkflowNotFound          = "WORKFLOW_NOT_FOUND"
+	CodeProviderNotFound          = "PROVIDER_NOT_FOUND"
+	CodeProviderDriverNotFound    = "PROVIDER_DRIVER_NOT_FOUND"
+	CodeProviderInvalidConfig     = "PROVIDER_INVALID_CONFIG"
+	CodeModelNotConfigured        = "MODEL_NOT_CONFIGURED"
+	CodeStreamInterrupted         = "STREAM_INTERRUPTED"
+	CodeRateLimited               = "RATE_LIMITED"
+	CodeServiceUnavailable        = "SERVICE_UNAVAILABLE"
+	CodeDownstreamTimeout         = "DOWNSTREAM_TIMEOUT"
+	CodeInternalError             = "INTERNAL_ERROR"
+	CodeRBACPermissionLoad        = "RBAC_PERMISSION_LOAD_FAILED"
+	CodeKafkaPublishFailed        = "KAFKA_PUBLISH_FAILED"
+	CodeIdempotencyKeyReused      = "IDEMPOTENCY_KEY_REUSED"
 )
 
 // ResponseEnvelope 定义所有 HTTP JSON 与 SSE payload 共用的响应结构。
@@ -189,6 +197,51 @@ func AgentNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeAgentNotFound, Message: "agent not found"}
 }
 
+// AgentAlreadyExistsError 构造 AgentCode 冲突错误。
+func AgentAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeAgentAlreadyExists, Message: "agent already exists"}
+}
+
+// AgentInvalidStateError 构造 Agent 状态冲突错误。
+func AgentInvalidStateError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeAgentInvalidState, Message: "agent state is invalid"}
+}
+
+// AgentPublishValidationError 构造 Agent 发布不变量校验失败错误。
+func AgentPublishValidationError(err error) *AppError {
+	return &AppError{HTTPStatus: http.StatusUnprocessableEntity, Code: CodeAgentPublishValidation, Message: "agent publish validation failed", Err: err}
+}
+
+// AgentRegistryValidationError 构造 Agent Registry 参数校验错误。
+func AgentRegistryValidationError(err error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeValidationFailed, Message: "validation failed", Err: err}
+}
+
+// CapabilityNotFoundError 构造 Capability 不存在错误。
+func CapabilityNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeCapabilityNotFound, Message: "capability not found"}
+}
+
+// CapabilityAlreadyExistsError 构造 CapabilityCode 冲突错误。
+func CapabilityAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeCapabilityAlreadyExists, Message: "capability already exists"}
+}
+
+// EndpointNotFoundError 构造 Endpoint 不存在错误。
+func EndpointNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeEndpointNotFound, Message: "endpoint not found"}
+}
+
+// EndpointAlreadyExistsError 构造 EndpointCode 冲突错误。
+func EndpointAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeEndpointAlreadyExists, Message: "endpoint already exists"}
+}
+
+// EndpointHealthCheckFailedError 构造 A2A Endpoint 健康检查失败错误。
+func EndpointHealthCheckFailedError(err error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeEndpointHealthCheckFailed, Message: "endpoint health check failed", Err: err}
+}
+
 // WorkflowNotFoundError 构造 Workflow 不存在错误。
 func WorkflowNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeWorkflowNotFound, Message: "workflow not found"}
@@ -260,6 +313,26 @@ func WrapError(err error) *AppError {
 		return MessageConflictError()
 	case errors.Is(err, services.ErrAgentNotFound()):
 		return AgentNotFoundError()
+	case errors.Is(err, services.ErrAgentForbidden()):
+		return ForbiddenError()
+	case errors.Is(err, services.ErrAgentAlreadyExists()):
+		return AgentAlreadyExistsError()
+	case errors.Is(err, services.ErrAgentInvalidState()):
+		return AgentInvalidStateError()
+	case errors.Is(err, services.ErrAgentPublishValidation()):
+		return AgentPublishValidationError(err)
+	case errors.Is(err, services.ErrAgentRegistryValidation()):
+		return AgentRegistryValidationError(err)
+	case errors.Is(err, services.ErrCapabilityNotFound()):
+		return CapabilityNotFoundError()
+	case errors.Is(err, services.ErrCapabilityAlreadyExists()):
+		return CapabilityAlreadyExistsError()
+	case errors.Is(err, services.ErrEndpointNotFound()):
+		return EndpointNotFoundError()
+	case errors.Is(err, services.ErrEndpointAlreadyExists()):
+		return EndpointAlreadyExistsError()
+	case errors.Is(err, services.ErrEndpointHealthCheckFailed()):
+		return EndpointHealthCheckFailedError(err)
 	case errors.Is(err, services.ErrWorkflowNotFound()):
 		return WorkflowNotFoundError()
 	case errors.Is(err, ai.ErrProviderNotFound):

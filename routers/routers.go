@@ -21,6 +21,7 @@ type Dependencies struct {
 	Database         *gorm.DB
 	RunService       *services.RunService
 	ChatService      *services.ChatService
+	AgentRegistry    *services.AgentRegistryService
 	Runtime          services.Runtime
 	A2AGateway       http.Handler
 	Observability    *observability.Bundle
@@ -40,6 +41,9 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	if deps.ChatService == nil {
 		return nil, fmt.Errorf("creating router: chat service is nil")
 	}
+	if deps.AgentRegistry == nil {
+		return nil, fmt.Errorf("creating router: agent registry service is nil")
+	}
 	if deps.Runtime == nil {
 		return nil, fmt.Errorf("creating router: runtime is nil")
 	}
@@ -53,6 +57,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	userHandler := handlers.NewUserHandler(deps.Database)
 	runHandler := handlers.NewRunHandler(deps.RunService)
 	chatHandler := handlers.NewChatHandler(deps.ChatService)
+	agentRegistryHandler := handlers.NewAgentRegistryHandler(deps.AgentRegistry)
 	aguiHandler, err := handlers.NewAGUIHandler(deps.Runtime)
 	if err != nil {
 		return nil, fmt.Errorf("creating AG-UI handler: %w", err)
@@ -110,6 +115,24 @@ func New(deps Dependencies) (*gin.Engine, error) {
 			middlewares.StreamShutdownMiddleware(deps.StreamShutdown),
 			aguiHandler.RunAgent,
 		)
+		apiGroup.POST("/agents", middlewares.RequirePermission(models.PermissionAgentCreate), agentRegistryHandler.CreateAgent)
+		apiGroup.GET("/agents", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.ListAgents)
+		apiGroup.GET("/agents/:agent_code", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.GetAgent)
+		apiGroup.PUT("/agents/:agent_code", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateAgent)
+		apiGroup.POST("/agents/:agent_code/activate", middlewares.RequirePermission(models.PermissionAgentActivate), agentRegistryHandler.ActivateAgent)
+		apiGroup.POST("/agents/:agent_code/deactivate", middlewares.RequirePermission(models.PermissionAgentActivate), agentRegistryHandler.DeactivateAgent)
+
+		apiGroup.POST("/agents/:agent_code/capabilities", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CreateCapability)
+		apiGroup.GET("/agents/:agent_code/capabilities", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.ListCapabilities)
+		apiGroup.PUT("/agents/:agent_code/capabilities/:capability_code", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateCapability)
+		apiGroup.POST("/agents/:agent_code/capabilities/:capability_code/deactivate", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.DeactivateCapability)
+
+		apiGroup.POST("/agents/:agent_code/endpoints", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CreateEndpoint)
+		apiGroup.GET("/agents/:agent_code/endpoints", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.ListEndpoints)
+		apiGroup.PUT("/agents/:agent_code/endpoints/:endpoint_code", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateEndpoint)
+		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/deactivate", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.DeactivateEndpoint)
+		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/health-check", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CheckEndpointHealth)
+
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)

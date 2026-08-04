@@ -69,8 +69,8 @@ func TestSeedRBACIdempotent(t *testing.T) {
 	if err := gdb.Model(&models.Permission{}).Count(&permCount).Error; err != nil {
 		t.Fatalf("count permissions failed: %v", err)
 	}
-	if permCount != 7 {
-		t.Fatalf("expected 7 permissions, got %d", permCount)
+	if permCount != 12 {
+		t.Fatalf("expected 12 permissions, got %d", permCount)
 	}
 
 	var adminRole models.Role
@@ -103,5 +103,34 @@ func TestSeedRBACIdempotent(t *testing.T) {
 	}
 	if memberBindings != 2 {
 		t.Fatalf("expected exactly 2 member role bindings, got %d", memberBindings)
+	}
+
+	var memberManageBindings int64
+	if err := gdb.Table("role_permissions AS rp").
+		Joins("JOIN permissions p ON p.id = rp.permission_id").
+		Where("rp.role_id = ? AND p.code = ?", memberRole.ID, models.PermissionAgentManage).
+		Count(&memberManageBindings).Error; err != nil {
+		t.Fatalf("count member agent manage permission failed: %v", err)
+	}
+	if memberManageBindings != 0 {
+		t.Fatalf("member role must not have agent:manage, got %d bindings", memberManageBindings)
+	}
+
+	for _, code := range []string{
+		models.PermissionAgentCreate,
+		models.PermissionAgentRead,
+		models.PermissionAgentUpdate,
+		models.PermissionAgentActivate,
+	} {
+		var count int64
+		if err := gdb.Table("role_permissions AS rp").
+			Joins("JOIN permissions p ON p.id = rp.permission_id").
+			Where("rp.role_id = ? AND p.code = ?", memberRole.ID, code).
+			Count(&count).Error; err != nil {
+			t.Fatalf("count member permission %s failed: %v", code, err)
+		}
+		if count != 1 {
+			t.Fatalf("member role must have %s exactly once, got %d", code, count)
+		}
 	}
 }

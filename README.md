@@ -21,7 +21,7 @@ V1 聚焦多 Agent 协议运行时的最小闭环：
 - AG-UI Gateway
 - A2A Gateway
 - 统一内部领域模型：`Thread / Message / Run / Delegation`
-- Agent Endpoint 与 Capability 管理
+- Agent Registry 管理面：Agent、Capability、Endpoint 的注册、健康检查、发布与发现
 - Eino Graph 作为 Agent 的执行能力接入
 - Run / RunStep / Message / Delegation 持久化
 - Replay / Trace / Loop 基础能力
@@ -48,6 +48,7 @@ Provider、Workflow 和 `/api/chat` 都是平台能力或调试入口，不是�
 - `Delegation`：源 Agent 将子任务委派给目标 Agent 的协作记录，关联 Parent Run 与唯一 Child Run
 - `AgentEndpoint`：Agent 的 A2A 协议入口；远程使用 HTTPS，本地开发使用同一 Gateway 的 loopback HTTP，均执行相同的 A2A 契约；业务请求使用 HMAC-SHA256 机器身份认证、时间窗与 nonce 防重放，Agent Card discovery 保持公开
 - `AgentCapability`：Agent 对 Runtime 和其他 Agent 暴露的可发现业务能力
+- `Agent Registry`：管理 Agent、Capability、Endpoint、健康状态与发布状态；所有可委派 Agent 必须先进入 Registry
 - `Workflow / Graph`：某个 Agent 的执行模板或能力，不代表整个平台
 - `Loop`：用于 Trace、Replay、Eval 和成本分析的执行片段
 
@@ -80,6 +81,17 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - 每次跨 Agent 调用都必须形成 `Message + Delegation + Child Run + Trace`
 - Workflow 的 Agent 节点必须交给 Runtime 发起 Delegation，不能直接调用另一个 Agent 的 service
 - Kafka 可以承载投递、重试和回调事件，但不能代替 A2A 协议或 Runtime 业务决策
+- Workflow 不接受任意未注册 URL；Runtime 只能发现并委派已发布、具备 active Capability 和健康 A2A Endpoint 的 Agent
+
+### Agent Registry 管理面
+
+Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如何调用和如何推进”。管理 API 不执行跨 Agent 业务调用，也不会绕过 A2A Gateway。
+
+- Agent 创建后默认 `inactive`；V1 发布前必须至少有一个由当前 active Workflow 支撑且版本一致的 active Capability，以及一个通过 Agent Card 健康检查的 active A2A Endpoint
+- 本地 Endpoint 只允许 loopback HTTP，远程 Endpoint 必须使用 HTTPS
+- Endpoint 更新后会重置为 `inactive`，需要重新健康检查
+- member 只能管理自己的 Agent；拥有 `agent:manage` 的管理员可以跨 owner 管理
+- API 只返回 `credential_ref`，真实 HMAC secret 只由配置驱动的 CredentialResolver 解析；Endpoint `config_json` 仅允许非敏感传输元数据，密钥、Token、密码等字段会被拒绝
 
 ## 分层职责
 
@@ -109,6 +121,7 @@ A2A 是 Agent 协作的协议语义，HTTPS 只是远程传输方式，Kafka 只
 - Kafka 异步 Run 执行链路
 - Workflow DSL 基础校验与拓扑排序
 - Provider Registry 与 OpenAI-compatible 调试通道
+- Agent Registry 管理 API：Agent / Capability / Endpoint 注册、ownership、健康检查、发布校验与发现
 - HTTP / SSE / Kafka / Worker 优雅关闭
 - 服务治理：进程内限流、下游超时、按 target 熔断、快速失败和恢复观测（见 `docs/SERVICE_GOVERNANCE.md`）
 - 旧 Task 模型、空包和误导性文件名清理
@@ -200,7 +213,7 @@ GET  /a2a/agents/:agent_code/tasks/:task_id
 POST /a2a/agents/:source_agent_code/callbacks/tasks/:task_id
 ```
 
-Agent Card 从目标 Agent 的活跃 `AgentCapability` 与 A2A `AgentEndpoint` 构造。Endpoint 必须满足以下传输边界：
+Agent Card 从目标 Agent 当前可执行的 active Workflow Capability 与健康 A2A Endpoint 构造；`tool/custom` 在 V1 仅作为管理资产，不会被广告为 Runtime 尚不能执行的 Skill。Endpoint 必须满足以下传输边界：
 
 - 本地开发 Endpoint 只能使用 loopback 主机的 HTTP 地址
 - 远程 Endpoint 必须使用 HTTPS 地址
@@ -226,7 +239,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 
 当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 节点通过 Agent Card discovery 找到目标 Agent，使用官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。`agent_group` 是显式的多 Agent 并行边界：每个成员都通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum` 聚合及失败收敛；group coordinator 负责一次性恢复 Parent Run。Kafka 只承担内部 `run_execute/run_resume` 调度与恢复，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。Parent Workflow 仍保持串行，只有 `agent_group` 节点内部允许 fan-out/fan-in。
 
-> 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；远程 Endpoint 仍必须使用 HTTPS。
+> 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；Endpoint `config_json` 只能保存非敏感元数据；远程 Endpoint 仍必须使用 HTTPS。
 
 ## 当前 HTTP API
 

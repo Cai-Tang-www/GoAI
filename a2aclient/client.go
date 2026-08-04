@@ -192,6 +192,31 @@ func (c *Client) Invoke(ctx context.Context, request services.AgentInvocationReq
 	return nil, err
 }
 
+// CheckAgentCard 通过官方 discovery 契约校验 Endpoint 对应的 Agent 身份和安全接口。
+func (c *Client) CheckAgentCard(ctx context.Context, request services.AgentCardHealthCheckRequest) error {
+	if c == nil || c.httpClient == nil {
+		return errors.New("checking Agent Card: client is nil")
+	}
+	agentCode := strings.TrimSpace(request.AgentCode)
+	if agentCode == "" {
+		return errors.New("checking Agent Card: agent_code is required")
+	}
+	baseURL, err := url.Parse(strings.TrimRight(strings.TrimSpace(request.Address), "/"))
+	if err != nil {
+		return fmt.Errorf("parsing Agent Card endpoint: %w", err)
+	}
+	if err := validateURL(baseURL); err != nil {
+		return err
+	}
+	card, err := agentcard.NewResolver(c.httpClient).Resolve(ctx, strings.TrimRight(baseURL.String(), "/"))
+	if err != nil {
+		return fmt.Errorf("resolving Agent Card: %w", err)
+	}
+	if err := validateCardIdentity(card, agentCode, baseURL); err != nil {
+		return err
+	}
+	return nil
+}
 func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvocationRequest, endpoint services.AgentInvocationEndpoint) (*services.AgentInvocationResult, error) {
 	baseURL, err := parseEndpoint(endpoint)
 	if err != nil {
@@ -201,7 +226,7 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 	if err != nil {
 		return nil, invocationError(fmt.Errorf("discovering target agent card: %w", err), true)
 	}
-	if err := validateCard(card, request.CapabilityCode, baseURL); err != nil {
+	if err := validateCard(card, request.TargetAgentCode, request.CapabilityCode, baseURL); err != nil {
 		return nil, invocationError(err, false)
 	}
 
@@ -499,19 +524,9 @@ func validateURL(parsed *url.URL) error {
 	}
 }
 
-func validateCard(card *a2a.AgentCard, capability string, requestedBase *url.URL) error {
-	if card == nil {
-		return errors.New("target agent card is empty")
-	}
-	foundExtension := false
-	for _, extension := range card.Capabilities.Extensions {
-		if extension.URI == a2aprotocol.DelegationExtensionURI {
-			foundExtension = true
-			break
-		}
-	}
-	if !foundExtension {
-		return errors.New("target agent card does not support GoAI delegation extension")
+func validateCard(card *a2a.AgentCard, agentCode, capability string, requestedBase *url.URL) error {
+	if err := validateCardIdentity(card, agentCode, requestedBase); err != nil {
+		return err
 	}
 	foundCapability := false
 	for _, skill := range card.Skills {
@@ -522,6 +537,29 @@ func validateCard(card *a2a.AgentCard, capability string, requestedBase *url.URL
 	}
 	if !foundCapability {
 		return fmt.Errorf("target agent card does not expose capability %q", capability)
+	}
+
+	return nil
+}
+
+func validateCardIdentity(card *a2a.AgentCard, agentCode string, requestedBase *url.URL) error {
+	if card == nil {
+		return errors.New("target agent card is empty")
+	}
+	foundExtension := false
+	for _, extension := range card.Capabilities.Extensions {
+		if extension.URI != a2aprotocol.DelegationExtensionURI {
+			continue
+		}
+		foundExtension = true
+		declaredCode, _ := extension.Params["agentCode"].(string)
+		if strings.TrimSpace(declaredCode) != strings.TrimSpace(agentCode) {
+			return fmt.Errorf("target Agent Card declares agent_code %q, want %q", declaredCode, agentCode)
+		}
+		break
+	}
+	if !foundExtension {
+		return errors.New("target agent card does not support GoAI delegation extension")
 	}
 	validInterfaces := make([]*a2a.AgentInterface, 0, len(card.SupportedInterfaces))
 	for _, endpoint := range card.SupportedInterfaces {
@@ -540,7 +578,6 @@ func validateCard(card *a2a.AgentCard, capability string, requestedBase *url.URL
 	card.SupportedInterfaces = validInterfaces
 	return nil
 }
-
 func sameOrigin(left, right *url.URL) bool {
 	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }

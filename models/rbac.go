@@ -15,6 +15,11 @@ const (
 	PermissionUserUpdateSelf = "user:update_self"
 	PermissionUserManage     = "user:manage"
 	PermissionChatUse        = "chat:use"
+	PermissionAgentCreate    = "agent:create"
+	PermissionAgentRead      = "agent:read"
+	PermissionAgentUpdate    = "agent:update"
+	PermissionAgentActivate  = "agent:activate"
+	PermissionAgentManage    = "agent:manage"
 )
 
 type Role struct {

@@ -296,6 +296,9 @@ func buildAgentCardWithAuthentication(descriptor *services.AgentDescriptor, auth
 		}
 		contracts[capability.Code] = contract
 	}
+	if len(skills) == 0 {
+		return nil, errors.New("agent has no active executable capability")
+	}
 	card := &a2a.AgentCard{
 		Name:                descriptor.Name,
 		Description:         descriptor.Description,
@@ -307,7 +310,10 @@ func buildAgentCardWithAuthentication(descriptor *services.AgentDescriptor, auth
 				URI:         DelegationExtensionURI,
 				Description: "GoAI multi-agent delegation metadata and capability contracts",
 				Required:    true,
-				Params:      map[string]any{"capabilities": contracts},
+				Params: map[string]any{
+					"agentCode":    descriptor.Code,
+					"capabilities": contracts,
+				},
 			}}},
 		DefaultInputModes:  []string{"text/plain", "application/json"},
 		DefaultOutputModes: []string{"application/json"},
