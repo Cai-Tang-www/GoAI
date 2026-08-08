@@ -70,8 +70,8 @@ func TestSeedRBACIdempotent(t *testing.T) {
 	if err := gdb.Model(&models.Permission{}).Count(&permCount).Error; err != nil {
 		t.Fatalf("count permissions failed: %v", err)
 	}
-	if permCount != 17 {
-		t.Fatalf("expected 17 permissions, got %d", permCount)
+	if permCount != 18 {
+		t.Fatalf("expected 18 permissions, got %d", permCount)
 	}
 
 	var adminRole models.Role
@@ -126,6 +126,7 @@ func TestSeedRBACIdempotent(t *testing.T) {
 		models.PermissionMCPRead,
 		models.PermissionMCPUpdate,
 		models.PermissionMCPInvoke,
+		models.PermissionLoopRead,
 	} {
 		var count int64
 		if err := gdb.Table("role_permissions AS rp").

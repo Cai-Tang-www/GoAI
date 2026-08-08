@@ -33,6 +33,8 @@ func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 		&models.Message{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.LoopRecord{},
+		&models.LoopEvaluation{},
 		&models.RunIdempotency{},
 		&models.DelegationGroup{},
 		&models.Delegation{},
