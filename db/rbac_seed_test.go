@@ -150,3 +150,35 @@ func TestSeedRBACIdempotent(t *testing.T) {
 		t.Fatalf("member role must not have mcp:manage, got %d bindings", memberMCPManageBindings)
 	}
 }
+
+func TestAssignMemberRoleIsIdempotent(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:assign_member_role_test?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	if err := database.AutoMigrate(&models.User{}, &models.Role{}, &models.UserRole{}); err != nil {
+		t.Fatalf("auto migrate failed: %v", err)
+	}
+	user := models.User{Username: "member", Email: "member@role.test", Password: "x"}
+	if err := database.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	role := models.Role{Name: models.RoleMember}
+	if err := database.Create(&role).Error; err != nil {
+		t.Fatalf("create member role failed: %v", err)
+	}
+
+	if err := AssignMemberRole(database, uint64(user.ID)); err != nil {
+		t.Fatalf("assign member role first time failed: %v", err)
+	}
+	if err := AssignMemberRole(database, uint64(user.ID)); err != nil {
+		t.Fatalf("assign member role second time failed: %v", err)
+	}
+	var count int64
+	if err := database.Model(&models.UserRole{}).Where("user_id = ? AND role_id = ?", user.ID, role.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count member role bindings failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("member role binding count = %d, want 1", count)
+	}
+}

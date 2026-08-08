@@ -12,6 +12,7 @@
 
 - `/ping`、`/auth/register`、`/auth/login` 不需要 JWT。
 - `/api/*` 需要 `Authorization: Bearer <jwt>`。
+- 启用 RBAC 时，`/auth/register` 与管理员 `POST /api/users` 创建的用户会自动获得 `member` 角色；用户创建和角色绑定在同一事务内完成。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
 - Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
 - MCP Server 管理接口使用 `mcp:create`、`mcp:read`、`mcp:update`；`mcp:manage` 允许管理员跨 owner 管理，Tool Runtime 的调用权限为 `mcp:invoke`。

@@ -47,6 +47,7 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	}
 	valid := Dependencies{
 		Database: gdb, RunService: runService, ChatService: chatService,
+		RBACEnable:    false,
 		AgentRegistry: agentRegistry, MCPRegistry: mcpRegistry, Runtime: runtimeService, A2AGateway: http.NotFoundHandler(),
 	}
 	tests := []struct {
@@ -101,6 +102,7 @@ func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
 	}
 	router, err := New(Dependencies{
 		Database:      gdb,
+		RBACEnable:    false,
 		RunService:    service,
 		ChatService:   chatService,
 		AgentRegistry: agentRegistry,

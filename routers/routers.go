@@ -19,6 +19,7 @@ import (
 // Dependencies 是 HTTP 路由装配所需的显式应用依赖。
 type Dependencies struct {
 	Database         *gorm.DB
+	RBACEnable       bool
 	RunService       *services.RunService
 	ChatService      *services.ChatService
 	AgentRegistry    *services.AgentRegistryService
@@ -58,7 +59,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		deps.Observability = observability.NewNoop()
 	}
 
-	userHandler := handlers.NewUserHandler(deps.Database)
+	userHandler := handlers.NewUserHandler(deps.Database, deps.RBACEnable)
 	runHandler := handlers.NewRunHandler(deps.RunService)
 	chatHandler := handlers.NewChatHandler(deps.ChatService)
 	agentRegistryHandler := handlers.NewAgentRegistryHandler(deps.AgentRegistry)
