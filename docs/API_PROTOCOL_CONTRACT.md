@@ -4,6 +4,8 @@
 
 ## 1. Common Conventions
 
+机器可消费的 OpenAPI 3.0 契约见 [`docs/openapi.yaml`](openapi.yaml)。本文档保留协议语义、状态机和联调约束的详细说明；两者必须保持路径、字段和鉴权边界一致。
+
 ### Base URL
 
 以下示例假定服务地址为 `http://127.0.0.1:8080`。生产环境的远程 Agent Endpoint 必须使用 HTTPS；本地开发才允许 loopback HTTP。
@@ -56,7 +58,7 @@
 | `POST` | `/a2a/agents/:agent_code/message:send` | protocol gateway | A2A Task |
 | `GET` | `/a2a/agents/:agent_code/tasks/:task_id` | protocol gateway | A2A Task |
 | `POST` | `/a2a/agents/:agent_code/tasks/:task_id:cancel` | protocol gateway | canceled A2A Task |
-| `POST` | `/a2a/agents/:source_agent_code/callbacks/tasks/:task_id` | protocol gateway | callback accepted |
+| `POST` | `/a2a/agents/:agent_code/callbacks/tasks/:task_id` | protocol gateway | callback accepted; target Agent is in the path, source Agent is signed in `X-GoAI-Agent-Code` |
 
 ## 3. Authentication Examples
 
