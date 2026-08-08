@@ -1,0 +1,1034 @@
+openapi: 3.0.3
+info:
+  title: GoAI Multi-Agent Runtime API
+  version: 1.0.0
+  description: >-
+    GoAI is a multi-Agent protocol runtime. AG-UI connects clients to a runtime,
+    A2A connects Agents to Agents, and Workflow/Eino Graph describes an Agent's
+    execution capability. Kafka is an internal scheduling mechanism and is not
+    an Agent communication protocol.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Auth
+  - name: AG-UI
+  - name: A2A
+  - name: Runs
+  - name: Agents
+  - name: Workflows
+  - name: MCP
+  - name: Users
+  - name: Observability
+paths:
+  /ping:
+    get:
+      tags: [Auth]
+      operationId: ping
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+        '400':
+          $ref: '#/components/responses/Error'
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+        '401':
+          $ref: '#/components/responses/Error'
+  /api/chat:
+    post:
+      tags: [AG-UI]
+      security: [{bearerAuth: []}]
+      operationId: debugChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Streaming provider debug response.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                chunk:
+                  value: "event: chunk\ndata: {\"code\":\"OK\",\"message\":\"streaming\",\"data\":{\"content\":\"hello\"},\"trace_id\":\"trace_xxx\"}\n\n"
+                done:
+                  value: "event: done\ndata: {\"code\":\"OK\",\"message\":\"completed\",\"data\":{\"done\":true},\"trace_id\":\"trace_xxx\"}\n\n"
+        '400':
+          $ref: '#/components/responses/Error'
+  /api/agents/{agent_code}/agui:
+    post:
+      tags: [AG-UI]
+      security: [{bearerAuth: []}]
+      operationId: runAgentWithAGUI
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AGUIRunAgentInput'
+      responses:
+        '200':
+          description: Official AG-UI event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+  /a2a/agents/{agent_code}/.well-known/agent-card.json:
+    get:
+      tags: [A2A]
+      operationId: getAgentCard
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+      responses:
+        '200':
+          description: A2A Agent Card discovery document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentCard'
+        '404':
+          description: Agent is not published.
+  /a2a/agents/{agent_code}/message:send:
+    post:
+      tags: [A2A]
+      security: [{a2aHMAC: []}]
+      operationId: sendA2AMessage
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/A2AAgentCode'
+        - $ref: '#/components/parameters/A2ATimestamp'
+        - $ref: '#/components/parameters/A2ANonce'
+        - $ref: '#/components/parameters/A2AContentSHA256'
+        - $ref: '#/components/parameters/A2ASignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/A2AMessageSendRequest'
+      responses:
+        '200':
+          description: Accepted or completed A2A task.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/A2ATask'
+        '401':
+          description: Invalid machine identity or replayed request.
+        '409':
+          $ref: '#/components/responses/Error'
+  /a2a/agents/{agent_code}/tasks/{task_id}:
+    get:
+      tags: [A2A]
+      security: [{a2aHMAC: []}]
+      operationId: getA2ATask
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/TaskID'
+        - $ref: '#/components/parameters/HistoryLength'
+        - $ref: '#/components/parameters/A2AAgentCode'
+        - $ref: '#/components/parameters/A2ATimestamp'
+        - $ref: '#/components/parameters/A2ANonce'
+        - $ref: '#/components/parameters/A2AContentSHA256'
+        - $ref: '#/components/parameters/A2ASignature'
+      responses:
+        '200':
+          description: Current A2A task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/A2ATask'
+        '404':
+          description: Task not found.
+  /a2a/agents/{agent_code}/tasks/{task_id}:cancel:
+    post:
+      tags: [A2A]
+      security: [{a2aHMAC: []}]
+      operationId: cancelA2ATask
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/TaskID'
+        - $ref: '#/components/parameters/A2AAgentCode'
+        - $ref: '#/components/parameters/A2ATimestamp'
+        - $ref: '#/components/parameters/A2ANonce'
+        - $ref: '#/components/parameters/A2AContentSHA256'
+        - $ref: '#/components/parameters/A2ASignature'
+      responses:
+        '200':
+          description: Cancelled or already terminal task.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/A2ATask'
+        '409':
+          $ref: '#/components/responses/Error'
+  /a2a/agents/{agent_code}/callbacks/tasks/{task_id}:
+    post:
+      tags: [A2A]
+      security: [{a2aHMAC: []}]
+      operationId: receiveA2ATaskCallback
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/TaskID'
+        - $ref: '#/components/parameters/A2AAgentCode'
+        - $ref: '#/components/parameters/A2ATimestamp'
+        - $ref: '#/components/parameters/A2ANonce'
+        - $ref: '#/components/parameters/A2AContentSHA256'
+        - $ref: '#/components/parameters/A2ASignature'
+        - $ref: '#/components/parameters/A2ANotificationToken'
+        - $ref: '#/components/parameters/TraceID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/A2ATaskCallback'
+      responses:
+        '202':
+          description: Callback accepted and applied idempotently.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: {type: boolean, example: true}
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          description: Invalid callback machine identity.
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /api/runs:
+    post:
+      tags: [Runs]
+      security: [{bearerAuth: []}]
+      operationId: createRun
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/Envelope'
+        '200':
+          description: Existing Run returned for an idempotent request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '409':
+          $ref: '#/components/responses/Error'
+  /api/runs/{run_id}:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: getRun
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+        '404':
+          $ref: '#/components/responses/Error'
+  /api/runs/{run_id}/steps:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: listRunSteps
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+        '404':
+          $ref: '#/components/responses/Error'
+  /api/runs/{run_id}/trace:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: getRunTrace
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/runs/{run_id}/loops:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: listRunLoops
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/runs/{run_id}/replay:
+    post:
+      tags: [Runs]
+      security: [{bearerAuth: []}]
+      operationId: replayRun
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/Envelope'
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/threads/{thread_id}/replay:
+    post:
+      tags: [Runs]
+      security: [{bearerAuth: []}]
+      operationId: replayThread
+      parameters:
+        - $ref: '#/components/parameters/ThreadID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source_run_id: {type: string}
+      responses:
+        '202':
+          $ref: '#/components/responses/Envelope'
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/loops/{loop_id}:
+    get:
+      tags: [Observability]
+      security: [{bearerAuth: []}]
+      operationId: getLoop
+      parameters:
+        - $ref: '#/components/parameters/LoopID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/loops/{loop_id}/evaluations:
+    get:
+      tags: [Observability]
+      security: [{bearerAuth: []}]
+      operationId: listLoopEvaluations
+      parameters:
+        - $ref: '#/components/parameters/LoopID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: listAgents
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}:
+    get:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: getAgent
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+    put:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: updateAgent
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/activate:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: activateAgent
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/deactivate:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: deactivateAgent
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/workflows:
+    post:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: createWorkflow
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowCreateRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: listWorkflows
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/capabilities:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: createCapability
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CapabilityRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: listCapabilities
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/capabilities/{capability_code}:
+    put:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: updateCapability
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/CapabilityCode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CapabilityRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/capabilities/{capability_code}/deactivate:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: deactivateCapability
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/CapabilityCode'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/endpoints:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: createAgentEndpoint
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndpointRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: listAgentEndpoints
+      parameters: [{ $ref: '#/components/parameters/AgentCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/endpoints/{endpoint_code}:
+    put:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: updateAgentEndpoint
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/EndpointCode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndpointRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/endpoints/{endpoint_code}/deactivate:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: deactivateAgentEndpoint
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/EndpointCode'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/endpoints/{endpoint_code}/health-check:
+    post:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: healthCheckAgentEndpoint
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/EndpointCode'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/mcp/servers:
+    post:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: createMCPServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MCPServerRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: listMCPServers
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/mcp/servers/{server_code}:
+    get:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: getMCPServer
+      parameters: [{ $ref: '#/components/parameters/ServerCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+    put:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: updateMCPServer
+      parameters: [{ $ref: '#/components/parameters/ServerCode' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MCPServerRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/mcp/servers/{server_code}/deactivate:
+    post:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: deactivateMCPServer
+      parameters: [{ $ref: '#/components/parameters/ServerCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/mcp/servers/{server_code}/health-check:
+    post:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: healthCheckMCPServer
+      parameters: [{ $ref: '#/components/parameters/ServerCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/mcp/servers/{server_code}/tools:
+    get:
+      tags: [MCP]
+      security: [{bearerAuth: []}]
+      operationId: listMCPTools
+      parameters: [{ $ref: '#/components/parameters/ServerCode' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/workflows/{version}:
+    get:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: getWorkflow
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/WorkflowVersion'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+    put:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: updateWorkflow
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/WorkflowVersion'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowUpdateRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/workflows/{version}/activate:
+    post:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: activateWorkflow
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/WorkflowVersion'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/{agent_code}/workflows/{version}/deactivate:
+    post:
+      tags: [Workflows]
+      security: [{bearerAuth: []}]
+      operationId: deactivateWorkflow
+      parameters:
+        - $ref: '#/components/parameters/AgentCode'
+        - $ref: '#/components/parameters/WorkflowVersion'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/users:
+    post:
+      tags: [Users]
+      security: [{bearerAuth: []}]
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/Envelope'
+    get:
+      tags: [Users]
+      security: [{bearerAuth: []}]
+      operationId: listUsers
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/users/{id}:
+    get:
+      tags: [Users]
+      security: [{bearerAuth: []}]
+      operationId: getUser
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+    put:
+      tags: [Users]
+      security: [{bearerAuth: []}]
+      operationId: updateUser
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+    delete:
+      tags: [Users]
+      security: [{bearerAuth: []}]
+      operationId: deleteUser
+      parameters: [{ $ref: '#/components/parameters/UserID' }]
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    a2aHMAC:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'Use the GoAI-HMAC-SHA256 scheme. Companion headers are defined below.'
+  parameters:
+    AgentCode:
+      name: agent_code
+      in: path
+      required: true
+      schema: {type: string, maxLength: 64}
+    TaskID:
+      name: task_id
+      in: path
+      required: true
+      schema: {type: string, maxLength: 128}
+    HistoryLength:
+      name: historyLength
+      in: query
+      required: false
+      schema: {type: integer, minimum: 0}
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: {type: string, maxLength: 128}
+    ThreadID:
+      name: thread_id
+      in: path
+      required: true
+      schema: {type: string, maxLength: 128}
+    LoopID:
+      name: loop_id
+      in: path
+      required: true
+      schema: {type: string, maxLength: 128}
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    WorkflowVersion:
+      name: version
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: {type: string, maxLength: 255}
+    A2AAgentCode:
+      name: X-GoAI-Agent-Code
+      in: header
+      required: true
+      schema: {type: string, maxLength: 64}
+    A2ATimestamp:
+      name: X-GoAI-Timestamp
+      in: header
+      required: true
+      schema: {type: string}
+    A2ANonce:
+      name: X-GoAI-Nonce
+      in: header
+      required: true
+      schema: {type: string, minLength: 8}
+    A2ASignature:
+      name: Authorization
+      in: header
+      required: true
+      schema: {type: string}
+    A2AContentSHA256:
+      name: X-GoAI-Content-SHA256
+      in: header
+      required: true
+      schema: {type: string, minLength: 64, maxLength: 64}
+    A2ANotificationToken:
+      name: A2A-Notification-Token
+      in: header
+      required: true
+      schema: {type: string, maxLength: 255}
+    TraceID:
+      name: X-Trace-ID
+      in: header
+      required: false
+      schema: {type: string, maxLength: 128}
+    CapabilityCode:
+      name: capability_code
+      in: path
+      required: true
+      schema: {type: string, maxLength: 64}
+    EndpointCode:
+      name: endpoint_code
+      in: path
+      required: true
+      schema: {type: string, maxLength: 64}
+    ServerCode:
+      name: server_code
+      in: path
+      required: true
+      schema: {type: string, maxLength: 64}
+  responses:
+    Envelope:
+      description: Unified JSON response envelope.
+      headers:
+        X-Trace-ID:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Envelope'
+    Error:
+      description: Unified error envelope.
+      headers:
+        X-Trace-ID:
+          schema: {type: string}
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Envelope'
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message, data, trace_id]
+      properties:
+        code: {type: string, example: OK}
+        message: {type: string, example: success}
+        data: {}
+        trace_id: {type: string, example: trace_xxx}
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      additionalProperties: false
+      properties:
+        username: {type: string, minLength: 3, maxLength: 64}
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8}
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: {type: string}
+        password: {type: string, format: password}
+    ChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        provider: {type: string}
+        model: {type: string}
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role: {type: string, enum: [system, user, assistant, developer]}
+              content: {type: string}
+    AGUIRunAgentInput:
+      type: object
+      required: [messages]
+      properties:
+        threadId: {type: string}
+        runId: {type: string}
+        parentRunId: {type: string}
+        messages: {type: array, items: {type: object}}
+        resume: {type: array, items: {type: object}}
+    CreateRunRequest:
+      type: object
+      required: [agent_code]
+      properties:
+        agent_code: {type: string}
+        workflow_version: {type: integer, minimum: 0}
+        thread_id: {type: string}
+        trigger_type: {type: string}
+        input: {}
+        provider: {type: string}
+        model: {type: string}
+    AgentRequest:
+      type: object
+      required: [agent_code, name]
+      properties:
+        agent_code: {type: string}
+        name: {type: string}
+        description: {type: string}
+    CapabilityRequest:
+      type: object
+      required: [capability_code, name, capability_type, version]
+      properties:
+        capability_code: {type: string}
+        name: {type: string}
+        description: {type: string}
+        capability_type: {type: string, enum: [workflow, remote, tool, custom]}
+        workflow_id: {type: integer, format: int64}
+        version: {type: string}
+        input_schema_json: {type: string}
+        output_schema_json: {type: string}
+        config_json: {type: string}
+        status: {type: string, enum: [active, inactive]}
+    EndpointRequest:
+      type: object
+      required: [endpoint_code, address]
+      properties:
+        endpoint_code: {type: string}
+        protocol: {type: string, enum: [a2a]}
+        transport: {type: string, enum: [http, https]}
+        address: {type: string, format: uri}
+        auth_type: {type: string}
+        credential_ref: {type: string}
+        config_json: {type: string}
+    MCPServerRequest:
+      type: object
+      required: [server_code, name, endpoint]
+      properties:
+        server_code: {type: string}
+        name: {type: string}
+        description: {type: string}
+        transport: {type: string, enum: [streamable_http]}
+        endpoint: {type: string, format: uri}
+        auth_type: {type: string}
+        credential_ref: {type: string}
+        config_json: {type: string}
+    WorkflowCreateRequest:
+      type: object
+      required: [version, definition]
+      properties:
+        version: {type: integer, minimum: 1}
+        definition: {type: object}
+    WorkflowUpdateRequest:
+      type: object
+      required: [definition]
+      properties:
+        definition: {type: object}
+    A2AMessageSendRequest:
+      type: object
+      required: [message]
+      properties:
+        message: {type: object}
+        configuration: {type: object}
+    A2ATaskCallback:
+      type: object
+      description: >-
+        A2A StreamResponse wrapper. The runtime accepts terminal Task or
+        terminal statusUpdate events for callbacks; message and artifactUpdate
+        events are not valid callback payloads.
+      oneOf:
+        - type: object
+          required: [task]
+          properties:
+            task:
+              $ref: '#/components/schemas/A2ATask'
+        - type: object
+          required: [statusUpdate]
+          properties:
+            statusUpdate:
+              $ref: '#/components/schemas/A2ATaskStatusUpdateEvent'
+    AgentCard:
+      type: object
+      required: [name, description, url, capabilities]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        url: {type: string, format: uri}
+        capabilities: {type: object}
+        skills: {type: array, items: {type: object}}
+    A2ATask:
+      type: object
+      properties:
+        id: {type: string}
+        contextId: {type: string}
+        status:
+          $ref: '#/components/schemas/A2ATaskStatus'
+        history: {type: array, items: {type: object}}
+        artifacts: {type: array, items: {type: object}}
+    A2ATaskStatusUpdateEvent:
+      type: object
+      required: [taskId, status]
+      properties:
+        contextId: {type: string}
+        taskId: {type: string}
+        status:
+          $ref: '#/components/schemas/A2ATaskStatus'
+        metadata: {type: object}
+    A2ATaskStatus:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [submitted, working, input-required, completed, canceled, failed, rejected]
+        message: {type: object}
+        timestamp: {type: string, format: date-time}

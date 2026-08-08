@@ -222,7 +222,7 @@ GET  /a2a/agents/:agent_code/.well-known/agent-card.json
 POST /a2a/agents/:agent_code/message:send
 GET  /a2a/agents/:agent_code/tasks/:task_id
 POST /a2a/agents/:agent_code/tasks/:task_id:cancel
-POST /a2a/agents/:source_agent_code/callbacks/tasks/:task_id
+POST /a2a/agents/:agent_code/callbacks/tasks/:task_id
 ```
 
 Agent Card 从目标 Agent 当前可执行的 active Workflow Capability 与健康 A2A Endpoint 构造；`tool/custom` 在 V1 仅作为管理资产，不会被广告为 Runtime 尚不能执行的 Skill。Endpoint 必须满足以下传输边界：
@@ -388,6 +388,7 @@ Kafka producer、Redis 和 MySQL 的第三方 `Close()` API 不接收 context，
 
 - [产品设计提案](docs/PRODUCT_PROPOSAL.md)
 - [实施路线图](docs/IMPLEMENTATION_ROADMAP.md)
+- [OpenAPI 3.0 HTTP 契约](docs/openapi.yaml)
 - [统一响应契约](docs/RESPONSE_CONTRACT.md)
 - [MCP Tool Runtime](docs/MCP_RUNTIME.md)
 - [HTTP / AG-UI / A2A 协议契约](docs/API_PROTOCOL_CONTRACT.md)
