@@ -944,6 +944,11 @@ func TestRunCancellationContextIsSharedAcrossDuplicateConsumers(t *testing.T) {
 		t.Fatal("duplicate consumers must share one cancellation context")
 	}
 	stopSecond()
+	select {
+	case <-first.Done():
+		t.Fatal("releasing one duplicate consumer cancelled the shared context")
+	default:
+	}
 	service.cancelActiveRun("run-shared-cancel")
 	select {
 	case <-first.Done():

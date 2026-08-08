@@ -138,6 +138,7 @@ type RunService struct {
 type runCancellation struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+	refs   int
 }
 
 // NewRunService 使用显式数据库和事件发布器构造 RunService。
@@ -180,27 +181,42 @@ func (s *RunService) withRunCancellation(parent context.Context, runID string) (
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithCancelCause(parent)
 	runID = strings.TrimSpace(runID)
 	s.executionMu.Lock()
 	if s.executionCancels == nil {
 		s.executionCancels = make(map[string]*runCancellation)
 	}
 	if existing, ok := s.executionCancels[runID]; ok {
+		existing.refs++
+		ctx := existing.ctx
 		s.executionMu.Unlock()
-		cancel(nil)
-		return existing.ctx, func() {}
+		return ctx, s.releaseRunCancellation(runID, existing)
 	}
-	entry := &runCancellation{ctx: ctx, cancel: cancel}
+	ctx, cancel := context.WithCancelCause(parent)
+	entry := &runCancellation{ctx: ctx, cancel: cancel, refs: 1}
 	s.executionCancels[runID] = entry
 	s.executionMu.Unlock()
-	return ctx, func() {
-		s.executionMu.Lock()
-		if current, ok := s.executionCancels[runID]; ok && current == entry {
-			delete(s.executionCancels, runID)
-		}
-		s.executionMu.Unlock()
-		cancel(nil)
+	return ctx, s.releaseRunCancellation(runID, entry)
+}
+
+func (s *RunService) releaseRunCancellation(runID string, entry *runCancellation) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			var cancel context.CancelCauseFunc
+			s.executionMu.Lock()
+			if current, ok := s.executionCancels[runID]; ok && current == entry {
+				current.refs--
+				if current.refs == 0 {
+					delete(s.executionCancels, runID)
+					cancel = current.cancel
+				}
+			}
+			s.executionMu.Unlock()
+			if cancel != nil {
+				cancel(nil)
+			}
+		})
 	}
 }
 
