@@ -46,6 +46,7 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		"delegation_groups",
 		"agent_endpoints",
 		"agent_capabilities",
+		"workflows",
 		"mcp_servers",
 		"mcp_tools",
 		"loop_records",
@@ -70,6 +71,7 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		{&models.DelegationGroup{}, "uidx_delegation_group_coordinator"},
 		{&models.AgentEndpoint{}, "idx_agent_endpoint_unique"},
 		{&models.AgentCapability{}, "idx_agent_capability_unique"},
+		{&models.Workflow{}, "uidx_workflows_agent_version"},
 		{&models.MCPServer{}, "idx_mcp_server_owner_code"},
 		{&models.MCPTool{}, "idx_mcp_tool_server_name"},
 		{&models.LoopRecord{}, "idx_loop_records_loop_id"},
@@ -179,6 +181,18 @@ func TestUnifiedDomainModelUniqueConstraints(t *testing.T) {
 		)
 		if err := database.Create(&models.AgentCapability{AgentID: 2, CapabilityCode: "summarize", Name: "Summarize", CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "v1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
 			t.Fatalf("same capability code on another agent should be allowed: %v", err)
+		}
+	})
+
+	t.Run("workflow agent and version", func(t *testing.T) {
+		first := &models.Workflow{AgentID: 1, Version: 1, DefinitionJSON: `{}`, Checksum: "v1", CreatedBy: 1}
+		duplicate := &models.Workflow{AgentID: 1, Version: 1, DefinitionJSON: `{}`, Checksum: "v1-duplicate", CreatedBy: 2}
+		assertDuplicateRejected(t, first, duplicate)
+		if err := database.Create(&models.Workflow{AgentID: 1, Version: 2, DefinitionJSON: `{}`, Checksum: "v2", CreatedBy: 1}).Error; err != nil {
+			t.Fatalf("different workflow version should be allowed: %v", err)
+		}
+		if err := database.Create(&models.Workflow{AgentID: 2, Version: 1, DefinitionJSON: `{}`, Checksum: "other-v1", CreatedBy: 2}).Error; err != nil {
+			t.Fatalf("same workflow version on another agent should be allowed: %v", err)
 		}
 	})
 
