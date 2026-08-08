@@ -346,12 +346,26 @@ func TestInputFromPartsRejectsUnsupportedOrMixedContent(t *testing.T) {
 	}
 }
 
-func TestCommandFromRequestRequiresDelegationExtension(t *testing.T) {
+func TestCommandFromRequestSupportsStandardMessageWithTrustedSource(t *testing.T) {
 	request := validSendRequest()
 	request.Message.Extensions = nil
-	if _, err := commandFromRequest("writer", request); !errors.Is(err, a2a.ErrExtensionSupportRequired) {
-		t.Fatalf("got %v, want extension required", err)
+	request.Message.Metadata = nil
+	command, err := commandFromRequest("writer", request, "planner")
+	if err != nil {
+		t.Fatalf("standard request mapping failed: %v", err)
 	}
+	if command.SourceAgentCode != "planner" || command.CapabilityCode != "" || command.ParentRunID == "" {
+		t.Fatalf("unexpected standard request command: %+v", command)
+	}
+	request.Message.Metadata = map[string]any{DelegationExtensionURI: map[string]any{"sourceAgentCode": "planner"}}
+	if _, err := commandFromRequest("writer", request, "planner"); !errors.Is(err, a2a.ErrExtensionSupportRequired) {
+		t.Fatalf("got %v, want undeclared extension error", err)
+	}
+	request.Message.Metadata = nil
+	if _, err := commandFromRequest("writer", request); !errors.Is(err, a2a.ErrInvalidParams) {
+		t.Fatalf("got %v, want missing source identity error", err)
+	}
+
 	request = validSendRequest()
 	request.Message.Metadata = map[string]any{DelegationExtensionURI: map[string]any{"sourceAgentCode": "planner"}}
 	if _, err := commandFromRequest("writer", request); !errors.Is(err, a2a.ErrInvalidParams) {

@@ -21,7 +21,7 @@ type delegationExtension struct {
 	DelegationID    string `json:"delegationId"`
 }
 
-func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (services.AcceptDelegationCommand, error) {
+func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest, trustedSource ...string) (services.AcceptDelegationCommand, error) {
 	if request == nil || request.Message == nil {
 		return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "message is required")
 	}
@@ -39,6 +39,16 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 	if err != nil {
 		return services.AcceptDelegationCommand{}, err
 	}
+	sourceAgentCode := strings.TrimSpace(extension.SourceAgentCode)
+	if len(trustedSource) > 0 && strings.TrimSpace(trustedSource[0]) != "" {
+		if sourceAgentCode != "" && sourceAgentCode != strings.TrimSpace(trustedSource[0]) {
+			return services.AcceptDelegationCommand{}, a2a.ErrUnauthorized
+		}
+		sourceAgentCode = strings.TrimSpace(trustedSource[0])
+	}
+	if sourceAgentCode == "" {
+		return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "source agent identity is required")
+	}
 	input, err := inputFromParts(message.Parts)
 	if err != nil {
 		return services.AcceptDelegationCommand{}, err
@@ -52,6 +62,12 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 	if threadID == "" {
 		threadID = stableID("thread", message.ID)
 	}
+	parentRunID := extension.ParentRunID
+	if parentRunID == "" {
+		// A standard A2A caller has no GoAI parent Run. Keep a stable protocol
+		// correlation key without inventing a persisted user Run.
+		parentRunID = stableID("external-parent", sourceAgentCode+"\x00"+threadID)
+	}
 	metadata, err := json.Marshal(message.Metadata)
 	if err != nil {
 		return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "message metadata is invalid")
@@ -62,7 +78,7 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 		if protocolConfig.Auth != nil {
 			return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "push config authentication is managed by the GoAI A2A machine identity")
 		}
-		if strings.TrimSpace(string(protocolConfig.TaskID)) != childRunID {
+		if strings.TrimSpace(string(protocolConfig.TaskID)) != "" && strings.TrimSpace(string(protocolConfig.TaskID)) != childRunID {
 			return services.AcceptDelegationCommand{}, a2a.NewError(a2a.ErrInvalidParams, "push config taskId must match message taskId")
 		}
 		pushConfig = &services.DelegationPushConfig{
@@ -73,10 +89,10 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 		}
 	}
 	return services.AcceptDelegationCommand{
-		SourceAgentCode:       extension.SourceAgentCode,
+		SourceAgentCode:       sourceAgentCode,
 		TargetAgentCode:       targetAgent,
 		CapabilityCode:        extension.CapabilityCode,
-		ParentRunID:           extension.ParentRunID,
+		ParentRunID:           parentRunID,
 		TraceID:               extension.TraceID,
 		RequestedDelegationID: extension.DelegationID,
 		ThreadID:              threadID,
@@ -90,7 +106,15 @@ func commandFromRequest(targetAgent string, request *a2a.SendMessageRequest) (se
 
 func parseDelegationExtension(message *a2a.Message, request *a2a.SendMessageRequest) (delegationExtension, error) {
 	if !containsString(message.Extensions, DelegationExtensionURI) {
-		return delegationExtension{}, a2a.NewError(a2a.ErrExtensionSupportRequired, "GoAI delegation extension is required")
+		if _, ok := message.Metadata[DelegationExtensionURI]; ok {
+			return delegationExtension{}, a2a.NewError(a2a.ErrExtensionSupportRequired, "GoAI delegation extension must be declared by the message")
+		}
+		if request != nil {
+			if _, ok := request.Metadata[DelegationExtensionURI]; ok {
+				return delegationExtension{}, a2a.NewError(a2a.ErrExtensionSupportRequired, "GoAI delegation extension must be declared by the message")
+			}
+		}
+		return delegationExtension{}, nil
 	}
 	value, ok := message.Metadata[DelegationExtensionURI]
 	if !ok && request != nil {

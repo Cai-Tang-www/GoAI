@@ -74,17 +74,16 @@ func (h *requestHandler) SendMessage(ctx context.Context, request *a2a.SendMessa
 	if err != nil {
 		return nil, err
 	}
-	command, err := commandFromRequest(target, request)
-	if err != nil {
-		return nil, err
-	}
 	source, err := h.authenticatedSource(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if h.authRequired && source != command.SourceAgentCode {
-		h.logAuthorizationRejection(ctx, target, source, "source_metadata_mismatch")
-		return nil, a2a.ErrUnauthorized
+	command, err := commandFromRequest(target, request, source)
+	if err != nil {
+		if errors.Is(err, a2a.ErrUnauthorized) {
+			h.logAuthorizationRejection(ctx, target, source, "source_metadata_mismatch")
+		}
+		return nil, err
 	}
 	result, err := h.runtime.AcceptDelegation(ctx, command)
 	if err != nil {
