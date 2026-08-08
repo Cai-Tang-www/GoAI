@@ -150,7 +150,11 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)
+		apiGroup.GET("/runs/:run_id/trace", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetRunTrace)
+		apiGroup.GET("/runs/:run_id/loops", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.ListRunLoops)
 		apiGroup.POST("/runs/:run_id/replay", middlewares.RequirePermission(models.PermissionRunReplay), runHandler.ReplayRun)
+		apiGroup.GET("/loops/:loop_id", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetLoop)
+		apiGroup.GET("/loops/:loop_id/evaluations", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.ListLoopEvaluations)
 
 		apiGroup.POST("/users", middlewares.RequirePermission(models.PermissionUserManage), userHandler.CreateUser)
 		apiGroup.GET("/users", middlewares.RequirePermission(models.PermissionUserManage), userHandler.ListUsers)

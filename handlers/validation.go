@@ -194,16 +194,25 @@ func validateCreateRunRequest(req *services.CreateRunRequest) *middlewares.AppEr
 
 // validateRunIDParam 校验 run_id 路径参数，避免无效路径值进入查询与回放逻辑。
 func validateRunIDParam(runID string) *middlewares.AppError {
-	normalized := strings.TrimSpace(runID)
+	return validateResourceIDParam("run_id", runID)
+}
+
+// validateResourceIDParam 校验资源 ID 路径参数，并在错误中保留实际字段名。
+func validateResourceIDParam(field, value string) *middlewares.AppError {
+	field = strings.TrimSpace(field)
+	if field == "" {
+		field = "id"
+	}
+	normalized := strings.TrimSpace(value)
 	var fieldErrors []validationFieldError
 	if normalized == "" {
-		fieldErrors = append(fieldErrors, newValidationFieldError("run_id", "is required"))
+		fieldErrors = append(fieldErrors, newValidationFieldError(field, "is required"))
 	}
 	if len(normalized) > 64 {
-		fieldErrors = append(fieldErrors, newValidationFieldError("run_id", "must be at most 64 characters"))
+		fieldErrors = append(fieldErrors, newValidationFieldError(field, "must be at most 64 characters"))
 	}
 	if normalized != "" && !runIDPattern.MatchString(normalized) {
-		fieldErrors = append(fieldErrors, newValidationFieldError("run_id", "must contain only letters, digits, underscore or hyphen"))
+		fieldErrors = append(fieldErrors, newValidationFieldError(field, "must contain only letters, digits, underscore or hyphen"))
 	}
 	if len(fieldErrors) > 0 {
 		return validationError("invalid run id", fieldErrors)

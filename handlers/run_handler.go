@@ -100,6 +100,86 @@ func (h *RunHandler) ListRunSteps(c *gin.Context) {
 	middlewares.Success(c, http.StatusOK, steps, "success")
 }
 
+// GetRunTrace 返回 Run 及其可访问协作后代的 Trace/Loop 只读快照。
+func (h *RunHandler) GetRunTrace(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	runID := c.Param("run_id")
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	trace, err := h.service.GetRunTrace(c.Request.Context(), userID, isAdmin, runID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, trace, "success")
+}
+
+// ListRunLoops 返回当前 Run 的 Loop 列表。
+func (h *RunHandler) ListRunLoops(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	runID := c.Param("run_id")
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	loops, err := h.service.GetRunLoops(c.Request.Context(), userID, isAdmin, runID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, loops, "success")
+}
+
+// GetLoop 返回单个 Loop 及其评估结果。
+func (h *RunHandler) GetLoop(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	loopID := c.Param("loop_id")
+	if appErr := validateResourceIDParam("loop_id", loopID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	loop, err := h.service.GetLoopDetail(c.Request.Context(), userID, isAdmin, loopID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, loop, "success")
+}
+
+// ListLoopEvaluations 返回单个 Loop 的异步评估记录。
+func (h *RunHandler) ListLoopEvaluations(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	loopID := c.Param("loop_id")
+	if appErr := validateResourceIDParam("loop_id", loopID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	evaluations, err := h.service.GetLoopEvaluations(c.Request.Context(), userID, isAdmin, loopID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, evaluations, "success")
+}
+
 // ReplayRun 处理 Run 回放请求，并复用 service 层的稳定回放逻辑。
 func (h *RunHandler) ReplayRun(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)

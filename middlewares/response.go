@@ -71,6 +71,7 @@ const (
 	CodeRBACPermissionLoad        = "RBAC_PERMISSION_LOAD_FAILED"
 	CodeKafkaPublishFailed        = "KAFKA_PUBLISH_FAILED"
 	CodeIdempotencyKeyReused      = "IDEMPOTENCY_KEY_REUSED"
+	CodeLoopNotFound              = "LOOP_NOT_FOUND"
 )
 
 // ResponseEnvelope 定义所有 HTTP JSON 与 SSE payload 共用的响应结构。
@@ -210,6 +211,11 @@ func UserAlreadyExistsError() *AppError {
 // RunNotFoundError 构造 Run 不存在错误。
 func RunNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeRunNotFound, Message: "run not found"}
+}
+
+// LoopNotFoundError 构造 Loop 不存在错误。
+func LoopNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeLoopNotFound, Message: "loop not found"}
 }
 
 // AgentNotFoundError 构造 Agent 不存在或未启用错误。
@@ -394,6 +400,8 @@ func WrapError(err error) *AppError {
 	switch {
 	case errors.Is(err, services.ErrRunNotFound()):
 		return RunNotFoundError()
+	case errors.Is(err, services.ErrLoopNotFound()):
+		return LoopNotFoundError()
 	case errors.Is(err, services.ErrRunForbidden()):
 		return ForbiddenError()
 	case errors.Is(err, services.ErrRunDispatchFailed()):

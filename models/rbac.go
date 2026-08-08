@@ -25,6 +25,7 @@ const (
 	PermissionMCPUpdate      = "mcp:update"
 	PermissionMCPInvoke      = "mcp:invoke"
 	PermissionMCPManage      = "mcp:manage"
+	PermissionLoopRead       = "loop:read"
 )
 
 type Role struct {
