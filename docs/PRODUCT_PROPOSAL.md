@@ -484,6 +484,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - Agent Registry 管理 API 已覆盖 Agent、Capability、Endpoint 的 owner-scoped CRUD、Agent Card 健康检查、发布校验和启停；V1 仅发布可执行的 Workflow Capability，Endpoint `config_json` 拒绝敏感字段；管理员通过独立 `agent:manage` 权限跨 owner 管理，真实凭据不进入 API 响应
 - MCP Tool Runtime 已使用官方 MCP Go SDK 支持 Streamable HTTP 的 Server Registry、健康检查、Tool discovery snapshot 和 `tools/call`；Eino `tool` 节点只保存 `server_code + tool_name` 稳定引用，通过 `ToolInvoker` 将 JSON-safe Tool 结果纳入 RunStep、重试和 Replay。MCP 固定承担 Agent -> Tool，A2A 继续承担 Agent -> Agent
 - Issue #65 已提供 Loop / Trace / Evaluation 只读管理 API；查询包含 Run、RunStep、Loop、Delegation、Message 和 Evaluation 快照，并通过 `loop:read` 执行 owner/admin 隔离
+- Issue #67 已提供 Thread Replay：Runtime 从持久化 Message 历史构造不可变 input snapshot，创建新的 Run/Trace/Loop，并复用现有 Kafka 调度、幂等和 owner/admin 语义；回放不复制旧 Message
 
 ### 14.3 仍需扩展
 

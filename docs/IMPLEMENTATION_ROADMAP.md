@@ -93,8 +93,8 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - `tool` 节点通过 MCP `ToolInvoker` 执行 Agent -> Tool 调用；MCP 不替代 Agent -> Agent 的 A2A 通信
 
 ### 9. Replay / Loop / Trace
-- Thread Replay
-- Run Replay
+- Thread Replay（已实现，Issue #67）
+- Run Replay（已实现）
 - LoopID / OTel Trace
 - Prompt 快照与性能成本基础字段
 
@@ -104,8 +104,13 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - `loop:read` 通过 RBAC 启动补种，member owner-scoped，admin 支持跨 owner
 - 查询统一使用 response envelope、稳定错误码和 `trace_id`
 
+已实现（Issue #67）：
+- `POST /api/threads/:thread_id/replay` 基于持久化 Thread Message 历史创建新的 Run
+- 支持显式来源 Run 或自动选择最新终态 Run，固定按 `created_at ASC, id ASC` 生成不可变输入快照
+- 不复制原 Message，复用现有 Run 幂等、Kafka `run_execute` 和 dispatch failure 语义
+- member owner-scoped，admin 可跨 owner；新 Run 保留目标 Thread owner 并生成新的 Trace/Loop
+
 仍需扩展：
-- Thread Replay
 - 完整 OTel Trace、成本聚合、Evaluator 管理和 Dashboard
 
 ### 10. 文档与契约
