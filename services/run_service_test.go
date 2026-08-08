@@ -54,7 +54,7 @@ func seedAgentWorkflow(t *testing.T, gdb *gorm.DB) (models.Agent, models.Workflo
 	workflow := models.Workflow{
 		AgentID:        agent.ID,
 		Version:        1,
-		DefinitionJSON: `{"entry_node":"planner","nodes":[{"key":"planner","type":"planner"},{"key":"tool1","type":"tool"}],"edges":[{"from":"planner","to":"tool1"}]}`,
+		DefinitionJSON: `{"entry_node":"planner","nodes":[{"key":"planner","type":"planner"},{"key":"tool1","type":"noop"}],"edges":[{"from":"planner","to":"tool1"}]}`,
 		Checksum:       "abc",
 		IsActive:       true,
 		CreatedBy:      1,
@@ -390,7 +390,7 @@ func TestHandleRunExecuteMessageSuccess(t *testing.T) {
 func TestHandleRunExecuteCommitsRunningStepBeforeNodeReturns(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"blocking","nodes":[{"key":"blocking","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"blocking","nodes":[{"key":"blocking","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestHandleRunExecuteCommitsRunningStepBeforeNodeReturns(t *testing.T) {
 func TestHandleRunExecutePersistsResultMessage(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestCompleteRunStepRollsBackSuccessWhenResultMessageFails(t *testing.T) {
 func TestHandleRunExecuteFailsRunWhenResultMessageCannotPersist(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestHandleRunExecuteFailsRunWhenResultMessageCannotPersist(t *testing.T) {
 func TestHandleRunExecuteRejectsInvalidNodeOutputJSON(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"respond","nodes":[{"key":"respond","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}
@@ -691,7 +691,7 @@ func TestHandleRunExecuteRejectsInvalidNodeOutputJSON(t *testing.T) {
 func TestHandleRunExecuteRetriesAndFails(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"failing","nodes":[{"key":"failing","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"failing","nodes":[{"key":"failing","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}
@@ -876,7 +876,7 @@ func TestHandleRunExecuteMessageDuplicateIsNoop(t *testing.T) {
 func TestHandleRunExecuteCancellationPersistsFailedRunAndStep(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, gdb)
-	workflow.DefinitionJSON = `{"entry_node":"blocking","nodes":[{"key":"blocking","type":"tool"}],"edges":[]}`
+	workflow.DefinitionJSON = `{"entry_node":"blocking","nodes":[{"key":"blocking","type":"noop"}],"edges":[]}`
 	if err := gdb.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow failed: %v", err)
 	}

@@ -75,7 +75,7 @@ func TestExecuteFromRunsOnlyWorkflowSuffix(t *testing.T) {
 	definition := &workflow.Definition{
 		EntryNode: "prepare",
 		Nodes: []workflow.Node{
-			{Key: "prepare", Type: "tool"},
+			{Key: "prepare", Type: "noop"},
 			{Key: "delegate", Type: "agent", Config: []byte(`{"target_agent":"writer","capability":"write"}`)},
 			{Key: "summarize", Type: "llm"},
 		},
@@ -103,7 +103,7 @@ func TestExecuteFromRunsOnlyWorkflowSuffix(t *testing.T) {
 func TestExecuteFromRejectsUnreachableResumeNode(t *testing.T) {
 	definition := &workflow.Definition{
 		EntryNode: "prepare",
-		Nodes:     []workflow.Node{{Key: "prepare", Type: "tool"}},
+		Nodes:     []workflow.Node{{Key: "prepare", Type: "noop"}},
 	}
 	_, err := New().ExecuteFrom(context.Background(), definition, "missing", `{}`, func(context.Context, workflow.Node, string) (string, error) {
 		return `{}`, nil

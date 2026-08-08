@@ -73,7 +73,7 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	agentBInA, workflowBInA := seedAgent(t, databaseA, "writer", "Writer Agent", 22, `{"entry_node":"write","nodes":[{"key":"write","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseA, agentBInA, "write", workflowBInA)
 
-	plannerB, _ := seedAgent(t, databaseB, "planner", "Planner Agent", 11, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+	plannerB, _ := seedAgent(t, databaseB, "planner", "Planner Agent", 11, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 	agentB, workflowB := seedAgent(t, databaseB, "writer", "Writer Agent", 22, `{"entry_node":"write","nodes":[{"key":"write","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseB, agentB, "write", workflowB)
 
@@ -500,7 +500,7 @@ func TestAgentGroupDelegatesThroughA2AHTTPToTwoChildRuns(t *testing.T) {
 					{"key":"quality","target_agent":"quality-reviewer","capability":"review","timeout_ms":5000}
 				]
 			}},
-			{"key":"finalize","type":"tool","config":{"input_from":["parallel_review"]}}
+			{"key":"finalize","type":"noop","config":{"input_from":["parallel_review"]}}
 		],
 		"edges":[{"from":"parallel_review","to":"finalize"}]
 	}`
@@ -510,10 +510,10 @@ func TestAgentGroupDelegatesThroughA2AHTTPToTwoChildRuns(t *testing.T) {
 	seedCapability(t, databaseA, securityInA, "review", securityWorkflowInA)
 	seedCapability(t, databaseA, qualityInA, "review", qualityWorkflowInA)
 
-	plannerSecurity, _ := seedAgent(t, databaseSecurity, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"tool"}],"edges":[]}`)
+	plannerSecurity, _ := seedAgent(t, databaseSecurity, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"noop"}],"edges":[]}`)
 	securityAgent, securityWorkflow := seedAgent(t, databaseSecurity, "security-reviewer", "Security Reviewer", 22, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseSecurity, securityAgent, "review", securityWorkflow)
-	plannerQuality, _ := seedAgent(t, databaseQuality, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"tool"}],"edges":[]}`)
+	plannerQuality, _ := seedAgent(t, databaseQuality, "planner-group", "Planner Group Agent", 11, `{"entry_node":"noop","nodes":[{"key":"noop","type":"noop"}],"edges":[]}`)
 	qualityAgent, qualityWorkflow := seedAgent(t, databaseQuality, "quality-reviewer", "Quality Reviewer", 23, `{"entry_node":"review","nodes":[{"key":"review","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseQuality, qualityAgent, "review", qualityWorkflow)
 

@@ -114,7 +114,7 @@ func setupResumeLeaseFixture(t *testing.T, definitionJSON, resumeNodeKey string)
 }
 
 func TestClaimRunResumeSupportsExclusiveExpiredLeaseTakeover(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 
 	run, delegation, firstLease, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestClaimRunResumeSupportsExclusiveExpiredLeaseTakeover(t *testing.T) {
 }
 
 func TestClaimRunResumeConcurrentTakeoverHasSingleWinner(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 	_, _, _, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil || !claimed {
 		t.Fatalf("prepare initial claim failed: claimed=%v err=%v", claimed, err)
@@ -189,7 +189,7 @@ func TestClaimRunResumeConcurrentTakeoverHasSingleWinner(t *testing.T) {
 }
 
 func TestResumeLeaseHeartbeatAndFencingRejectOldOwner(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 	fixture.service.resumeLeaseDuration = 300 * time.Millisecond
 	fixture.service.resumeHeartbeatInterval = 40 * time.Millisecond
 	_, delegation, firstLease, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
@@ -240,7 +240,7 @@ func TestResumeLeaseHeartbeatAndFencingRejectOldOwner(t *testing.T) {
 }
 
 func TestResumeLeaseHeartbeatStopIsBoundedWhenDatabaseStalls(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 	fixture.service.resumeHeartbeatInterval = 5 * time.Millisecond
 	fixture.service.resumePersistenceTimeout = 30 * time.Millisecond
 	_, _, lease, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
@@ -279,10 +279,10 @@ func TestResumeLeaseHeartbeatStopIsBoundedWhenDatabaseStalls(t *testing.T) {
 }
 
 func TestHandleRunResumeSkipsSuccessfulCheckpoint(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"postprocess","type":"tool"},{"key":"finalize","type":"tool"}],"edges":[{"from":"delegate_parent","to":"postprocess"},{"from":"postprocess","to":"finalize"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"postprocess","type":"noop"},{"key":"finalize","type":"noop"}],"edges":[{"from":"delegate_parent","to":"postprocess"},{"from":"postprocess","to":"finalize"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "postprocess")
 	if err := fixture.database.Create(&models.RunStep{
-		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "tool",
+		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "noop",
 		Attempt: 1, Status: models.RunStepStatusSuccess, InputJSON: "{}", OutputJSON: `{"stage":"postprocessed"}`,
 	}).Error; err != nil {
 		t.Fatalf("create successful checkpoint failed: %v", err)
@@ -318,7 +318,7 @@ func TestHandleRunResumeSkipsSuccessfulCheckpoint(t *testing.T) {
 }
 
 func TestHandleRunResumeKeepsPersistedExternalWaitWithoutReinvokingAgent(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"delegate_reviewer","type":"agent","config":{"target_agent":"reviewer","capability":"review"}}],"edges":[{"from":"delegate_parent","to":"delegate_reviewer"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"delegate_reviewer","type":"agent","config":{"target_agent":"reviewer","capability":"review"}}],"edges":[{"from":"delegate_parent","to":"delegate_reviewer"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "delegate_reviewer")
 	if err := fixture.database.Model(&models.Run{}).Where("id = ?", fixture.run.ID).Update("current_step", "delegate_reviewer").Error; err != nil {
 		t.Fatalf("persist external wait cursor failed: %v", err)
@@ -376,7 +376,7 @@ func (i *countingResumeAgentInvoker) Invoke(context.Context, AgentInvocationRequ
 }
 
 func TestRecoverPendingResumesRepublishesExpiredClaimOnce(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 	_, _, _, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil || !claimed {
 		t.Fatalf("prepare expired recovery claim failed: claimed=%v err=%v", claimed, err)
@@ -418,7 +418,7 @@ func TestRecoverPendingResumesRepublishesExpiredClaimOnce(t *testing.T) {
 }
 
 func TestHandleRunResumeRecoversCrashAfterClaimBeforeExecution(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"finalize","type":"tool"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"finalize","type":"noop"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "finalize")
 	_, _, _, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil || !claimed {
@@ -479,7 +479,7 @@ func TestHandleRunResumeRecoversCrashAfterClaimBeforeExecution(t *testing.T) {
 }
 
 func TestHandleRunResumeClosesAbandonedStepAndUsesNextAttempt(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"postprocess","type":"tool"}],"edges":[{"from":"delegate_parent","to":"postprocess"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"postprocess","type":"noop"}],"edges":[{"from":"delegate_parent","to":"postprocess"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "postprocess")
 	_, _, _, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil || !claimed {
@@ -487,7 +487,7 @@ func TestHandleRunResumeClosesAbandonedStepAndUsesNextAttempt(t *testing.T) {
 	}
 	startedAt := time.Now().Add(-time.Second)
 	if err := fixture.database.Create(&models.RunStep{
-		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "tool",
+		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "noop",
 		Attempt: 1, Status: models.RunStepStatusRunning, InputJSON: "{}", OutputJSON: "{}", StartedAt: &startedAt,
 	}).Error; err != nil {
 		t.Fatalf("create abandoned running step failed: %v", err)
@@ -520,7 +520,7 @@ func TestHandleRunResumeClosesAbandonedStepAndUsesNextAttempt(t *testing.T) {
 }
 
 func TestHandleRunResumeFailsWhenPersistedWorkflowIsMissing(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"finalize","type":"tool"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"finalize","type":"noop"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "finalize")
 	if err := fixture.database.Delete(&models.Workflow{}, fixture.workflow.ID).Error; err != nil {
 		t.Fatalf("delete persisted workflow failed: %v", err)
@@ -546,7 +546,7 @@ func TestHandleRunResumeFailsWhenPersistedWorkflowIsMissing(t *testing.T) {
 }
 
 func TestHandleRunResumeTreatsNodeDeadlineAsTerminalFailure(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"finalize","type":"tool"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"finalize","type":"noop"}],"edges":[{"from":"delegate_parent","to":"finalize"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "finalize")
 	fixture.service.executeNode = func(context.Context, *models.Run, WorkflowNode, int) (string, error) {
 		return "", context.DeadlineExceeded
@@ -574,7 +574,7 @@ func TestHandleRunResumeTreatsNodeDeadlineAsTerminalFailure(t *testing.T) {
 }
 
 func TestRecoverPendingResumesCompletesTerminalRunClaim(t *testing.T) {
-	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"}],"edges":[]}`, "")
+	fixture := setupResumeLeaseFixture(t, `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"}],"edges":[]}`, "")
 	_, _, _, claimed, err := fixture.service.claimRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID)
 	if err != nil || !claimed {
 		t.Fatalf("claim terminal fixture failed: claimed=%v err=%v", claimed, err)
@@ -605,10 +605,10 @@ func TestRecoverPendingResumesCompletesTerminalRunClaim(t *testing.T) {
 }
 
 func TestHandleRunResumeFailsOnContradictoryCheckpoint(t *testing.T) {
-	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"tool"},{"key":"postprocess","type":"tool"}],"edges":[{"from":"delegate_parent","to":"postprocess"}]}`
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"postprocess","type":"noop"}],"edges":[{"from":"delegate_parent","to":"postprocess"}]}`
 	fixture := setupResumeLeaseFixture(t, definition, "postprocess")
 	if err := fixture.database.Create(&models.RunStep{
-		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "tool",
+		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "postprocess", StepType: "noop",
 		Attempt: 1, Status: models.RunStepStatusFailed, InputJSON: "{}", OutputJSON: "{}", ErrorMessage: "business failure",
 	}).Error; err != nil {
 		t.Fatalf("create contradictory checkpoint failed: %v", err)

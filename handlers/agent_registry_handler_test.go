@@ -147,7 +147,7 @@ func TestAgentRegistryAPICompleteLifecycle(t *testing.T) {
 		t.Fatalf("load writer agent: %v", err)
 	}
 	workflow := models.Workflow{
-		AgentID: writer.ID, Version: 1, DefinitionJSON: `{"nodes":[],"edges":[]}`,
+		AgentID: writer.ID, Version: 1, DefinitionJSON: `{"entry_node":"noop","nodes":[{"key":"noop","type":"noop"}],"edges":[]}`,
 		Checksum: "writer-v1", IsActive: true, CreatedBy: uint64(fixture.owner.ID),
 	}
 	if err := fixture.database.Create(&workflow).Error; err != nil {

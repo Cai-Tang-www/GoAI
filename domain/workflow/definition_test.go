@@ -70,7 +70,7 @@ func TestResolveExecutionOrderSupportsAgentNode(t *testing.T) {
 		"nodes":[
 			{"key":"planner","type":"planner"},
 			{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write","input_from":["planner"]}},
-			{"key":"finish","type":"tool"}
+			{"key":"finish","type":"noop"}
 		],
 		"edges":[{"from":"planner","to":"delegate"},{"from":"delegate","to":"finish"}]
 	}`)
