@@ -22,6 +22,7 @@ type Dependencies struct {
 	RunService       *services.RunService
 	ChatService      *services.ChatService
 	AgentRegistry    *services.AgentRegistryService
+	MCPRegistry      *services.MCPRegistryService
 	Runtime          services.Runtime
 	A2AGateway       http.Handler
 	Observability    *observability.Bundle
@@ -44,6 +45,9 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	if deps.AgentRegistry == nil {
 		return nil, fmt.Errorf("creating router: agent registry service is nil")
 	}
+	if deps.MCPRegistry == nil {
+		return nil, fmt.Errorf("creating router: MCP registry service is nil")
+	}
 	if deps.Runtime == nil {
 		return nil, fmt.Errorf("creating router: runtime is nil")
 	}
@@ -58,6 +62,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	runHandler := handlers.NewRunHandler(deps.RunService)
 	chatHandler := handlers.NewChatHandler(deps.ChatService)
 	agentRegistryHandler := handlers.NewAgentRegistryHandler(deps.AgentRegistry)
+	mcpRegistryHandler := handlers.NewMCPRegistryHandler(deps.MCPRegistry)
 	aguiHandler, err := handlers.NewAGUIHandler(deps.Runtime)
 	if err != nil {
 		return nil, fmt.Errorf("creating AG-UI handler: %w", err)
@@ -132,6 +137,14 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.PUT("/agents/:agent_code/endpoints/:endpoint_code", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateEndpoint)
 		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/deactivate", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.DeactivateEndpoint)
 		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/health-check", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CheckEndpointHealth)
+
+		apiGroup.POST("/mcp/servers", middlewares.RequirePermission(models.PermissionMCPCreate), mcpRegistryHandler.CreateServer)
+		apiGroup.GET("/mcp/servers", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.ListServers)
+		apiGroup.GET("/mcp/servers/:server_code", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.GetServer)
+		apiGroup.PUT("/mcp/servers/:server_code", middlewares.RequirePermission(models.PermissionMCPUpdate), mcpRegistryHandler.UpdateServer)
+		apiGroup.POST("/mcp/servers/:server_code/deactivate", middlewares.RequirePermission(models.PermissionMCPUpdate), mcpRegistryHandler.DeactivateServer)
+		apiGroup.POST("/mcp/servers/:server_code/health-check", middlewares.RequirePermission(models.PermissionMCPUpdate), mcpRegistryHandler.CheckServerHealth)
+		apiGroup.GET("/mcp/servers/:server_code/tools", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.ListTools)
 
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"GoAI/config"
+	"GoAI/mcpclient"
 	"GoAI/models"
 	"GoAI/routers"
 	"GoAI/services"
@@ -25,6 +26,17 @@ type apiEnvelope struct {
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 	TraceID string          `json:"trace_id"`
+}
+
+type testMCPProtocolClient struct {
+	discover func(context.Context, mcpclient.ServerConfig) ([]mcpclient.Tool, error)
+}
+
+func (c testMCPProtocolClient) Discover(ctx context.Context, config mcpclient.ServerConfig) ([]mcpclient.Tool, error) {
+	if c.discover != nil {
+		return c.discover(ctx, config)
+	}
+	return []mcpclient.Tool{{Name: "echo", InputSchemaJSON: `{"type":"object"}`}}, nil
 }
 
 // decodeEnvelope 解析统一响应 envelope，并校验 trace_id 已返回。
@@ -71,6 +83,10 @@ func newTestRouter(t *testing.T, database *gorm.DB, publisher services.RunEventP
 }
 
 func newTestRouterWithRegistryChecker(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher, checker services.AgentCardHealthChecker) *gin.Engine {
+	return newTestRouterWithRegistryAndMCPClient(t, database, publisher, checker, testMCPProtocolClient{})
+}
+
+func newTestRouterWithRegistryAndMCPClient(t *testing.T, database *gorm.DB, publisher services.RunEventPublisher, checker services.AgentCardHealthChecker, mcpProtocol services.MCPProtocolClient) *gin.Engine {
 	t.Helper()
 	if database == nil {
 		database = openSQLiteTestDB(t)
@@ -83,6 +99,8 @@ func newTestRouterWithRegistryChecker(t *testing.T, database *gorm.DB, publisher
 			&models.Agent{},
 			&models.AgentCapability{},
 			&models.AgentEndpoint{},
+			&models.MCPServer{},
+			&models.MCPTool{},
 			&models.Workflow{},
 			&models.Thread{},
 			&models.Message{},
@@ -120,11 +138,19 @@ func newTestRouterWithRegistryChecker(t *testing.T, database *gorm.DB, publisher
 	if err != nil {
 		t.Fatalf("create agent registry service failed: %v", err)
 	}
+	if mcpProtocol == nil {
+		mcpProtocol = testMCPProtocolClient{}
+	}
+	mcpRegistry, err := services.NewMCPRegistryService(database, mcpProtocol)
+	if err != nil {
+		t.Fatalf("create MCP registry service failed: %v", err)
+	}
 	router, err := routers.New(routers.Dependencies{
 		Database:      database,
 		RunService:    runService,
 		ChatService:   chatService,
 		AgentRegistry: agentRegistry,
+		MCPRegistry:   mcpRegistry,
 		Runtime:       runtimeService,
 		A2AGateway:    http.NotFoundHandler(),
 	})

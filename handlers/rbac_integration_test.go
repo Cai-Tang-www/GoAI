@@ -26,6 +26,8 @@ func setupRBACIntegrationDB(t *testing.T) *gorm.DB {
 		&models.UserRole{},
 		&models.RolePermission{},
 		&models.Agent{},
+		&models.MCPServer{},
+		&models.MCPTool{},
 		&models.Workflow{},
 		&models.Thread{},
 		&models.Message{},

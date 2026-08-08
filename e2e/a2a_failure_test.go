@@ -28,7 +28,7 @@ type a2aTargetFixture struct {
 
 func TestA2AHTTPFailureMatrix(t *testing.T) {
 	t.Run("target agent does not exist", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		server := httptest.NewServer(fixture.gateway)
 		t.Cleanup(server.Close)
 
@@ -43,7 +43,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 	})
 
 	t.Run("target capability is not supported", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		server := httptest.NewServer(fixture.gateway)
 		t.Cleanup(server.Close)
 		seedProtocolEndpoint(t, fixture.database, fixture.agent, server.URL+"/a2a/agents/writer", models.AgentEndpointTransportHTTP)
@@ -61,7 +61,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 	})
 
 	t.Run("child run fails output contract", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		if err := fixture.database.Model(&models.AgentCapability{}).
 			Where("agent_id = ? AND capability_code = ?", fixture.agent.ID, "write").
 			Update("output_schema_json", `{"type":"object","required":["approved"],"properties":{"approved":{"type":"boolean"}}}`).Error; err != nil {
@@ -103,7 +103,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 	})
 
 	t.Run("child run fails malformed output contract", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		if err := fixture.database.Model(&models.AgentCapability{}).
 			Where("agent_id = ? AND capability_code = ?", fixture.agent.ID, "write").
 			Update("output_schema_json", `{"type":"object","required":"approved"}`).Error; err != nil {
@@ -144,7 +144,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 		}
 	})
 	t.Run("A2A HTTP request times out", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		delayed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/message:send") {
 				select {
@@ -174,7 +174,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 	})
 
 	t.Run("duplicate A2A request reuses child run", func(t *testing.T) {
-		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+		fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 		server := httptest.NewServer(fixture.gateway)
 		t.Cleanup(server.Close)
 		seedProtocolEndpoint(t, fixture.database, fixture.agent, server.URL+"/a2a/agents/writer", models.AgentEndpointTransportHTTP)
@@ -201,7 +201,7 @@ func TestA2AHTTPFailureMatrix(t *testing.T) {
 }
 
 func TestA2AHTTPSGatewayPublishesContractsAndUsesSameProtocolSemantics(t *testing.T) {
-	fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"tool"}],"edges":[]}`)
+	fixture := newA2ATargetFixture(t, `{"entry_node":"write","nodes":[{"key":"write","type":"noop"}],"edges":[]}`)
 	inputSchema := `{"type":"object","required":["prompt"],"properties":{"prompt":{"type":"string"}},"additionalProperties":false}`
 	outputSchema := `{"type":"object","required":["result"],"properties":{"result":{"type":"string"}}}`
 	if err := fixture.database.Model(&models.AgentCapability{}).
@@ -243,7 +243,7 @@ func newA2ATargetFixture(t *testing.T, definition string) *a2aTargetFixture {
 	t.Helper()
 	database := openE2EDB(t, "target")
 	migrateE2ADB(t, database)
-	seedAgent(t, database, "planner", "Planner Agent", 11, `{"entry_node":"plan","nodes":[{"key":"plan","type":"tool"}],"edges":[]}`)
+	seedAgent(t, database, "planner", "Planner Agent", 11, `{"entry_node":"plan","nodes":[{"key":"plan","type":"noop"}],"edges":[]}`)
 	target, workflow := seedAgent(t, database, "writer", "Writer Agent", 22, definition)
 	seedCapability(t, database, target, "write", workflow)
 

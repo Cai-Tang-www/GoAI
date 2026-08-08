@@ -57,6 +57,14 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 本地只允许 loopback HTTP，远程强制 HTTPS；管理 API 不提供 Service 直调或 Kafka 通信旁路
 - member 拥有自己的 Agent 管理权限，`agent:manage` 仅作为管理员跨 owner bypass
 
+### MCP Tool Runtime（Issue #51，已实现）
+- 使用官方 `github.com/modelcontextprotocol/go-sdk` 的 Streamable HTTP Client 完成 initialize、`tools/list` 和 `tools/call`
+- `mcp_servers` / `mcp_tools` 提供 owner-scoped Registry、健康状态、配置版本 fencing 和 discovery snapshot
+- member 只能管理自己的 MCP Server，admin 通过 `mcp:manage` 跨 owner 管理；真实凭据只保存 `credential_ref`
+- Workflow 显式 `tool` 节点通过 `ToolInvoker` 调用 MCP，不把 MCP 变成 A2A 的替代品；Agent 间通信仍固定走 A2A HTTP(S)
+- Tool 调用纳入 Eino Graph、RunStep、超时、重试、Replay checkpoint 和重复 Kafka 消费去重
+- 管理 API 使用统一 envelope，MCP 下游错误和敏感信息不会进入响应、数据库错误摘要或日志
+
 ### 7. 多 Agent 协作运行时（Issue #37 + Issue #43 + Issue #45，可靠异步闭环已落地）
 已落地：
 - Workflow `agent` 节点通过 `AgentInvoker` 发起出站 A2A 调用，不允许进程内 Agent Service 直调
@@ -79,6 +87,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 已使用 Eino Graph 执行单个 Agent 内部的串行/可达 Workflow 节点
 - `agent` 节点必须经由 A2A Client 与目标 Agent Gateway 通信，不允许进程内 Service 直调
 - `agent_group` 是显式的并行能力边界；Parent Workflow 仍串行，后续再扩展任意并行 DAG、条件分支、流式节点和节点级恢复
+- `tool` 节点通过 MCP `ToolInvoker` 执行 Agent -> Tool 调用；MCP 不替代 Agent -> Agent 的 A2A 通信
 
 ### 9. Replay / Loop / Trace
 - Thread Replay

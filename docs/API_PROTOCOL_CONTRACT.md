@@ -14,6 +14,7 @@
 - `/api/*` 需要 `Authorization: Bearer <jwt>`。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
 - Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
+- MCP Server 管理接口使用 `mcp:create`、`mcp:read`、`mcp:update`；`mcp:manage` 允许管理员跨 owner 管理，Tool Runtime 的调用权限为 `mcp:invoke`。
 - A2A Agent Card discovery 公开；`message:send`、Task 查询、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
@@ -37,6 +38,7 @@
 | `POST` | `/api/agents/:agent_code/deactivate` | JWT + `agent:activate` | deactivate Agent |
 | `POST/GET/PUT` | `/api/agents/:agent_code/capabilities[...]` | JWT + `agent:update` / `agent:read` | manage Capability assets |
 | `POST/GET/PUT` | `/api/agents/:agent_code/endpoints[...]` | JWT + `agent:update` / `agent:read` | manage and health-check A2A Endpoints |
+| `POST/GET/PUT` | `/api/mcp/servers[...]` | JWT + `mcp:create` / `mcp:read` / `mcp:update` | manage MCP Servers and discovery snapshots |
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
 | `GET` | `/api/runs/:run_id/steps` | JWT + `run:read` | JSON envelope |

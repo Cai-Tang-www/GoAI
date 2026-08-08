@@ -79,6 +79,17 @@ Content-Type: application/json
 | `ENDPOINT_ALREADY_EXISTS` | 409 | Endpoint code already exists for the Agent |
 | `ENDPOINT_HEALTH_CHECK_FAILED` | 502 | A2A Agent Card discovery or identity validation failed |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | The same idempotency key was reused for another request |
+| `MCP_SERVER_NOT_FOUND` | 404 | MCP Server does not exist or is outside the owner scope |
+| `MCP_SERVER_ALREADY_EXISTS` | 409 | MCP Server code already exists for the owner |
+| `MCP_SERVER_INVALID_STATE` | 409 | MCP configuration or active Workflow reference is in conflict |
+| `MCP_SERVER_UNHEALTHY` | 502 | MCP initialize or tools/list health check failed |
+| `MCP_TOOL_NOT_FOUND` | 404 | Tool is absent from the discovery snapshot |
+| `MCP_TOOL_INVOCATION_FAILED` | 502 | MCP tools/call failed |
+| `MCP_INVALID_CONFIG` | 400 | MCP configuration or Tool input is invalid |
+| `MCP_CREDENTIAL_NOT_FOUND` | 503 | Credential reference cannot be resolved |
+| `MCP_TRANSPORT_FAILED` | 502 | MCP Streamable HTTP transport failed |
+| `MCP_PROTOCOL_FAILED` | 502 | MCP protocol response is invalid or unsupported |
+| `MCP_TOOL_REPORTED_ERROR` | 502 | Tool returned `isError` |
 | `PROVIDER_NOT_FOUND` | 404 | Requested provider is not registered |
 | `PROVIDER_DRIVER_NOT_FOUND` | 500 | Provider has no usable driver |
 | `PROVIDER_INVALID_CONFIG` | 500 | Provider configuration is invalid |

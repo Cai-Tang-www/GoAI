@@ -7,11 +7,18 @@ import (
 	"testing"
 
 	"GoAI/config"
+	"GoAI/mcpclient"
 	"GoAI/services"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type routerMCPClient struct{}
+
+func (routerMCPClient) Discover(context.Context, mcpclient.ServerConfig) ([]mcpclient.Tool, error) {
+	return []mcpclient.Tool{{Name: "echo", InputSchemaJSON: `{}`}}, nil
+}
 
 func TestNewRejectsMissingDependencies(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open("file:router_dependencies?mode=memory&cache=shared"), &gorm.Config{})
@@ -34,9 +41,13 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent registry service failed: %v", err)
 	}
+	mcpRegistry, err := services.NewMCPRegistryService(gdb, routerMCPClient{})
+	if err != nil {
+		t.Fatalf("create MCP registry service failed: %v", err)
+	}
 	valid := Dependencies{
 		Database: gdb, RunService: runService, ChatService: chatService,
-		AgentRegistry: agentRegistry, Runtime: runtimeService, A2AGateway: http.NotFoundHandler(),
+		AgentRegistry: agentRegistry, MCPRegistry: mcpRegistry, Runtime: runtimeService, A2AGateway: http.NotFoundHandler(),
 	}
 	tests := []struct {
 		name   string
@@ -47,6 +58,7 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 		{name: "run service", want: "run service is nil", mutate: func(deps *Dependencies) { deps.RunService = nil }},
 		{name: "chat service", want: "chat service is nil", mutate: func(deps *Dependencies) { deps.ChatService = nil }},
 		{name: "agent registry", want: "agent registry service is nil", mutate: func(deps *Dependencies) { deps.AgentRegistry = nil }},
+		{name: "MCP registry", want: "MCP registry service is nil", mutate: func(deps *Dependencies) { deps.MCPRegistry = nil }},
 		{name: "runtime", want: "runtime is nil", mutate: func(deps *Dependencies) { deps.Runtime = nil }},
 		{name: "A2A gateway", want: "A2A gateway is nil", mutate: func(deps *Dependencies) { deps.A2AGateway = nil }},
 	}
@@ -83,11 +95,16 @@ func TestNewBuildsRouterFromExplicitDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent registry service failed: %v", err)
 	}
+	mcpRegistry, err := services.NewMCPRegistryService(gdb, routerMCPClient{})
+	if err != nil {
+		t.Fatalf("create MCP registry service failed: %v", err)
+	}
 	router, err := New(Dependencies{
 		Database:      gdb,
 		RunService:    service,
 		ChatService:   chatService,
 		AgentRegistry: agentRegistry,
+		MCPRegistry:   mcpRegistry,
 		Runtime:       runtimeService,
 		A2AGateway:    http.NotFoundHandler(),
 	})

@@ -1,12 +1,14 @@
 package middlewares
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 
 	"GoAI/ai"
 	"GoAI/governance"
+	"GoAI/mcpclient"
 	"GoAI/requestctx"
 	"GoAI/services"
 
@@ -39,6 +41,17 @@ const (
 	CodeEndpointAlreadyExists     = "ENDPOINT_ALREADY_EXISTS"
 	CodeEndpointHealthCheckFailed = "ENDPOINT_HEALTH_CHECK_FAILED"
 	CodeWorkflowNotFound          = "WORKFLOW_NOT_FOUND"
+	CodeMCPServerNotFound         = "MCP_SERVER_NOT_FOUND"
+	CodeMCPServerAlreadyExists    = "MCP_SERVER_ALREADY_EXISTS"
+	CodeMCPServerInvalidState     = "MCP_SERVER_INVALID_STATE"
+	CodeMCPServerUnhealthy        = "MCP_SERVER_UNHEALTHY"
+	CodeMCPToolNotFound           = "MCP_TOOL_NOT_FOUND"
+	CodeMCPToolInvocationFailed   = "MCP_TOOL_INVOCATION_FAILED"
+	CodeMCPInvalidConfig          = "MCP_INVALID_CONFIG"
+	CodeMCPCredentialNotFound     = "MCP_CREDENTIAL_NOT_FOUND"
+	CodeMCPTransportFailed        = "MCP_TRANSPORT_FAILED"
+	CodeMCPProtocolFailed         = "MCP_PROTOCOL_FAILED"
+	CodeMCPToolReportedError      = "MCP_TOOL_REPORTED_ERROR"
 	CodeProviderNotFound          = "PROVIDER_NOT_FOUND"
 	CodeProviderDriverNotFound    = "PROVIDER_DRIVER_NOT_FOUND"
 	CodeProviderInvalidConfig     = "PROVIDER_INVALID_CONFIG"
@@ -247,6 +260,61 @@ func WorkflowNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeWorkflowNotFound, Message: "workflow not found"}
 }
 
+// MCPServerNotFoundError 构造 MCP Server 不存在错误。
+func MCPServerNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeMCPServerNotFound, Message: "MCP server not found"}
+}
+
+// MCPServerAlreadyExistsError 构造 MCP Server 唯一键冲突错误。
+func MCPServerAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeMCPServerAlreadyExists, Message: "MCP server already exists"}
+}
+
+// MCPServerInvalidStateError 构造 MCP Server 状态冲突错误。
+func MCPServerInvalidStateError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeMCPServerInvalidState, Message: "MCP server state is invalid"}
+}
+
+// MCPServerUnhealthyError 构造 MCP Server 健康检查失败错误。
+func MCPServerUnhealthyError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeMCPServerUnhealthy, Message: "MCP server health check failed", Err: services.ErrMCPServerUnhealthy()}
+}
+
+// MCPToolNotFoundError 构造发现快照中 Tool 不存在错误。
+func MCPToolNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeMCPToolNotFound, Message: "MCP tool not found"}
+}
+
+// MCPToolInvocationFailedError 构造 MCP Tool 调用失败错误。
+func MCPToolInvocationFailedError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeMCPToolInvocationFailed, Message: "MCP tool invocation failed", Err: services.ErrMCPToolInvocationFailed()}
+}
+
+// MCPInvalidConfigError 构造 MCP 配置或 Tool 输入校验错误。
+func MCPInvalidConfigError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeMCPInvalidConfig, Message: "MCP configuration is invalid", Err: mcpclient.ErrInvalidConfig}
+}
+
+// MCPCredentialNotFoundError 构造 MCP 凭据引用无法解析错误。
+func MCPCredentialNotFoundError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusServiceUnavailable, Code: CodeMCPCredentialNotFound, Message: "MCP credential is unavailable", Err: mcpclient.ErrCredentialNotFound}
+}
+
+// MCPTransportFailedError 构造 MCP 传输失败错误。
+func MCPTransportFailedError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeMCPTransportFailed, Message: "MCP transport failed", Err: mcpclient.ErrTransportFailed}
+}
+
+// MCPProtocolFailedError 构造 MCP 协议操作失败错误。
+func MCPProtocolFailedError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeMCPProtocolFailed, Message: "MCP protocol operation failed", Err: mcpclient.ErrProtocolFailed}
+}
+
+// MCPToolReportedError 构造 MCP Tool 主动返回 isError 的错误。
+func MCPToolReportedError(_ error) *AppError {
+	return &AppError{HTTPStatus: http.StatusBadGateway, Code: CodeMCPToolReportedError, Message: "MCP tool reported an error", Err: mcpclient.ErrToolReportedError}
+}
+
 // IdempotencyKeyReusedError 构造幂等键冲突错误。
 func IdempotencyKeyReusedError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeIdempotencyKeyReused, Message: "idempotency key reused with different request"}
@@ -335,6 +403,34 @@ func WrapError(err error) *AppError {
 		return EndpointHealthCheckFailedError(err)
 	case errors.Is(err, services.ErrWorkflowNotFound()):
 		return WorkflowNotFoundError()
+	case errors.Is(err, context.DeadlineExceeded):
+		return DownstreamTimeoutError(err)
+	case errors.Is(err, services.ErrMCPServerNotFound()):
+		return MCPServerNotFoundError()
+	case errors.Is(err, services.ErrMCPServerAlreadyExists()):
+		return MCPServerAlreadyExistsError()
+	case errors.Is(err, services.ErrMCPServerInvalidState()):
+		return MCPServerInvalidStateError()
+	case errors.Is(err, services.ErrMCPForbidden()):
+		return ForbiddenError()
+	case errors.Is(err, services.ErrMCPToolNotFound()):
+		return MCPToolNotFoundError()
+	case errors.Is(err, services.ErrMCPRegistryValidation()):
+		return MCPInvalidConfigError(err)
+	case errors.Is(err, mcpclient.ErrCredentialNotFound):
+		return MCPCredentialNotFoundError(err)
+	case errors.Is(err, mcpclient.ErrInvalidConfig):
+		return MCPInvalidConfigError(err)
+	case errors.Is(err, mcpclient.ErrToolReportedError):
+		return MCPToolReportedError(err)
+	case errors.Is(err, mcpclient.ErrTransportFailed):
+		return MCPTransportFailedError(err)
+	case errors.Is(err, mcpclient.ErrProtocolFailed):
+		return MCPProtocolFailedError(err)
+	case errors.Is(err, services.ErrMCPServerUnhealthy()):
+		return MCPServerUnhealthyError(err)
+	case errors.Is(err, services.ErrMCPToolInvocationFailed()):
+		return MCPToolInvocationFailedError(err)
 	case errors.Is(err, ai.ErrProviderNotFound):
 		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeProviderNotFound, Message: "provider not found", Err: err}
 	case errors.Is(err, ai.ErrDriverNotFound):

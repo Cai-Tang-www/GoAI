@@ -113,6 +113,9 @@ func (s *AgentRegistryService) validatePublishState(ctx context.Context, databas
 	if executableCapabilities == 0 {
 		return fmt.Errorf("%w: agent requires at least one active workflow-backed capability", errAgentPublishValidation)
 	}
+	if err := validatePublishedAgentMCPReferences(ctx, database, agent, capabilities); err != nil {
+		return fmt.Errorf("%w: %v", errAgentPublishValidation, err)
+	}
 
 	var endpoints []models.AgentEndpoint
 	if err := database.WithContext(ctx).

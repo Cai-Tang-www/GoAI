@@ -7,7 +7,7 @@ func TestResolveExecutionOrder(t *testing.T) {
 		"entry_node":"a",
 		"nodes":[
 			{"key":"a","type":"planner"},
-			{"key":"b","type":"tool"},
+			{"key":"b","type":"noop"},
 			{"key":"c","type":"llm"}
 		],
 		"edges":[

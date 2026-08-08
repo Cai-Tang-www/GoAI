@@ -118,6 +118,7 @@ type RunService struct {
 	database                 *gorm.DB
 	publisher                RunEventPublisher
 	agentInvoker             AgentInvoker
+	toolInvoker              ToolInvoker
 	graphExecutor            *einoexecutor.Executor
 	chatService              *ChatService
 	loopService              *LoopService
@@ -1280,6 +1281,12 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 			return "", err
 		}
 		explicitInputs = len(config.InputFrom) > 0
+	case "tool":
+		config, err := ParseToolNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		explicitInputs = len(config.InputFrom) > 0
 	}
 	if explicitInputs {
 		var err error
@@ -1814,6 +1821,12 @@ func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node
 			return "", err
 		}
 		inputFrom = config.InputFrom
+	case "tool":
+		config, err := ParseToolNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		inputFrom = config.InputFrom
 	default:
 		return run.InputJSON, nil
 	}
@@ -1998,7 +2011,56 @@ func executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode
 }
 
 func (s *RunService) executeDefaultNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(node.Type), "tool") {
+		return s.executeToolNode(ctx, run, node)
+	}
 	return executeWorkflowNodeWithChatService(ctx, run, node, attempt, s.chatService)
+}
+
+func (s *RunService) executeToolNode(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {
+	if s.toolInvoker == nil {
+		return "", errMCPToolInvokerUnavailable
+	}
+	config, err := ParseToolNodeConfig(node)
+	if err != nil {
+		return "", err
+	}
+	var agent models.Agent
+	if err := s.database.WithContext(ctx).Select("owner_user_id").First(&agent, run.AgentID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errAgentNotFound
+		}
+		return "", fmt.Errorf("loading tool node Agent owner: %w", err)
+	}
+	arguments := config.Input
+	if arguments == nil {
+		if err := json.Unmarshal([]byte(run.InputJSON), &arguments); err != nil {
+			return "", fmt.Errorf("decoding tool node input for %s: %w", node.Key, err)
+		}
+		if arguments == nil {
+			arguments = map[string]any{}
+		}
+	}
+	timeout := 120 * time.Second
+	if config.TimeoutMS > 0 {
+		timeout = time.Duration(config.TimeoutMS) * time.Millisecond
+	}
+	invokeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := s.toolInvoker.Invoke(invokeCtx, ToolInvocationRequest{
+		OwnerUserID: agent.OwnerUserID, ServerCode: config.ServerCode,
+		ToolName: config.ToolName, Arguments: arguments,
+	})
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"type": "tool", "server_code": config.ServerCode, "tool_name": config.ToolName, "result": result,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encoding MCP tool result: %w", err)
+	}
+	return string(encoded), nil
 }
 
 func executeWorkflowNodeWithChatService(ctx context.Context, run *models.Run, node WorkflowNode, attempt int, chatService *ChatService) (string, error) {
@@ -2019,7 +2081,7 @@ func executeWorkflowNodeWithChatService(ctx context.Context, run *models.Run, no
 	switch nodeType {
 	case "llm":
 		return executeLLMNode(ctx, run, chatService)
-	case "tool", "noop", "planner":
+	case "noop", "planner":
 		resp := map[string]any{
 			"step_key": node.Key,
 			"type":     nodeType,

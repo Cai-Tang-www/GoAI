@@ -46,6 +46,8 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		"delegation_groups",
 		"agent_endpoints",
 		"agent_capabilities",
+		"mcp_servers",
+		"mcp_tools",
 		"loop_records",
 		"loop_evaluations",
 	} {
@@ -68,6 +70,8 @@ func TestMigrateCreatesUnifiedDomainModels(t *testing.T) {
 		{&models.DelegationGroup{}, "uidx_delegation_group_coordinator"},
 		{&models.AgentEndpoint{}, "idx_agent_endpoint_unique"},
 		{&models.AgentCapability{}, "idx_agent_capability_unique"},
+		{&models.MCPServer{}, "idx_mcp_server_owner_code"},
+		{&models.MCPTool{}, "idx_mcp_tool_server_name"},
 		{&models.LoopRecord{}, "idx_loop_records_loop_id"},
 		{&models.LoopEvaluation{}, "idx_loop_evaluation_unique"},
 	}
@@ -175,6 +179,26 @@ func TestUnifiedDomainModelUniqueConstraints(t *testing.T) {
 		)
 		if err := database.Create(&models.AgentCapability{AgentID: 2, CapabilityCode: "summarize", Name: "Summarize", CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "v1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
 			t.Fatalf("same capability code on another agent should be allowed: %v", err)
+		}
+	})
+
+	t.Run("mcp server owner and code", func(t *testing.T) {
+		assertDuplicateRejected(t,
+			&models.MCPServer{OwnerUserID: 1, ServerCode: "search", Name: "Search", Transport: models.MCPServerTransportStreamableHTTP, Endpoint: "https://mcp.example.com", AuthType: models.MCPServerAuthTypeNone, Status: models.MCPServerStatusInactive},
+			&models.MCPServer{OwnerUserID: 1, ServerCode: "search", Name: "Search v2", Transport: models.MCPServerTransportStreamableHTTP, Endpoint: "https://mcp.example.com/v2", AuthType: models.MCPServerAuthTypeNone, Status: models.MCPServerStatusInactive},
+		)
+		if err := database.Create(&models.MCPServer{OwnerUserID: 2, ServerCode: "search", Name: "Other Search", Transport: models.MCPServerTransportStreamableHTTP, Endpoint: "https://other.example.com", AuthType: models.MCPServerAuthTypeNone, Status: models.MCPServerStatusInactive}).Error; err != nil {
+			t.Fatalf("same server code under another owner must be allowed: %v", err)
+		}
+	})
+
+	t.Run("mcp tool server and name", func(t *testing.T) {
+		assertDuplicateRejected(t,
+			&models.MCPTool{ServerID: 1, ToolName: "search", InputSchemaJSON: "{}"},
+			&models.MCPTool{ServerID: 1, ToolName: "search", InputSchemaJSON: "{}"},
+		)
+		if err := database.Create(&models.MCPTool{ServerID: 2, ToolName: "search", InputSchemaJSON: "{}"}).Error; err != nil {
+			t.Fatalf("same tool name under another server must be allowed: %v", err)
 		}
 	})
 

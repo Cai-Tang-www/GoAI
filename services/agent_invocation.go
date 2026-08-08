@@ -84,6 +84,17 @@ func WithAgentInvoker(invoker AgentInvoker) RunServiceOption {
 	}
 }
 
+// WithToolInvoker 注入通过 MCP 协议执行 Workflow tool 节点的调用边界。
+func WithToolInvoker(invoker ToolInvoker) RunServiceOption {
+	return func(service *RunService) error {
+		if invoker == nil {
+			return errors.New("configuring run service: tool invoker is nil")
+		}
+		service.toolInvoker = invoker
+		return nil
+	}
+}
+
 // WithGraphExecutor 注入单个 Agent 的 Eino Graph 执行器。
 func WithGraphExecutor(executor *einoexecutor.Executor) RunServiceOption {
 	return func(service *RunService) error {
@@ -126,6 +137,9 @@ type retryableInvocationError interface {
 }
 
 func isRetryableInvocationError(err error) bool {
+	if isPermanentMCPInvocationError(err) {
+		return false
+	}
 	var retryable retryableInvocationError
 	return !errors.As(err, &retryable) || retryable.Retryable()
 }

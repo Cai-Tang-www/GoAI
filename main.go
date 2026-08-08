@@ -18,6 +18,7 @@ import (
 	"GoAI/db"
 	"GoAI/governance"
 	"GoAI/kafka"
+	"GoAI/mcpclient"
 	"GoAI/observability"
 	redisinfra "GoAI/redis"
 	"GoAI/routers"
@@ -140,6 +141,15 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
 	}
+	mcpProtocolClient := mcpclient.New(governedHTTPClient, credentialResolver)
+	mcpRegistry, err := services.NewMCPRegistryService(database, mcpProtocolClient)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
+	toolInvoker, err := services.NewMCPToolInvoker(database, mcpProtocolClient)
+	if err != nil {
+		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
+	}
 	callbackSender, err := a2aclient.NewCallbackSender(governedHTTPClient, credentialResolver, cfg.A2AAuthRequired)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
@@ -150,6 +160,7 @@ func run(ctx context.Context) error {
 	}
 	runService, err := services.NewRunService(database, producer,
 		services.WithAgentInvoker(agentInvoker),
+		services.WithToolInvoker(toolInvoker),
 		services.WithChatService(chatService),
 		services.WithLoopService(loopService),
 		services.WithRunObservability(telemetry),
@@ -198,6 +209,7 @@ func run(ctx context.Context) error {
 		A2AGateway:       a2aGateway,
 		ChatService:      chatService,
 		AgentRegistry:    agentRegistry,
+		MCPRegistry:      mcpRegistry,
 		Observability:    telemetry,
 		Governance:       governanceService,
 		GovernanceScopes: cfg.RateLimitScopes,

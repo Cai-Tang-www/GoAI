@@ -11,7 +11,7 @@ import (
 func TestHandleRunExecuteUsesEinoGraphForSerialNodeDataflow(t *testing.T) {
 	database, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, database)
-	workflow.DefinitionJSON = `{"entry_node":"first","nodes":[{"key":"first","type":"tool"},{"key":"second","type":"tool"}],"edges":[{"from":"first","to":"second"}]}`
+	workflow.DefinitionJSON = `{"entry_node":"first","nodes":[{"key":"first","type":"noop"},{"key":"second","type":"noop"}],"edges":[{"from":"first","to":"second"}]}`
 	if err := database.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestHandleRunExecuteUsesEinoGraphForSerialNodeDataflow(t *testing.T) {
 func TestHandleRunExecuteMarksRunFailedWhenEinoRejectsGraph(t *testing.T) {
 	database, service, _ := setupRunTestService(t)
 	agent, workflow := seedAgentWorkflow(t, database)
-	workflow.DefinitionJSON = `{"entry_node":"start","nodes":[{"key":"start","type":"tool"},{"key":"left","type":"tool"},{"key":"right","type":"tool"}],"edges":[{"from":"start","to":"left"},{"from":"start","to":"right"}]}`
+	workflow.DefinitionJSON = `{"entry_node":"start","nodes":[{"key":"start","type":"noop"},{"key":"left","type":"noop"},{"key":"right","type":"noop"}],"edges":[{"from":"start","to":"left"},{"from":"start","to":"right"}]}`
 	if err := database.Save(&workflow).Error; err != nil {
 		t.Fatalf("update workflow: %v", err)
 	}

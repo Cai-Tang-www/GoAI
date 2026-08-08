@@ -480,13 +480,14 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - callback、Result Message 与 resume 消息具备幂等收敛和持久化恢复能力，重复投递或进程重启不会重复执行后继节点
 - Agent Card 已发布 capability 版本及输入输出契约；V1 对 capability contract 使用稳定 JSON Schema 子集进行输入和终态输出校验
 - Agent Registry 管理 API 已覆盖 Agent、Capability、Endpoint 的 owner-scoped CRUD、Agent Card 健康检查、发布校验和启停；V1 仅发布可执行的 Workflow Capability，Endpoint `config_json` 拒绝敏感字段；管理员通过独立 `agent:manage` 权限跨 owner 管理，真实凭据不进入 API 响应
+- MCP Tool Runtime 已使用官方 MCP Go SDK 支持 Streamable HTTP 的 Server Registry、健康检查、Tool discovery snapshot 和 `tools/call`；Eino `tool` 节点只保存 `server_code + tool_name` 稳定引用，通过 `ToolInvoker` 将 JSON-safe Tool 结果纳入 RunStep、重试和 Replay。MCP 固定承担 Agent -> Tool，A2A 继续承担 Agent -> Agent
 
 ### 14.3 仍需扩展
 
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - 多 Runtime 部署下 callback/resume 恢复扫描的分片与共享协调
 - 任意并行 DAG、主动取消剩余远程 Child Task 与更复杂的跨节点补偿策略
-- MCP、AgentAsTool、多模态消息，以及完整前端管理控制台、批量运维和跨租户治理
+- AgentAsTool、多模态消息，以及完整前端管理控制台、批量运维和跨租户治理
 - 完整 Eval、成本分析和管理控制台
 
 ## 15. 交付标准

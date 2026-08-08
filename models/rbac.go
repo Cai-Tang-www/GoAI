@@ -20,6 +20,11 @@ const (
 	PermissionAgentUpdate    = "agent:update"
 	PermissionAgentActivate  = "agent:activate"
 	PermissionAgentManage    = "agent:manage"
+	PermissionMCPCreate      = "mcp:create"
+	PermissionMCPRead        = "mcp:read"
+	PermissionMCPUpdate      = "mcp:update"
+	PermissionMCPInvoke      = "mcp:invoke"
+	PermissionMCPManage      = "mcp:manage"
 )
 
 type Role struct {
