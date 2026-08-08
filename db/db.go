@@ -60,6 +60,13 @@ func Migrate(database *gorm.DB) error {
 	); err != nil {
 		return fmt.Errorf("auto migrating database: %w", err)
 	}
+	// Older revisions used a non-unique agent/version index. Drop it after
+	// AutoMigrate so existing databases receive the new unique constraint.
+	if database.Migrator().HasIndex(&models.Workflow{}, "idx_workflows_agent_version") {
+		if err := database.Migrator().DropIndex(&models.Workflow{}, "idx_workflows_agent_version"); err != nil {
+			return fmt.Errorf("dropping legacy workflow index: %w", err)
+		}
+	}
 	return nil
 }
 

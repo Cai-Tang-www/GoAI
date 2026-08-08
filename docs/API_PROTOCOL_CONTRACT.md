@@ -15,6 +15,7 @@
 - 启用 RBAC 时，`/auth/register` 与管理员 `POST /api/users` 创建的用户会自动获得 `member` 角色；用户创建和角色绑定在同一事务内完成。
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
 - Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
+- Workflow 管理接口复用 `agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
 - MCP Server 管理接口使用 `mcp:create`、`mcp:read`、`mcp:update`；`mcp:manage` 允许管理员跨 owner 管理，Tool Runtime 的调用权限为 `mcp:invoke`。
 - Loop / Trace 查询接口使用 `loop:read`；member 只能查询自己 Run 关联的数据，admin 可以跨 owner 查询。
 - A2A Agent Card discovery 公开；`message:send`、Task 查询/取消、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
@@ -40,6 +41,7 @@
 | `POST` | `/api/agents/:agent_code/deactivate` | JWT + `agent:activate` | deactivate Agent |
 | `POST/GET/PUT` | `/api/agents/:agent_code/capabilities[...]` | JWT + `agent:update` / `agent:read` | manage Capability assets |
 | `POST/GET/PUT` | `/api/agents/:agent_code/endpoints[...]` | JWT + `agent:update` / `agent:read` | manage and health-check A2A Endpoints |
+| `POST/GET/PUT` | `/api/agents/:agent_code/workflows[...]` | JWT + `agent:update` / `agent:read` / `agent:activate` | manage versioned Workflow definitions |
 | `POST/GET/PUT` | `/api/mcp/servers[...]` | JWT + `mcp:create` / `mcp:read` / `mcp:update` | manage MCP Servers and discovery snapshots |
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
@@ -284,6 +286,36 @@ Content-Type: application/json
 The API returns only credential_ref; the referenced secret is never stored in or returned by Registry records. Endpoint config_json is restricted to non-sensitive transport metadata; secret, password, token, private-key, authorization, and credential fields are rejected. Endpoint updates reset health to inactive. An active Agent cannot lose its last executable Workflow Capability or healthy Endpoint without first being deactivated.
 
 Member access is owner-scoped. A caller with the separate agent:manage permission can bypass ownership, but still needs the route-specific action permission.
+
+### Workflow definition and version management
+
+Workflow is an execution capability owned by one Agent. It is not the platform-wide communication mechanism; Agent-to-Agent communication remains A2A HTTP(S) through the A2A Gateway.
+
+```http
+POST /api/agents/writer/workflows HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "version": 1,
+  "definition": {
+    "entry_node": "start",
+    "nodes": [{"key": "start", "type": "noop"}],
+    "edges": []
+  }
+}
+```
+
+The management service calls the shared Workflow parser and validator, trims stable identifiers, canonicalizes JSON, and stores a SHA-256 `checksum`. New versions start inactive. An active version cannot be edited in place; publish a new version instead.
+
+The recommended rolling release sequence is:
+
+1. Create Workflow `v2`.
+2. Activate `v2` while `v1` remains active.
+3. Rebind the Agent's Workflow Capability to `workflow_id=v2` and `version="2"`.
+4. Deactivate `v1` after no active Capability references it.
+
+Workflow list/detail responses include active state, normalized definition, checksum, and Capability references. Member access is owner-scoped; administrators with `agent:manage` may inspect or mutate another owner's Agent while still requiring the route-specific permission. Workflow APIs never start a Run or call another Agent directly.
 
 ## 6. AG-UI Gateway
 

@@ -24,6 +24,8 @@ var (
 	errEndpointNotFound          = errors.New("agent endpoint not found")
 	errEndpointAlreadyExists     = errors.New("agent endpoint already exists")
 	errEndpointHealthCheckFailed = errors.New("agent endpoint health check failed")
+	errWorkflowAlreadyExists     = errors.New("agent workflow already exists")
+	errWorkflowInvalidState      = errors.New("agent workflow state is invalid")
 )
 
 // ErrAgentAlreadyExists 返回 AgentCode 已存在的统一 sentinel error。
@@ -52,6 +54,12 @@ func ErrEndpointAlreadyExists() error { return errEndpointAlreadyExists }
 
 // ErrEndpointHealthCheckFailed 返回 A2A Agent Card 健康检查失败的统一 sentinel error。
 func ErrEndpointHealthCheckFailed() error { return errEndpointHealthCheckFailed }
+
+// ErrWorkflowAlreadyExists 返回同一 Agent 下 Workflow 版本重复的统一 sentinel error。
+func ErrWorkflowAlreadyExists() error { return errWorkflowAlreadyExists }
+
+// ErrWorkflowInvalidState 返回 Workflow 不允许当前变更的统一 sentinel error。
+func ErrWorkflowInvalidState() error { return errWorkflowInvalidState }
 
 // RegistryActor 表示调用 Agent Registry 的认证主体及其 ownership bypass 权限。
 type RegistryActor struct {

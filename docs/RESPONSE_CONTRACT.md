@@ -79,6 +79,9 @@ Content-Type: application/json
 | `ENDPOINT_NOT_FOUND` | 404 | Agent endpoint does not exist |
 | `ENDPOINT_ALREADY_EXISTS` | 409 | Endpoint code already exists for the Agent |
 | `ENDPOINT_HEALTH_CHECK_FAILED` | 502 | A2A Agent Card discovery or identity validation failed |
+| `WORKFLOW_NOT_FOUND` | 404 | Workflow version does not exist for the Agent |
+| `WORKFLOW_ALREADY_EXISTS` | 409 | Workflow version already exists for the Agent |
+| `WORKFLOW_INVALID_STATE` | 409 | Workflow cannot be edited or deactivated in its current state |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | The same idempotency key was reused for another request |
 | `MCP_SERVER_NOT_FOUND` | 404 | MCP Server does not exist or is outside the owner scope |
 | `MCP_SERVER_ALREADY_EXISTS` | 409 | MCP Server code already exists for the owner |

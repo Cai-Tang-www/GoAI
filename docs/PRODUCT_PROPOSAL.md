@@ -239,6 +239,7 @@ A2A 的约束：
 - Delegation
 - AgentEndpoint
 - AgentCapability
+- Workflow（Agent 级版本化执行定义）
 
 #### C. 运行时闭环
 - 创建 Thread
@@ -266,6 +267,12 @@ A2A 的约束：
 - TraceID
 - 基础日志
 - 统一错误码
+
+#### F. Agent 管理面
+- Agent、Workflow 定义和版本管理
+- Capability 绑定与版本一致性校验
+- A2A Endpoint 健康检查与 Agent 发布门禁
+- owner-scoped RBAC 管理
 
 ### 9.2 保留但降级为“能力/底座”的功能
 
@@ -332,6 +339,20 @@ A2A 的约束：
 - `input_schema_json` / `output_schema_json`
 - `config_json`
 - `status`
+
+### 11.3.1 workflows
+
+表示某个 Agent 的一个版本化执行定义。Workflow 是 Agent 的内部 Eino Graph 能力，不是 Agent 间通信协议；跨 Agent 节点必须通过 A2A Gateway 委派。
+
+关键字段：
+- `agent_id`
+- `version`，同一 Agent 内唯一
+- `definition_json`，经过 Workflow DSL 校验和稳定 JSON 规范化
+- `checksum`，规范化定义的 SHA-256 摘要
+- `is_active`
+- `created_by`
+
+管理 API 不允许 active 版本原地修改。版本升级采用新建版本、激活新版本、重绑定 Capability、停用旧版本的滚动流程。停用前不得仍有 active Workflow Capability 引用该版本。
 
 ### 11.4 threads
 

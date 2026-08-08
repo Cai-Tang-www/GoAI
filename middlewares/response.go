@@ -50,6 +50,8 @@ const (
 	CodeAgentRouteUnavailable     = "AGENT_ROUTE_UNAVAILABLE"
 	CodeAgentRouteInvalid         = "AGENT_ROUTE_INVALID"
 	CodeWorkflowNotFound          = "WORKFLOW_NOT_FOUND"
+	CodeWorkflowAlreadyExists     = "WORKFLOW_ALREADY_EXISTS"
+	CodeWorkflowInvalidState      = "WORKFLOW_INVALID_STATE"
 	CodeMCPServerNotFound         = "MCP_SERVER_NOT_FOUND"
 	CodeMCPServerAlreadyExists    = "MCP_SERVER_ALREADY_EXISTS"
 	CodeMCPServerInvalidState     = "MCP_SERVER_INVALID_STATE"
@@ -275,6 +277,16 @@ func WorkflowNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeWorkflowNotFound, Message: "workflow not found"}
 }
 
+// WorkflowAlreadyExistsError 构造同一 Agent 下 Workflow 版本冲突错误。
+func WorkflowAlreadyExistsError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeWorkflowAlreadyExists, Message: "workflow version already exists"}
+}
+
+// WorkflowInvalidStateError 构造 Workflow 状态冲突错误。
+func WorkflowInvalidStateError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeWorkflowInvalidState, Message: "workflow state is invalid"}
+}
+
 // MCPServerNotFoundError 构造 MCP Server 不存在错误。
 func MCPServerNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeMCPServerNotFound, Message: "MCP server not found"}
@@ -468,6 +480,10 @@ func WrapError(err error) *AppError {
 		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeAgentRouteInvalid, Message: "agent route is invalid", Err: err}
 	case errors.Is(err, services.ErrWorkflowNotFound()):
 		return WorkflowNotFoundError()
+	case errors.Is(err, services.ErrWorkflowAlreadyExists()):
+		return WorkflowAlreadyExistsError()
+	case errors.Is(err, services.ErrWorkflowInvalidState()):
+		return WorkflowInvalidStateError()
 	case errors.Is(err, context.DeadlineExceeded):
 		return DownstreamTimeoutError(err)
 	case errors.Is(err, services.ErrMCPServerNotFound()):
