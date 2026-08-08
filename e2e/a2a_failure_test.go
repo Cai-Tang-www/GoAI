@@ -335,8 +335,8 @@ func assertAgentCardContract(t *testing.T, card *a2a.AgentCard, capabilityCode s
 			break
 		}
 	}
-	if extension == nil || !extension.Required {
-		t.Fatalf("delegation extension missing or optional: %+v", card.Capabilities.Extensions)
+	if extension == nil || extension.Required {
+		t.Fatalf("delegation extension missing or not optional: %+v", card.Capabilities.Extensions)
 	}
 	capabilities, ok := extension.Params["capabilities"].(map[string]any)
 	if !ok {

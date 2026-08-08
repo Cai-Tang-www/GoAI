@@ -187,26 +187,42 @@ func TestClientRejectsRemoteHTTPEndpoint(t *testing.T) {
 	}
 }
 
-func TestClientRejectsMissingDelegationExtension(t *testing.T) {
+func TestClientInvokesStandardAgentWithoutGoAIDelegationExtension(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/a2a/agents/writer/.well-known/agent-card.json" {
+		switch r.URL.Path {
+		case "/a2a/agents/writer/.well-known/agent-card.json":
 			card := testCard(serverBaseURL(r), "write")
 			card.Capabilities.Extensions = nil
 			_ = json.NewEncoder(w).Encode(card)
-			return
+		case "/a2a/agents/writer/message:send":
+			var request a2a.SendMessageRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode standard A2A request: %v", err)
+			}
+			if len(request.Message.Extensions) != 0 || len(request.Message.Metadata) != 0 {
+				t.Fatalf("standard peer received GoAI extension data: %+v", request.Message)
+			}
+			_ = json.NewEncoder(w).Encode(&a2a.StreamResponse{Event: &a2a.Task{
+				ID: request.Message.TaskID, ContextID: request.Message.ContextID,
+				Status: a2a.TaskStatus{State: a2a.TaskStateWorking},
+			}})
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	}))
 	defer server.Close()
 	client, _ := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
-	_, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
+	result, err := client.Invoke(context.Background(), services.AgentInvocationRequest{
 		SourceAgentCode: "planner", TargetAgentCode: "writer", CapabilityCode: "write", ParentRunID: "run-parent",
 		TaskID: "task", MessageID: "message", InputJSON: `{}`,
 		Endpoints: []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
 	})
-	if err == nil || !contains(err.Error(), "does not support GoAI delegation extension") {
-		t.Fatalf("expected extension rejection, got %v", err)
+	if err != nil {
+		t.Fatalf("standard A2A invocation failed: %v", err)
+	}
+	if result.State != services.AgentInvocationStateAccepted {
+		t.Fatalf("unexpected standard A2A result: %+v", result)
 	}
 }
 

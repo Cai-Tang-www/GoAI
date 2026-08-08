@@ -313,13 +313,15 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 		return nil, invocationError(fmt.Errorf("decoding invocation input: %w", err), false)
 	}
 	message := &a2a.Message{
-		ID:         request.MessageID,
-		ContextID:  request.ThreadID,
-		TaskID:     a2a.TaskID(request.TaskID),
-		Role:       a2a.MessageRoleUser,
-		Parts:      a2a.ContentParts{a2a.NewDataPart(payload)},
-		Extensions: []string{a2aprotocol.DelegationExtensionURI},
-		Metadata: map[string]any{
+		ID:        request.MessageID,
+		ContextID: request.ThreadID,
+		TaskID:    a2a.TaskID(request.TaskID),
+		Role:      a2a.MessageRoleUser,
+		Parts:     a2a.ContentParts{a2a.NewDataPart(payload)},
+	}
+	if supportsDelegationExtension(card) {
+		message.Extensions = []string{a2aprotocol.DelegationExtensionURI}
+		message.Metadata = map[string]any{
 			a2aprotocol.DelegationExtensionURI: map[string]any{
 				"sourceAgentCode":   request.SourceAgentCode,
 				"capabilityCode":    request.CapabilityCode,
@@ -329,7 +331,7 @@ func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvoc
 				"delegationGroupId": request.DelegationGroupID,
 				"groupMemberKey":    request.GroupMemberKey,
 			},
-		},
+		}
 	}
 	callbackURL := c.callbackURL(request.SourceAgentCode, request.TaskID)
 	notificationToken, err := c.notificationToken(ctx, request)
@@ -622,20 +624,15 @@ func validateCardIdentity(card *a2a.AgentCard, agentCode string, requestedBase *
 	if card == nil {
 		return errors.New("target agent card is empty")
 	}
-	foundExtension := false
 	for _, extension := range card.Capabilities.Extensions {
 		if extension.URI != a2aprotocol.DelegationExtensionURI {
 			continue
 		}
-		foundExtension = true
 		declaredCode, _ := extension.Params["agentCode"].(string)
-		if strings.TrimSpace(declaredCode) != strings.TrimSpace(agentCode) {
+		if strings.TrimSpace(declaredCode) != "" && strings.TrimSpace(declaredCode) != strings.TrimSpace(agentCode) {
 			return fmt.Errorf("target Agent Card declares agent_code %q, want %q", declaredCode, agentCode)
 		}
 		break
-	}
-	if !foundExtension {
-		return errors.New("target agent card does not support GoAI delegation extension")
 	}
 	validInterfaces := make([]*a2a.AgentInterface, 0, len(card.SupportedInterfaces))
 	for _, endpoint := range card.SupportedInterfaces {
@@ -653,6 +650,18 @@ func validateCardIdentity(card *a2a.AgentCard, agentCode string, requestedBase *
 	}
 	card.SupportedInterfaces = validInterfaces
 	return nil
+}
+
+func supportsDelegationExtension(card *a2a.AgentCard) bool {
+	if card == nil {
+		return false
+	}
+	for _, extension := range card.Capabilities.Extensions {
+		if extension.URI == a2aprotocol.DelegationExtensionURI {
+			return true
+		}
+	}
+	return false
 }
 func sameOrigin(left, right *url.URL) bool {
 	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)

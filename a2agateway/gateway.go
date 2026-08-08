@@ -309,7 +309,9 @@ func buildAgentCardWithAuthentication(descriptor *services.AgentDescriptor, auth
 			Extensions: []a2a.AgentExtension{{
 				URI:         DelegationExtensionURI,
 				Description: "GoAI multi-agent delegation metadata and capability contracts",
-				Required:    true,
+				// The extension enriches correlation for GoAI peers, but standard A2A
+				// clients must still be able to use the advertised skills.
+				Required: false,
 				Params: map[string]any{
 					"agentCode":    descriptor.Code,
 					"capabilities": contracts,
