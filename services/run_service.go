@@ -26,18 +26,24 @@ import (
 )
 
 var (
-	errRunNotFound           = errors.New("run not found")
-	errRunForbidden          = errors.New("run does not belong to current user")
-	errRunDispatchFailed     = errors.New("run execute event publish failed")
-	errIdempotencyKeyReused  = errors.New("idempotency key reused with different request")
-	errRunAlreadyExists      = errors.New("run id already exists with different request")
-	errThreadUnavailable     = errors.New("thread is not active")
-	errMessageConflict       = errors.New("message id already exists with different content")
-	errAgentNotFound         = errors.New("agent not found")
-	errWorkflowNotFound      = errors.New("workflow not found")
-	errInvalidRunTransition  = errors.New("invalid run status transition")
-	errInvalidStepTransition = errors.New("invalid step status transition")
-	errRunCancelled          = errors.New("run execution cancelled")
+	errRunNotFound              = errors.New("run not found")
+	errRunForbidden             = errors.New("run does not belong to current user")
+	errRunDispatchFailed        = errors.New("run execute event publish failed")
+	errIdempotencyKeyReused     = errors.New("idempotency key reused with different request")
+	errRunAlreadyExists         = errors.New("run id already exists with different request")
+	errThreadUnavailable        = errors.New("thread is not active")
+	errMessageConflict          = errors.New("message id already exists with different content")
+	errAgentNotFound            = errors.New("agent not found")
+	errWorkflowNotFound         = errors.New("workflow not found")
+	errParentRunThreadMismatch  = errors.New("parent run and child run must use the same thread")
+	errResumeEntriesRequired    = errors.New("resume entries are required")
+	errRunNotWaitingInput       = errors.New("run is not waiting for input")
+	errInterruptNotFound        = errors.New("interrupt not found")
+	errInterruptAlreadyResolved = errors.New("interrupt is already resolved")
+	errInterruptConflict        = errors.New("interrupt resume conflicts with existing resolution")
+	errInvalidRunTransition     = errors.New("invalid run status transition")
+	errInvalidStepTransition    = errors.New("invalid step status transition")
+	errRunCancelled             = errors.New("run execution cancelled")
 )
 
 type agentInvocationAcceptedError struct {
@@ -67,6 +73,26 @@ func (e *runSuspendedError) Error() string {
 	return fmt.Sprintf("run suspended waiting for A2A task %s", e.TaskID)
 }
 
+type runInterruptExecutionError struct {
+	Config *InterruptNodeConfig
+}
+
+func (e *runInterruptExecutionError) Error() string {
+	if e == nil || e.Config == nil {
+		return "run interrupted waiting for user input"
+	}
+	return fmt.Sprintf("run interrupted waiting for input %s", e.Config.InterruptID)
+}
+
+type runInterruptSuspendedError struct {
+	InterruptID string
+	StepKey     string
+}
+
+func (e *runInterruptSuspendedError) Error() string {
+	return fmt.Sprintf("run suspended waiting for interrupt %s", e.InterruptID)
+}
+
 // runExternallyTerminatedError 表示 A2A 聚合在父 Run 挂起前已失败或取消，执行器应停止当前 Graph。
 type runExternallyTerminatedError struct {
 	GroupID string
@@ -80,6 +106,10 @@ func (e *runExternallyTerminatedError) Error() string {
 func runExecutionStopped(err error) bool {
 	var suspended *runSuspendedError
 	if errors.As(err, &suspended) {
+		return true
+	}
+	var interruptSuspended *runInterruptSuspendedError
+	if errors.As(err, &interruptSuspended) {
 		return true
 	}
 	var terminated *runExternallyTerminatedError
@@ -293,6 +323,26 @@ func ErrWorkflowNotFound() error {
 	return errWorkflowNotFound
 }
 
+// ErrParentRunThreadMismatch 表示 AG-UI 子 Run 与父 Run 不在同一 Thread。
+func ErrParentRunThreadMismatch() error {
+	return errParentRunThreadMismatch
+}
+
+// ErrRunNotWaitingInput 表示 resume 目标当前没有等待用户输入。
+func ErrRunNotWaitingInput() error {
+	return errRunNotWaitingInput
+}
+
+// ErrInterruptNotFound 表示 resume 引用的暂停点不存在。
+func ErrInterruptNotFound() error {
+	return errInterruptNotFound
+}
+
+// ErrInterruptAlreadyResolved 表示暂停点已经被其他请求处理。
+func ErrInterruptAlreadyResolved() error {
+	return errInterruptAlreadyResolved
+}
+
 // CreateRunRequest 描述创建一次 Run 所需的协议无关输入。
 type CreateRunRequest struct {
 	AgentCode                 string          `json:"agent_code"`
@@ -304,6 +354,7 @@ type CreateRunRequest struct {
 	Model                     string          `json:"model"`
 	IdempotencyKey            string          `json:"-"`
 	RequestedRunID            string          `json:"-"`
+	ParentRunID               string          `json:"-"`
 	RequestedWorkflowID       uint64          `json:"-"`
 	allowGeneratedThreadReuse bool
 }
@@ -389,6 +440,9 @@ func ValidateCreateRunRequest(req CreateRunRequest) error {
 	if len(strings.TrimSpace(req.RequestedRunID)) > 64 {
 		return errors.New("run_id must be at most 64 characters")
 	}
+	if len(strings.TrimSpace(req.ParentRunID)) > 64 {
+		return errors.New("parent_run_id must be at most 64 characters")
+	}
 	triggerType := strings.TrimSpace(req.TriggerType)
 	if triggerType != "" {
 		if _, ok := allowedRunTriggerTypes[triggerType]; !ok {
@@ -419,6 +473,7 @@ type normalizedCreateRunRequest struct {
 	Model           string
 	IdempotencyKey  string
 	RequestedRunID  string
+	ParentRunID     string
 	WorkflowID      uint64
 }
 
@@ -445,6 +500,7 @@ func normalizeCreateRunRequest(req CreateRunRequest) (normalizedCreateRunRequest
 		Model:           strings.TrimSpace(req.Model),
 		IdempotencyKey:  strings.TrimSpace(req.IdempotencyKey),
 		RequestedRunID:  strings.TrimSpace(req.RequestedRunID),
+		ParentRunID:     strings.TrimSpace(req.ParentRunID),
 		WorkflowID:      req.RequestedWorkflowID,
 	}, nil
 }
@@ -486,6 +542,7 @@ func buildCreateRunRequestHash(userID uint64, req normalizedCreateRunRequest) (s
 		"input":            req.InputJSON,
 		"provider":         req.Provider,
 		"model":            req.Model,
+		"parent_run_id":    req.ParentRunID,
 	})
 }
 
@@ -556,10 +613,26 @@ func sameRunRequest(left, right *models.Run, allowGeneratedThreadReuse bool) boo
 		left.AgentID == right.AgentID &&
 		left.WorkflowID == right.WorkflowID &&
 		left.UserID == right.UserID &&
+		optionalStringValue(left.ParentRunID) == optionalStringValue(right.ParentRunID) &&
 		left.TriggerType == right.TriggerType &&
 		left.InputJSON == right.InputJSON &&
 		left.Provider == right.Provider &&
 		left.Model == right.Model
+}
+
+func optionalStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func optionalStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // matchRequestedRun 校验协议指定的 RunID 是否已绑定到同一稳定请求。
@@ -605,6 +678,7 @@ func (s *RunService) matchRequestedRun(
 	candidate := &models.Run{
 		RunID:       req.RequestedRunID,
 		ThreadID:    req.ThreadID,
+		ParentRunID: optionalStringPointer(req.ParentRunID),
 		AgentID:     existing.AgentID,
 		WorkflowID:  existing.WorkflowID,
 		UserID:      userID,
@@ -797,6 +871,7 @@ func (s *RunService) createRun(ctx context.Context, userID uint64, req CreateRun
 	run := &models.Run{
 		RunID:       runID,
 		ThreadID:    normalized.ThreadID,
+		ParentRunID: optionalStringPointer(normalized.ParentRunID),
 		AgentID:     agent.ID,
 		WorkflowID:  workflowID,
 		UserID:      userID,
@@ -866,6 +941,154 @@ func (s *RunService) CreateRun(ctx context.Context, userID uint64, req CreateRun
 	}()
 	return s.createRun(observedCtx, userID, req, nil)
 }
+
+// resumeRun 在单事务内 claim Interrupt、完成对应 Step，并在所有暂停点解决后重新排队。
+func (s *RunService) resumeRun(ctx context.Context, command ResumeRunCommand) (*RunMutationResult, bool, error) {
+	runID := strings.TrimSpace(command.RunID)
+	entries := append([]ResumeInterruptCommand(nil), command.Interrupts...)
+	seen := make(map[string]struct{}, len(entries))
+	for index := range entries {
+		entries[index].InterruptID = strings.TrimSpace(entries[index].InterruptID)
+		entries[index].Status = strings.ToLower(strings.TrimSpace(entries[index].Status))
+		if entries[index].InterruptID == "" {
+			return nil, false, errors.New("interrupt_id is required")
+		}
+		if _, exists := seen[entries[index].InterruptID]; exists {
+			return nil, false, fmt.Errorf("interrupt_id %s is duplicated", entries[index].InterruptID)
+		}
+		seen[entries[index].InterruptID] = struct{}{}
+		if entries[index].Status != models.RunInterruptStatusResolved && entries[index].Status != models.RunInterruptStatusCancelled {
+			return nil, false, errors.New("interrupt status must be resolved or cancelled")
+		}
+		payload := strings.TrimSpace(entries[index].PayloadJSON)
+		if payload == "" {
+			payload = "null"
+		}
+		if !json.Valid([]byte(payload)) {
+			return nil, false, fmt.Errorf("interrupt %s payload must be valid JSON", entries[index].InterruptID)
+		}
+		entries[index].PayloadJSON = payload
+	}
+
+	var result RunMutationResult
+	shouldPublish := false
+	err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var run models.Run
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("run_id = ?", runID).First(&run).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRunNotFound
+			}
+			return err
+		}
+		if run.UserID != command.OwnerUserID {
+			return errRunForbidden
+		}
+		var agent models.Agent
+		if err := tx.Select("agent_code").Where("id = ?", run.AgentID).First(&agent).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errAgentNotFound
+			}
+			return err
+		}
+		if agent.AgentCode != strings.TrimSpace(command.AgentCode) {
+			return errAgentNotFound
+		}
+
+		interrupts := make([]models.RunInterrupt, 0, len(entries))
+		for _, entry := range entries {
+			var interrupt models.RunInterrupt
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+				"run_id = ? AND interrupt_id = ?", run.RunID, entry.InterruptID,
+			).First(&interrupt).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return errInterruptNotFound
+				}
+				return err
+			}
+			interrupts = append(interrupts, interrupt)
+		}
+
+		if run.Status != models.RunStatusWaitingInput {
+			for index, interrupt := range interrupts {
+				entry := entries[index]
+				if interrupt.Status == entry.Status && strings.TrimSpace(interrupt.PayloadJSON) == entry.PayloadJSON {
+					continue
+				}
+				return errRunNotWaitingInput
+			}
+			result.Run = &run
+			result.IdempotentHit = true
+			return nil
+		}
+
+		for index := range interrupts {
+			interrupt := &interrupts[index]
+			entry := entries[index]
+			if interrupt.Status != models.RunInterruptStatusPending {
+				return errInterruptAlreadyResolved
+			}
+			now := time.Now()
+			update := tx.Model(&models.RunInterrupt{}).Where(
+				"id = ? AND status = ?", interrupt.ID, models.RunInterruptStatusPending,
+			).Updates(map[string]any{
+				"status":       entry.Status,
+				"payload_json": entry.PayloadJSON,
+				"resolved_at":  &now,
+			})
+			if update.Error != nil {
+				return update.Error
+			}
+			if update.RowsAffected != 1 {
+				return errInterruptAlreadyResolved
+			}
+			interrupt.Status = entry.Status
+			interrupt.PayloadJSON = entry.PayloadJSON
+			interrupt.ResolvedAt = &now
+
+			var step models.RunStep
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+				"run_id = ? AND step_key = ? AND status = ?", run.RunID, interrupt.StepKey, models.RunStepStatusWaitingInput,
+			).Order("attempt DESC").First(&step).Error; err != nil {
+				return fmt.Errorf("loading interrupt step %s: %w", interrupt.StepKey, err)
+			}
+			stepStatus := models.RunStepStatusSuccess
+			if entry.Status == models.RunInterruptStatusCancelled {
+				stepStatus = models.RunStepStatusSkipped
+			}
+			finishedAt := now
+			latency := int64(0)
+			if step.StartedAt != nil {
+				latency = now.Sub(*step.StartedAt).Milliseconds()
+			}
+			if err := transitionStepStatus(ctx, tx, &step, stepStatus, entry.PayloadJSON, "", latency, &finishedAt); err != nil {
+				return err
+			}
+			if err := s.finishRunStepLoopTx(ctx, tx, &run, &step, stepStatus, entry.PayloadJSON, "", latency, &finishedAt); err != nil {
+				return err
+			}
+		}
+
+		var pending int64
+		if err := tx.Model(&models.RunInterrupt{}).Where(
+			"run_id = ? AND status = ?", run.RunID, models.RunInterruptStatusPending,
+		).Count(&pending).Error; err != nil {
+			return err
+		}
+		if pending == 0 {
+			if err := transitionRunStatus(ctx, tx, &run, models.RunStatusQueued, ""); err != nil {
+				return err
+			}
+			shouldPublish = true
+		}
+		result.Run = &run
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return &result, shouldPublish, nil
+}
+
 func (s *RunService) GetRunByRunID(ctx context.Context, userID uint64, isAdmin bool, runID string) (*models.Run, error) {
 	run, err := s.fetchRunByRunID(ctx, runID)
 	if err != nil {
@@ -1138,7 +1361,24 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 	if s.graphExecutor == nil {
 		return s.failClaimedRun(executeCtx, run.RunID, errors.New("run service graph executor is nil"))
 	}
-	outputJSON, err := s.graphExecutor.Execute(executeCtx, def, run.InputJSON, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+	startNode, executionInput, hasResume, err := s.loadInterruptResumeCheckpoint(executeCtx, run.RunID, def)
+	if err != nil {
+		return s.failClaimedRun(executeCtx, run.RunID, err)
+	}
+	if hasResume && startNode == "" {
+		if err := s.validateRunOutputContract(executeCtx, run, executionInput); err != nil {
+			return s.failClaimedRun(executeCtx, run.RunID, err)
+		}
+		if err := s.transitionRun(executeCtx, run, models.RunStatusSuccess, ""); err != nil {
+			return s.failClaimedRun(executeCtx, run.RunID, err)
+		}
+		return nil
+	}
+	if !hasResume {
+		startNode = def.EntryNode
+		executionInput = run.InputJSON
+	}
+	outputJSON, err := s.graphExecutor.ExecuteFrom(executeCtx, def, startNode, executionInput, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
 		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
 			return "", err
 		}
@@ -1301,6 +1541,51 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 	return completeRun(outputJSON)
 }
 
+// loadInterruptResumeCheckpoint 返回最近一次已解决 Interrupt 的后继游标和 payload。
+func (s *RunService) loadInterruptResumeCheckpoint(ctx context.Context, runID string, definition *WorkflowDefinition) (string, string, bool, error) {
+	var interrupt models.RunInterrupt
+	err := s.database.WithContext(ctx).Where(
+		"run_id = ? AND status IN ? AND resolved_at IS NOT NULL", runID,
+		[]string{models.RunInterruptStatusResolved, models.RunInterruptStatusCancelled},
+	).Order("resolved_at DESC").Order("id DESC").First(&interrupt).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if definition == nil {
+		return "", "", false, errors.New("workflow definition is required for interrupt resume")
+	}
+	payload := strings.TrimSpace(interrupt.PayloadJSON)
+	if payload == "" {
+		payload = "null"
+	}
+	if !json.Valid([]byte(payload)) {
+		return "", "", false, fmt.Errorf("interrupt %s payload is invalid", interrupt.InterruptID)
+	}
+	if strings.TrimSpace(interrupt.ResumeNodeKey) == "" {
+		return "", payload, true, nil
+	}
+	if !containsWorkflowNode(definition, interrupt.ResumeNodeKey) {
+		return "", "", false, fmt.Errorf("interrupt %s resume node %s does not exist", interrupt.InterruptID, interrupt.ResumeNodeKey)
+	}
+	return strings.TrimSpace(interrupt.ResumeNodeKey), payload, true, nil
+}
+
+func containsWorkflowNode(definition *WorkflowDefinition, key string) bool {
+	key = strings.TrimSpace(key)
+	if definition == nil || key == "" {
+		return false
+	}
+	for _, node := range definition.Nodes {
+		if strings.TrimSpace(node.Key) == key {
+			return true
+		}
+	}
+	return false
+}
+
 func workflowSuccessor(def *WorkflowDefinition, nodeKey string) (string, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	successor := ""
@@ -1435,6 +1720,13 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 					return settlement.OutputJSON, nil
 				}
 				return "", &runSuspendedError{TaskID: accepted.TaskID, DelegationID: accepted.DelegationID, StepKey: node.Key, ResumeNodeKey: resumeNodeKey}
+			}
+			var interrupted *runInterruptExecutionError
+			if errors.As(execErr, &interrupted) {
+				if err := s.suspendRunForInterrupt(ctx, run, step, node, resumeNodeKey, interrupted.Config); err != nil {
+					return "", errors.Join(execErr, fmt.Errorf("persisting interrupt: %w", err))
+				}
+				return "", &runInterruptSuspendedError{InterruptID: interrupted.Config.InterruptID, StepKey: node.Key}
 			}
 			lastErr = execErr
 			persistCtx, cancel := runFailurePersistenceContext(ctx)
@@ -1979,6 +2271,12 @@ func (s *RunService) executeWorkflowNodeWithInput(ctx context.Context, run *mode
 	nodeRun := *run
 	nodeRun.InputJSON = input
 	switch strings.ToLower(strings.TrimSpace(node.Type)) {
+	case "interrupt":
+		config, err := ParseInterruptNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		return "", &runInterruptExecutionError{Config: config}
 	case "agent":
 		return s.executeAgentNode(ctx, &nodeRun, node)
 	case "agent_group":
@@ -1989,6 +2287,12 @@ func (s *RunService) executeWorkflowNodeWithInput(ctx context.Context, run *mode
 }
 func (s *RunService) executeWorkflowNode(ctx context.Context, run *models.Run, node WorkflowNode, attempt int) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(node.Type)) {
+	case "interrupt":
+		config, err := ParseInterruptNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		return "", &runInterruptExecutionError{Config: config}
 	case "agent":
 		return s.executeAgentNode(ctx, run, node)
 	case "agent_group":
@@ -2105,6 +2409,56 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 		}
 	}
 	return string(encoded), nil
+}
+
+// suspendRunForInterrupt 将当前步骤和 Run 原子置为 waiting_input，并保存可恢复游标。
+func (s *RunService) suspendRunForInterrupt(ctx context.Context, run *models.Run, step *models.RunStep, node WorkflowNode, resumeNodeKey string, config *InterruptNodeConfig) error {
+	if run == nil || step == nil || config == nil {
+		return errors.New("suspending run: run, step and interrupt config are required")
+	}
+	responseSchemaJSON := "{}"
+	if config.ResponseSchema != nil {
+		encoded, err := json.Marshal(config.ResponseSchema)
+		if err != nil {
+			return fmt.Errorf("encoding interrupt response schema: %w", err)
+		}
+		responseSchemaJSON = string(encoded)
+	}
+	metadataJSON := "{}"
+	if config.Metadata != nil {
+		encoded, err := json.Marshal(config.Metadata)
+		if err != nil {
+			return fmt.Errorf("encoding interrupt metadata: %w", err)
+		}
+		metadataJSON = string(encoded)
+	}
+	interrupt := &models.RunInterrupt{
+		RunID:              run.RunID,
+		InterruptID:        config.InterruptID,
+		StepKey:            strings.TrimSpace(node.Key),
+		Reason:             config.Reason,
+		Message:            config.Message,
+		ResponseSchemaJSON: responseSchemaJSON,
+		MetadataJSON:       metadataJSON,
+		ResumeNodeKey:      strings.TrimSpace(resumeNodeKey),
+		Status:             models.RunInterruptStatusPending,
+		PayloadJSON:        "null",
+	}
+	return s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
+			return err
+		}
+		if err := tx.Create(interrupt).Error; err != nil {
+			return err
+		}
+		if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusWaitingInput, "{}", "", 0, nil); err != nil {
+			return err
+		}
+		if err := transitionRunStatus(ctx, tx, run, models.RunStatusWaitingInput, ""); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func callbackTokenHash(token string) string {

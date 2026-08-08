@@ -161,7 +161,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 POST /api/agents/:agent_code/agui
 ```
 
-该入口需要 JWT 和 `run:create` 权限，接收官方 `RunAgentInput` JSON。V1 只接受 `user / assistant / system / developer` 普通文本消息；多模态内容、`tool / activity / reasoning` 消息、ToolCall/加密/命名消息字段，以及非空 `state / tools / context / forwardedProps`、`parentRunId` 与 `resume` 都会在进入流式阶段前返回参数错误。SDK 默认产生的空对象或空数组允许传入，但不会渗透到内部 Run 输入。AG-UI `parentRunId` 表示同一 Thread 的分支 lineage，A2A Delegation 的 Parent/Child Run 表示 Agent 委派关系，二者不共用语义；V1 暂不开放分支与恢复能力，也不会静默降级。
+该入口需要 JWT 和 `run:create` 权限，接收官方 `RunAgentInput` JSON。V1 只接受 `user / assistant / system / developer` 普通文本消息；多模态内容、`tool / activity / reasoning` 消息、ToolCall/加密/命名消息字段，以及非空 `state / tools / context / forwardedProps` 仍会在进入流式阶段前返回参数错误。SDK 默认产生的空对象或空数组允许传入，但不会渗透到内部 Run 输入。Issue #61 已支持 `parentRunId` 分支 lineage 和 `runId + resume` 恢复等待用户输入的 Run。AG-UI `parentRunId` 表示同一 Thread 的分支 lineage，A2A Delegation 的 Parent/Child Run 表示 Agent 委派关系，二者不共用语义。
 
 最小请求示例：
 
@@ -202,6 +202,8 @@ data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
 - `STEP_STARTED` / `STEP_FINISHED`
 - `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END`
 - `RUN_FINISHED` / `RUN_ERROR`
+
+Run 执行到 Workflow `interrupt` 节点时会进入 `waiting_input`，并通过 `RUN_FINISHED` 的 `interrupt` outcome 返回待处理项。客户端随后使用同一 `runId` 提交 `resume`；状态为 `resolved` 时携带用户结果继续后继节点，状态为 `cancelled` 时跳过该 interrupt 节点并继续执行。重复或并发 resume 不会重复执行后继节点。
 
 协议 Gateway 只负责协议解析、内部命令映射和事件编码；Thread、Message、Run 的一致性由 Runtime 保证，Workflow 执行由 Run Worker 负责。
 

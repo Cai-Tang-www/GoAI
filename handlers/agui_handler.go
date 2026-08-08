@@ -60,6 +60,20 @@ func (h *AGUIHandler) RunAgent(c *gin.Context) {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid AG-UI request", nil))
 		return
 	}
+	if len(input.Resume) > 0 {
+		command, err := buildAGUIResumeRunCommand(userID, agentCode, input)
+		if err != nil {
+			middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
+			return
+		}
+		result, err := h.runtime.ResumeRun(c.Request.Context(), command)
+		if err != nil {
+			middlewares.AbortWithError(c, middlewares.WrapError(err))
+			return
+		}
+		h.beginStream(c, result, userID)
+		return
+	}
 	command, err := buildAGUIStartRunCommand(userID, agentCode, input)
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.ValidationFailed(err.Error(), nil))
@@ -71,6 +85,10 @@ func (h *AGUIHandler) RunAgent(c *gin.Context) {
 		return
 	}
 
+	h.beginStream(c, result, userID)
+}
+
+func (h *AGUIHandler) beginStream(c *gin.Context, result *services.StartRunResult, userID uint64) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -161,6 +179,13 @@ func (h *AGUIHandler) emitSnapshot(
 	}
 
 	switch snapshot.Run.Status {
+	case models.RunStatusWaitingInput:
+		interrupts := pendingAGUIInterrupts(snapshot.Interrupts)
+		if len(interrupts) == 0 {
+			return true, h.writer.WriteEvent(c.Request.Context(), c.Writer, events.NewRunErrorEvent("run interruption state is incomplete", events.WithRunID(runID), events.WithErrorCode(middlewares.CodeInternalError)))
+		}
+		return true, h.writer.WriteEvent(c.Request.Context(), c.Writer,
+			events.NewRunFinishedEventWithOptions(threadID, runID, events.WithInterruptOutcome(interrupts)))
 	case models.RunStatusSuccess:
 		return true, h.writer.WriteEvent(c.Request.Context(), c.Writer, events.NewRunFinishedEvent(threadID, runID))
 	case models.RunStatusFailed, models.RunStatusCancelled:
@@ -181,9 +206,6 @@ func buildAGUIStartRunCommand(userID uint64, agentCode string, input aguitypes.R
 	runID := strings.TrimSpace(input.RunID)
 	if len(runID) > 64 {
 		return services.StartRunCommand{}, errors.New("runId must be at most 64 characters")
-	}
-	if input.ParentRunID != nil && strings.TrimSpace(*input.ParentRunID) != "" {
-		return services.StartRunCommand{}, errors.New("parentRunId branching is not supported in V1")
 	}
 	if len(input.Resume) > 0 {
 		return services.StartRunCommand{}, errors.New("resume is not supported in V1")
@@ -240,10 +262,89 @@ func buildAGUIStartRunCommand(userID uint64, agentCode string, input aguitypes.R
 		AgentCode:      agentCode,
 		ThreadID:       threadID,
 		RequestedRunID: runID,
+		ParentRunID:    optionalAGUIParentRunID(input.ParentRunID),
 		TriggerType:    "agui",
 		Input:          raw,
 		Messages:       messages,
 	}, nil
+}
+
+func buildAGUIResumeRunCommand(userID uint64, agentCode string, input aguitypes.RunAgentInput) (services.ResumeRunCommand, error) {
+	runID := strings.TrimSpace(input.RunID)
+	if runID == "" {
+		return services.ResumeRunCommand{}, errors.New("runId is required when resume is provided")
+	}
+	if len(runID) > 64 {
+		return services.ResumeRunCommand{}, errors.New("runId must be at most 64 characters")
+	}
+	if input.ParentRunID != nil && strings.TrimSpace(*input.ParentRunID) != "" {
+		return services.ResumeRunCommand{}, errors.New("parentRunId cannot be used with resume")
+	}
+	if nonEmpty, err := hasNonEmptyAGUIValue(input.State); err != nil {
+		return services.ResumeRunCommand{}, fmt.Errorf("validate state: %w", err)
+	} else if nonEmpty {
+		return services.ResumeRunCommand{}, errors.New("state is not supported in V1")
+	}
+	if len(input.Tools) > 0 || len(input.Context) > 0 {
+		return services.ResumeRunCommand{}, errors.New("tools and context are not supported in V1")
+	}
+	if nonEmpty, err := hasNonEmptyAGUIValue(input.ForwardedProps); err != nil {
+		return services.ResumeRunCommand{}, fmt.Errorf("validate forwardedProps: %w", err)
+	} else if nonEmpty {
+		return services.ResumeRunCommand{}, errors.New("forwardedProps is not supported in V1")
+	}
+	entries := make([]services.ResumeInterruptCommand, 0, len(input.Resume))
+	for _, resume := range input.Resume {
+		interruptID := strings.TrimSpace(resume.InterruptID)
+		if interruptID == "" {
+			return services.ResumeRunCommand{}, errors.New("resume interruptId is required")
+		}
+		payload, err := json.Marshal(resume.Payload)
+		if err != nil {
+			return services.ResumeRunCommand{}, fmt.Errorf("encode resume payload: %w", err)
+		}
+		if len(payload) == 0 {
+			payload = []byte("null")
+		}
+		entries = append(entries, services.ResumeInterruptCommand{
+			InterruptID: interruptID,
+			Status:      string(resume.Status),
+			PayloadJSON: string(payload),
+		})
+	}
+	return services.ResumeRunCommand{OwnerUserID: userID, AgentCode: agentCode, RunID: runID, Interrupts: entries}, nil
+}
+
+func optionalAGUIParentRunID(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func pendingAGUIInterrupts(source []models.RunInterrupt) []aguitypes.Interrupt {
+	interrupts := make([]aguitypes.Interrupt, 0, len(source))
+	for _, sourceInterrupt := range source {
+		if sourceInterrupt.Status != models.RunInterruptStatusPending {
+			continue
+		}
+		responseSchema := make(map[string]any)
+		if strings.TrimSpace(sourceInterrupt.ResponseSchemaJSON) != "" {
+			_ = json.Unmarshal([]byte(sourceInterrupt.ResponseSchemaJSON), &responseSchema)
+		}
+		metadata := make(map[string]any)
+		if strings.TrimSpace(sourceInterrupt.MetadataJSON) != "" {
+			_ = json.Unmarshal([]byte(sourceInterrupt.MetadataJSON), &metadata)
+		}
+		interrupts = append(interrupts, aguitypes.Interrupt{
+			ID:             sourceInterrupt.InterruptID,
+			Reason:         sourceInterrupt.Reason,
+			Message:        sourceInterrupt.Message,
+			ResponseSchema: responseSchema,
+			Metadata:       metadata,
+		})
+	}
+	return interrupts
 }
 
 func hasNonEmptyAGUIValue(value any) (bool, error) {
@@ -379,5 +480,5 @@ func messageText(contentJSON string) string {
 }
 
 func isStepTerminal(status string) bool {
-	return status == models.RunStepStatusSuccess || status == models.RunStepStatusFailed || status == models.RunStepStatusSkipped
+	return status == models.RunStepStatusSuccess || status == models.RunStepStatusFailed || status == models.RunStepStatusSkipped || status == models.RunStepStatusWaitingInput
 }

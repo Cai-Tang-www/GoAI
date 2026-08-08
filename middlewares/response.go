@@ -29,6 +29,10 @@ const (
 	CodeUserAlreadyExists         = "USER_ALREADY_EXISTS"
 	CodeRunNotFound               = "RUN_NOT_FOUND"
 	CodeRunAlreadyExists          = "RUN_ALREADY_EXISTS"
+	CodeRunNotWaitingInput        = "RUN_NOT_WAITING_INPUT"
+	CodeInterruptNotFound         = "INTERRUPT_NOT_FOUND"
+	CodeInterruptAlreadyResolved  = "INTERRUPT_ALREADY_RESOLVED"
+	CodeParentRunThreadMismatch   = "PARENT_RUN_THREAD_MISMATCH"
 	CodeThreadUnavailable         = "THREAD_UNAVAILABLE"
 	CodeMessageConflict           = "MESSAGE_CONFLICT"
 	CodeAgentNotFound             = "AGENT_NOT_FOUND"
@@ -328,6 +332,26 @@ func RunAlreadyExistsError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeRunAlreadyExists, Message: "run id already exists with different request"}
 }
 
+// RunNotWaitingInputError 构造 resume 目标状态冲突错误。
+func RunNotWaitingInputError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeRunNotWaitingInput, Message: "run is not waiting for input"}
+}
+
+// InterruptNotFoundError 构造不存在的 Interrupt 错误。
+func InterruptNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeInterruptNotFound, Message: "interrupt not found"}
+}
+
+// InterruptAlreadyResolvedError 构造重复处理 Interrupt 错误。
+func InterruptAlreadyResolvedError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeInterruptAlreadyResolved, Message: "interrupt is already resolved"}
+}
+
+// ParentRunThreadMismatchError 构造父子 Run Thread 不一致错误。
+func ParentRunThreadMismatchError() *AppError {
+	return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeParentRunThreadMismatch, Message: "parent run and child run must use the same thread"}
+}
+
 // ThreadUnavailableError 构造 Thread 已关闭或归档错误。
 func ThreadUnavailableError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeThreadUnavailable, Message: "thread is not active"}
@@ -378,6 +402,14 @@ func WrapError(err error) *AppError {
 		return IdempotencyKeyReusedError()
 	case errors.Is(err, services.ErrRunAlreadyExists()):
 		return RunAlreadyExistsError()
+	case errors.Is(err, services.ErrRunNotWaitingInput()):
+		return RunNotWaitingInputError()
+	case errors.Is(err, services.ErrInterruptNotFound()):
+		return InterruptNotFoundError()
+	case errors.Is(err, services.ErrInterruptAlreadyResolved()):
+		return InterruptAlreadyResolvedError()
+	case errors.Is(err, services.ErrParentRunThreadMismatch()):
+		return ParentRunThreadMismatchError()
 	case errors.Is(err, services.ErrThreadUnavailable()):
 		return ThreadUnavailableError()
 	case errors.Is(err, services.ErrMessageConflict()):

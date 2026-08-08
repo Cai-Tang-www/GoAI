@@ -16,6 +16,7 @@ func IsValidRunTransition(from, to string) bool {
 		},
 		models.RunStatusRunning: {
 			models.RunStatusWaitingExternal: {},
+			models.RunStatusWaitingInput:    {},
 			models.RunStatusSuccess:         {},
 			models.RunStatusFailed:          {},
 			models.RunStatusCancelled:       {},
@@ -23,6 +24,10 @@ func IsValidRunTransition(from, to string) bool {
 		models.RunStatusWaitingExternal: {
 			models.RunStatusRunning:   {},
 			models.RunStatusFailed:    {},
+			models.RunStatusCancelled: {},
+		},
+		models.RunStatusWaitingInput: {
+			models.RunStatusQueued:    {},
 			models.RunStatusCancelled: {},
 		},
 	}
@@ -43,6 +48,7 @@ func IsValidRunStepTransition(from, to string) bool {
 		},
 		models.RunStepStatusRunning: {
 			models.RunStepStatusWaitingExternal: {},
+			models.RunStepStatusWaitingInput:    {},
 			models.RunStepStatusSuccess:         {},
 			models.RunStepStatusFailed:          {},
 			models.RunStepStatusSkipped:         {},
@@ -50,6 +56,10 @@ func IsValidRunStepTransition(from, to string) bool {
 		models.RunStepStatusWaitingExternal: {
 			models.RunStepStatusSuccess: {},
 			models.RunStepStatusFailed:  {},
+			models.RunStepStatusSkipped: {},
+		},
+		models.RunStepStatusWaitingInput: {
+			models.RunStepStatusSuccess: {},
 			models.RunStepStatusSkipped: {},
 		},
 	}

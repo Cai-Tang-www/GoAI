@@ -34,11 +34,27 @@ type StartRunCommand struct {
 	AgentCode      string
 	ThreadID       string
 	RequestedRunID string
+	ParentRunID    string
 	TriggerType    string
 	Input          json.RawMessage
 	Provider       string
 	Model          string
 	Messages       []IncomingMessage
+}
+
+// ResumeInterruptCommand 描述一次协议无关的 Interrupt 处理请求。
+type ResumeInterruptCommand struct {
+	InterruptID string
+	Status      string
+	PayloadJSON string
+}
+
+// ResumeRunCommand 描述恢复一个等待用户输入的 Run 所需的命令。
+type ResumeRunCommand struct {
+	OwnerUserID uint64
+	AgentCode   string
+	RunID       string
+	Interrupts  []ResumeInterruptCommand
 }
 
 // StartRunResult 返回 Runtime 创建或复用的 Thread 与 Run。
@@ -50,14 +66,16 @@ type StartRunResult struct {
 
 // RunSnapshot 是协议 Gateway 可观察的 Run、Step 与 Message 快照。
 type RunSnapshot struct {
-	Run      models.Run
-	Steps    []models.RunStep
-	Messages []models.Message
+	Run        models.Run
+	Steps      []models.RunStep
+	Messages   []models.Message
+	Interrupts []models.RunInterrupt
 }
 
 // Runtime 定义协议 Gateway 与多 Agent 运行时之间的稳定边界。
 type Runtime interface {
 	StartRun(context.Context, StartRunCommand) (*StartRunResult, error)
+	ResumeRun(context.Context, ResumeRunCommand) (*StartRunResult, error)
 	Snapshot(context.Context, uint64, string) (*RunSnapshot, error)
 }
 
@@ -183,6 +201,24 @@ func (s *RuntimeService) startRun(ctx context.Context, command StartRunCommand) 
 		}
 	}
 	threadID := strings.TrimSpace(command.ThreadID)
+	parentRunID := strings.TrimSpace(command.ParentRunID)
+	if parentRunID != "" {
+		if strings.TrimSpace(command.RequestedRunID) == parentRunID {
+			return nil, errors.New("parent_run_id cannot equal run_id")
+		}
+		parent, err := s.runService.GetRunByRunID(ctx, command.OwnerUserID, false, parentRunID)
+		if err != nil {
+			return nil, err
+		}
+		if threadID == "" {
+			threadID = strings.TrimSpace(parent.ThreadID)
+		} else if threadID != strings.TrimSpace(parent.ThreadID) {
+			return nil, errParentRunThreadMismatch
+		}
+		if threadID == "" {
+			return nil, errors.New("parent run thread_id is required")
+		}
+	}
 	generatedThreadID := threadID == ""
 	if generatedThreadID {
 		threadID = newThreadID()
@@ -214,6 +250,7 @@ func (s *RuntimeService) startRun(ctx context.Context, command StartRunCommand) 
 		Provider:                  command.Provider,
 		Model:                     command.Model,
 		RequestedRunID:            command.RequestedRunID,
+		ParentRunID:               parentRunID,
 		allowGeneratedThreadReuse: generatedThreadID && strings.TrimSpace(command.RequestedRunID) != "",
 	}, hook)
 	if err != nil {
@@ -234,6 +271,36 @@ func (s *RuntimeService) startRun(ctx context.Context, command StartRunCommand) 
 		return nil, errors.New("runtime thread was not resolved")
 	}
 	return &StartRunResult{Thread: runtimeThread, Run: result.Run, Reused: result.IdempotentHit}, nil
+}
+
+// ResumeRun 原子处理等待中的 Interrupt，并在全部暂停点解决后重新投递 Run。
+func (s *RuntimeService) ResumeRun(ctx context.Context, command ResumeRunCommand) (*StartRunResult, error) {
+	if command.OwnerUserID == 0 {
+		return nil, errors.New("owner_user_id is required")
+	}
+	if strings.TrimSpace(command.AgentCode) == "" {
+		return nil, errors.New("agent_code is required")
+	}
+	if strings.TrimSpace(command.RunID) == "" {
+		return nil, errors.New("run_id is required")
+	}
+	if len(command.Interrupts) == 0 {
+		return nil, errResumeEntriesRequired
+	}
+	mutation, shouldPublish, err := s.runService.resumeRun(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	if shouldPublish {
+		if err := s.runService.publishRunExecute(ctx, mutation.Run.RunID); err != nil {
+			return nil, s.runService.handleRunDispatchFailure(ctx, mutation.Run.RunID, "resume", err)
+		}
+	}
+	var thread models.Thread
+	if err := s.database.WithContext(ctx).Where("thread_id = ?", mutation.Run.ThreadID).First(&thread).Error; err != nil {
+		return nil, err
+	}
+	return &StartRunResult{Thread: &thread, Run: mutation.Run, Reused: mutation.IdempotentHit}, nil
 }
 
 // Snapshot 返回当前用户可见的 Run 执行快照。
@@ -272,7 +339,15 @@ func (s *RuntimeService) snapshot(ctx context.Context, ownerUserID uint64, runID
 		Find(&messages).Error; err != nil {
 		return nil, err
 	}
-	return &RunSnapshot{Run: *run, Steps: steps, Messages: messages}, nil
+	var interrupts []models.RunInterrupt
+	if err := s.database.WithContext(ctx).
+		Where("run_id = ?", runID).
+		Order("created_at ASC").
+		Order("id ASC").
+		Find(&interrupts).Error; err != nil {
+		return nil, err
+	}
+	return &RunSnapshot{Run: *run, Steps: steps, Messages: messages, Interrupts: interrupts}, nil
 }
 
 func ensureThread(tx *gorm.DB, threadID string, ownerUserID uint64) (*models.Thread, error) {

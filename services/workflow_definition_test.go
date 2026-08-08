@@ -37,3 +37,22 @@ func TestValidateWorkflowDefinitionDetectsMissingEntry(t *testing.T) {
 		t.Fatal("expected validation error but got nil")
 	}
 }
+
+func TestValidateWorkflowDefinitionAcceptsInterruptNode(t *testing.T) {
+	raw := `{"entry_node":"approval","nodes":[{"key":"approval","type":"interrupt","config":{"interrupt_id":"approval","reason":"approval_required","message":"Approve?","response_schema":{"type":"object"},"metadata":{"source":"test"}}},{"key":"finish","type":"noop"}],"edges":[{"from":"approval","to":"finish"}]}`
+	definition, err := ParseAndValidateWorkflowDefinition(raw)
+	if err != nil {
+		t.Fatalf("interrupt workflow should be valid: %v", err)
+	}
+	config, err := ParseInterruptNodeConfig(definition.Nodes[0])
+	if err != nil || config.InterruptID != "approval" || config.Reason != "approval_required" {
+		t.Fatalf("unexpected interrupt config: config=%+v err=%v", config, err)
+	}
+}
+
+func TestValidateWorkflowDefinitionRejectsDuplicateInterruptID(t *testing.T) {
+	raw := `{"entry_node":"first","nodes":[{"key":"first","type":"interrupt","config":{"interrupt_id":"same","reason":"first"}},{"key":"second","type":"interrupt","config":{"interrupt_id":"same","reason":"second"}}],"edges":[{"from":"first","to":"second"}]}`
+	if _, err := ParseAndValidateWorkflowDefinition(raw); err == nil {
+		t.Fatal("expected duplicate interrupt id to be rejected")
+	}
+}

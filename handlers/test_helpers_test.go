@@ -106,6 +106,7 @@ func newTestRouterWithRegistryAndMCPClient(t *testing.T, database *gorm.DB, publ
 			&models.Message{},
 			&models.Run{},
 			&models.RunStep{},
+			&models.RunInterrupt{},
 			&models.RunIdempotency{},
 			&models.DelegationGroup{},
 		); err != nil {

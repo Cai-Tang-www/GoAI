@@ -36,6 +36,7 @@ func setupDelegationFixture(t *testing.T) delegationFixture {
 		&models.Message{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.RunIdempotency{},
 		&models.Delegation{},
 		&models.DelegationGroup{},

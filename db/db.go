@@ -53,6 +53,7 @@ func Migrate(database *gorm.DB) error {
 		&models.A2APushConfig{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.RunIdempotency{},
 		&models.LoopRecord{},
 		&models.LoopEvaluation{},
