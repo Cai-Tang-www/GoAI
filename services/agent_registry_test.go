@@ -100,7 +100,7 @@ func preparePublishableAgent(t *testing.T, service *AgentRegistryService, actor 
 		t.Fatalf("load agent %s: %v", code, err)
 	}
 	workflow := models.Workflow{
-		AgentID: agent.ID, Version: 1, DefinitionJSON: `{"nodes":[],"edges":[]}`,
+		AgentID: agent.ID, Version: 1, DefinitionJSON: `{"entry_node":"noop","nodes":[{"key":"noop","type":"noop"}],"edges":[]}`,
 		Checksum: code + "-v1", IsActive: true, CreatedBy: actor.UserID,
 	}
 	if err := service.database.Create(&workflow).Error; err != nil {
