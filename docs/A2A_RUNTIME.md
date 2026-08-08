@@ -35,7 +35,7 @@ graph LR
 
 Agent Registry 是 A2A Runtime 的管理面前置条件，不是新的执行 transport。
 
-- 所有可委派 Agent 必须先注册，Workflow 的 `agent` / `agent_group` 节点只能引用 Registry 中的 Agent 与 Capability，不接受任意 URL
+- 所有可委派 Agent 必须先注册，Workflow 的 `agent` / `agent_tool` / `agent_group` 节点只能引用 Registry 中的 Agent 与 Capability，不接受任意 URL
 - Agent 默认 inactive；V1 至少需要一个由当前 Agent 的 active Workflow 支撑、版本一致的 active Capability，以及通过 Agent Card 身份校验的 active Endpoint 和完整凭据配置，才能发布
 - `tool/custom` Capability 在 V1 仅作为管理资产，不能单独满足发布门禁，也不会进入 Agent Card；Agent Card 的 Delegation extension 必须声明与 Registry 相同的 `agentCode`，防止 Endpoint 地址指向错误 Agent
 - Endpoint 变更后健康状态重置，必须重新 discovery；健康失败会标记 unhealthy，最后一个健康 Endpoint 失效时 Agent 自动停用；`config_json` 仅允许非敏感元数据，认证材料必须使用 `credential_ref`
@@ -43,7 +43,7 @@ Agent Registry 是 A2A Runtime 的管理面前置条件，不是新的执行 tra
 
 ## 出站调用流程
 
-1. Supervisor `RunService` 执行 Workflow 的 `agent` 节点。
+1. Supervisor `RunService` 执行 Workflow 的 `agent`、`agent_tool` 或 `agent_group` 节点。
 2. `routing_policy=registry` 时，Registry Router 按 `agent_code` 稳定顺序，从 active Agent、版本一致的 Workflow Capability 和 active A2A Endpoint 中选择 Worker；显式 `target_agent` 也经过同一套 Registry 门禁。
 3. Runtime 根据选中的 `Agent`、`AgentCapability` 和 `AgentEndpoint` 组装 `AgentInvocationRequest`，并把选路原因和 Workflow 版本写入 RunStep 输出。
 4. `a2aclient` 通过 Agent Card discovery 获取目标能力声明，并校验 HTTP+JSON binding、Capability、Delegation extension 和 Push Notification 能力。
@@ -122,6 +122,32 @@ GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信
 }
 ```
 
+## Workflow agent_tool 节点
+
+`agent_tool` 将一个已注册的 Agent Capability 包装为 Eino `tool.InvokableTool`，用于
+在 Agent 自己的 Graph 中以 Tool 语义调用另一个 Agent：
+
+```json
+{
+  "key": "writer_tool",
+  "type": "agent_tool",
+  "config": {
+    "target_agent": "writer",
+    "capability": "write",
+    "tool_name": "writer_tool",
+    "input_from": ["planner"],
+    "timeout_ms": 120000
+  }
+}
+```
+
+- `tool_name` 可选；未填写时由目标 Agent 与 Capability 稳定生成。
+- `Info` 使用 Registry Capability 的名称、描述和输入 Schema。
+- `InvokableRun` 先校验输入契约，再通过 `AgentInvoker` 发起 A2A HTTP(S) 调用。
+- 同步完成结果校验输出 Schema；accepted 结果继续复用 `waiting_external`、Delegation、Child Run、callback 和 `run_resume`。
+- `agent_tool` 不提供进程内 Service、Eino Executor、Provider 或 Kafka 旁路；本地仍走 loopback HTTP，远程仍必须 HTTPS。
+- A2A wire contract 不因 Tool 包装改变，跨 Agent 的 Message、Task、状态和回调语义保持不变。
+
 ## 幂等与重试
 
 - `TaskID = hash("task", parent_run_id, node_key)`。
@@ -191,7 +217,7 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 - V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
 - 尚未实现 mTLS/OIDC、跨副本共享 nonce store、AG-UI `parentRunId` 分支和用户主动 resume。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，但不改变现有 A2A 契约。
-- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow、Registry Router 和显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
+- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow、Registry Router、`agent_tool` 和显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
 
 ## 测试契约
 

@@ -79,6 +79,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - **Issue #47 已落地**：显式 `agent_group` 支持多 Child Run fan-out/fan-in、`all`/`any`/`quorum` 聚合、部分失败收敛、group coordinator resume lease 和真实 A2A HTTP 多 Runtime 闭环
 - **Issue #55 已落地**：Supervisor 的 `agent` 节点可通过 `routing_policy=registry` 按 active Agent、版本一致的 Workflow Capability 和健康 A2A Endpoint 确定性选择 Worker；选择结果进入 RunStep，跨 Agent 委派仍固定经过 A2A Client/Gateway
 - **Issue #57 已落地**：来源 Agent 可通过 A2A `CancelTask` 取消 Child Run；目标 Runtime 原子收敛 Child Run/RunStep、停止本地执行上下文并通过认证 callback 回送取消终态，重复取消幂等
+- **Issue #63 已落地**：`agent_tool` 将 Registry Capability 包装为 Eino `InvokableTool`；同步结果校验输入/输出契约，异步 accepted 继续进入 A2A callback/resume 生命周期，实际通信仍固定经过 A2A HTTP(S)
 
 后续补齐：
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
@@ -87,6 +88,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制
 - 已使用 Eino Graph 执行单个 Agent 内部的串行/可达 Workflow 节点
 - `agent` 节点必须经由 A2A Client 与目标 Agent Gateway 通信，不允许进程内 Service 直调
+- `agent_tool` 节点是 Eino Tool 适配器，底层仍必须经由 A2A Client 与目标 Agent Gateway 通信，不允许把 Agent 包装成进程内 Tool 直调
 - `agent_group` 是显式的并行能力边界；Parent Workflow 仍串行，后续再扩展任意并行 DAG、条件分支、流式节点和节点级恢复
 - `tool` 节点通过 MCP `ToolInvoker` 执行 Agent -> Tool 调用；MCP 不替代 Agent -> Agent 的 A2A 通信
 
