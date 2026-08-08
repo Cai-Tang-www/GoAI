@@ -9,7 +9,7 @@ func TestValidateAgentNodeConfig(t *testing.T) {
 		wantErr string
 	}{
 		{name: "missing config", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent"}]}`, wantErr: "config is required"},
-		{name: "missing target", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"capability":"write"}}]}`, wantErr: "target_agent is required"},
+		{name: "missing target and policy", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"capability":"write"}}]}`, wantErr: "requires target_agent or routing_policy=registry"},
 		{name: "missing capability", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"target_agent":"writer"}}]}`, wantErr: "capability is required"},
 		{name: "unknown input step", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write","input_from":["missing"]}}]}`, wantErr: "input_from node not found"},
 		{name: "self input step", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write","input_from":["delegate"]}}]}`, wantErr: "cannot reference itself"},
@@ -23,6 +23,20 @@ func TestValidateAgentNodeConfig(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestParseAgentNodeConfigSupportsRegistryRouting(t *testing.T) {
+	def, err := ParseAndValidate(`{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"capability":"write","routing_policy":" REGISTRY "}}]}`)
+	if err != nil {
+		t.Fatalf("parse registry-routed agent node: %v", err)
+	}
+	config, err := ParseAgentNodeConfig(def.Nodes[0])
+	if err != nil {
+		t.Fatalf("parse agent config: %v", err)
+	}
+	if config.RoutingPolicy != "registry" || config.TargetAgent != "" {
+		t.Fatalf("unexpected registry routing config: %+v", config)
 	}
 }
 

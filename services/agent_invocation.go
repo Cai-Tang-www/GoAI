@@ -16,6 +16,17 @@ type AgentInvocationEndpoint struct {
 	Transport string
 }
 
+// WithAgentRouter 注入 Supervisor 使用的 Agent Registry Router。
+func WithAgentRouter(router AgentRouter) RunServiceOption {
+	return func(service *RunService) error {
+		if router == nil {
+			return errors.New("configuring run service: agent router is nil")
+		}
+		service.agentRouter = router
+		return nil
+	}
+}
+
 // AgentInvocationRequest 描述 Workflow agent 节点发起的一次跨 Agent 委派。
 type AgentInvocationRequest struct {
 	SourceAgentCode     string

@@ -69,7 +69,7 @@ func TestAGUIRequestDelegatesThroughA2AToEinoAgentAndStreamsResult(t *testing.T)
 	migrateE2ADB(t, databaseA)
 	migrateE2ADB(t, databaseB)
 
-	agentA, _ := seedAgent(t, databaseA, "planner", "Planner Agent", 11, `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"target_agent":"writer","capability":"write","timeout_ms":5000}}],"edges":[]}`)
+	agentA, _ := seedAgent(t, databaseA, "planner", "Planner Agent", 11, `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"capability":"write","routing_policy":"registry","timeout_ms":5000}}],"edges":[]}`)
 	agentBInA, workflowBInA := seedAgent(t, databaseA, "writer", "Writer Agent", 22, `{"entry_node":"write","nodes":[{"key":"write","type":"llm"}],"edges":[]}`)
 	seedCapability(t, databaseA, agentBInA, "write", workflowBInA)
 

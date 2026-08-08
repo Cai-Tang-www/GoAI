@@ -29,10 +29,11 @@ type Edge struct {
 
 // AgentNodeConfig 定义 Workflow 中 agent 节点的跨 Agent 委派参数。
 type AgentNodeConfig struct {
-	TargetAgent string   `json:"target_agent"`
-	Capability  string   `json:"capability"`
-	InputFrom   []string `json:"input_from,omitempty"`
-	TimeoutMS   int      `json:"timeout_ms,omitempty"`
+	TargetAgent   string   `json:"target_agent,omitempty"`
+	Capability    string   `json:"capability"`
+	RoutingPolicy string   `json:"routing_policy,omitempty"`
+	InputFrom     []string `json:"input_from,omitempty"`
+	TimeoutMS     int      `json:"timeout_ms,omitempty"`
 }
 
 // ToolNodeConfig 定义 Workflow 中 tool 节点的 MCP 稳定引用与输入来源。
@@ -118,13 +119,19 @@ func ParseAgentNodeConfig(node Node) (*AgentNodeConfig, error) {
 	if len(node.Config) == 0 {
 		return nil, fmt.Errorf("agent node %s config is required", node.Key)
 	}
-	if err := json.Unmarshal(node.Config, &config); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(node.Config)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
 		return nil, fmt.Errorf("agent node %s config is invalid: %w", node.Key, err)
 	}
 	config.TargetAgent = strings.TrimSpace(config.TargetAgent)
 	config.Capability = strings.TrimSpace(config.Capability)
-	if config.TargetAgent == "" {
-		return nil, fmt.Errorf("agent node %s target_agent is required", node.Key)
+	config.RoutingPolicy = strings.ToLower(strings.TrimSpace(config.RoutingPolicy))
+	if config.TargetAgent == "" && config.RoutingPolicy != "registry" {
+		return nil, fmt.Errorf("agent node %s requires target_agent or routing_policy=registry", node.Key)
+	}
+	if config.RoutingPolicy != "" && config.RoutingPolicy != "registry" {
+		return nil, fmt.Errorf("agent node %s routing_policy must be registry", node.Key)
 	}
 	if config.Capability == "" {
 		return nil, fmt.Errorf("agent node %s capability is required", node.Key)

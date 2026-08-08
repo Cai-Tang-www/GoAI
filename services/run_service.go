@@ -117,6 +117,7 @@ type workflowNodeExecutor func(context.Context, *models.Run, WorkflowNode, int) 
 type RunService struct {
 	database                 *gorm.DB
 	publisher                RunEventPublisher
+	agentRouter              AgentRouter
 	agentInvoker             AgentInvoker
 	toolInvoker              ToolInvoker
 	graphExecutor            *einoexecutor.Executor
@@ -147,6 +148,11 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 		resumeHeartbeatInterval:  10 * time.Second,
 		resumePersistenceTimeout: runFailurePersistenceTimeout,
 	}
+	router, err := NewRegistryAgentRouter(database)
+	if err != nil {
+		return nil, err
+	}
+	service.agentRouter = router
 	service.executeNode = service.executeDefaultNode
 	for _, option := range options {
 		if option == nil {
@@ -1898,22 +1904,22 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 		}
 		return "", fmt.Errorf("loading source agent: %w", err)
 	}
-	if source.AgentCode == config.TargetAgent {
-		return "", fmt.Errorf("agent node %s cannot target source agent %s", node.Key, config.TargetAgent)
+	if config.TargetAgent != "" && source.AgentCode == config.TargetAgent {
+		return "", fmt.Errorf("%w: agent node %s cannot target source agent %s", errAgentRouteInvalid, node.Key, source.AgentCode)
 	}
-	var target models.Agent
-	if err := s.database.WithContext(ctx).Where("agent_code = ? AND status = ?", config.TargetAgent, models.AgentStatusActive).First(&target).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", errAgentNotFound
-		}
-		return "", fmt.Errorf("loading target agent: %w", err)
+	if s.agentRouter == nil {
+		return "", fmt.Errorf("%w: agent router is not configured", errAgentRouteInvalid)
 	}
-	var capability models.AgentCapability
-	if err := s.database.WithContext(ctx).Where("agent_id = ? AND capability_code = ? AND status = ?", target.ID, config.Capability, models.AgentCapabilityStatusActive).First(&capability).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", fmt.Errorf("target capability %s not found", config.Capability)
-		}
-		return "", fmt.Errorf("loading target capability: %w", err)
+	route, err := s.agentRouter.Route(ctx, AgentRouteRequest{
+		SourceAgentID: source.ID, CapabilityCode: config.Capability, PreferredAgentCode: config.TargetAgent,
+	})
+	if err != nil {
+		return "", err
+	}
+	target := route.Agent
+	capability := route.Capability
+	if source.ID == target.ID {
+		return "", fmt.Errorf("%w: agent node %s cannot target source agent %s", errAgentRouteInvalid, node.Key, source.AgentCode)
 	}
 	var sourceEndpoint models.AgentEndpoint
 	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", source.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").First(&sourceEndpoint).Error; err != nil {
@@ -1923,14 +1929,7 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 			return "", fmt.Errorf("loading source A2A identity endpoint: %w", err)
 		}
 	}
-	var endpoints []models.AgentEndpoint
-	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", target.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").Find(&endpoints).Error; err != nil {
-		return "", fmt.Errorf("loading target A2A endpoints: %w", err)
-	}
-	invocationEndpoints := make([]AgentInvocationEndpoint, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		invocationEndpoints = append(invocationEndpoints, AgentInvocationEndpoint{Address: endpoint.Address, Transport: endpoint.Transport})
-	}
+	invocationEndpoints := []AgentInvocationEndpoint{{Address: route.Endpoint.Address, Transport: route.Endpoint.Transport}}
 	timeout := 120 * time.Second
 	if config.TimeoutMS > 0 {
 		timeout = time.Duration(config.TimeoutMS) * time.Millisecond
@@ -1966,13 +1965,20 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	if !json.Valid(raw) {
 		return "", errors.New("A2A agent result is not valid JSON")
 	}
+	routingPolicy := config.RoutingPolicy
+	if routingPolicy == "" {
+		routingPolicy = "explicit"
+	}
 	output := map[string]any{
-		"type":         "agent",
-		"target_agent": target.AgentCode,
-		"capability":   capability.CapabilityCode,
-		"task_id":      result.TaskID,
-		"state":        result.State,
-		"result":       raw,
+		"type":             "agent",
+		"target_agent":     target.AgentCode,
+		"capability":       capability.CapabilityCode,
+		"task_id":          result.TaskID,
+		"state":            result.State,
+		"result":           raw,
+		"routing_policy":   routingPolicy,
+		"selection_reason": route.SelectionReason,
+		"workflow_version": route.Workflow.Version,
 	}
 	if result.Message != "" {
 		output["message"] = result.Message
