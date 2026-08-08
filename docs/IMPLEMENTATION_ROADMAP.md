@@ -98,6 +98,16 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - LoopID / OTel Trace
 - Prompt 快照与性能成本基础字段
 
+已实现（Issue #65）：
+- `GET /api/runs/:run_id/trace` 返回 Run、RunStep、Loop、Delegation、Message 和 Evaluation 的只读快照
+- `GET /api/runs/:run_id/loops`、`GET /api/loops/:loop_id`、`GET /api/loops/:loop_id/evaluations` 提供 Loop 管理查询
+- `loop:read` 通过 RBAC 启动补种，member owner-scoped，admin 支持跨 owner
+- 查询统一使用 response envelope、稳定错误码和 `trace_id`
+
+仍需扩展：
+- Thread Replay
+- 完整 OTel Trace、成本聚合、Evaluator 管理和 Dashboard
+
 ### 10. 文档与契约
 - OpenAPI / Swagger
 - AG-UI / A2A 使用说明

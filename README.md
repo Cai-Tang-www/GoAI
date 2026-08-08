@@ -117,6 +117,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - 统一响应 envelope、稳定错误码和 `trace_id`
 - Run / RunStep 状态机与持久化
 - `POST /api/runs`、Run 查询、步骤查询和 Replay
+- Loop / Trace / Evaluation 只读查询 API，带 owner/admin 隔离
 - Run 创建幂等与 Kafka 消费原子 claim
 - Kafka 异步 Run 执行链路
 - Workflow DSL 基础校验与拓扑排序
@@ -260,6 +261,10 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `POST /api/runs`
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
+- `GET /api/runs/:run_id/trace`
+- `GET /api/runs/:run_id/loops`
+- `GET /api/loops/:loop_id`
+- `GET /api/loops/:loop_id/evaluations`
 - `POST /api/runs/:run_id/replay`
 - `POST/GET/PUT`、停用、健康检查和 Tool discovery：`/api/mcp/servers/*`
 - `/api/users/*`：用户管理接口
@@ -286,6 +291,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - MCP：`MCP_SERVER_NOT_FOUND` `MCP_SERVER_ALREADY_EXISTS` `MCP_SERVER_INVALID_STATE` `MCP_SERVER_UNHEALTHY` `MCP_TOOL_NOT_FOUND` `MCP_TOOL_INVOCATION_FAILED` `MCP_INVALID_CONFIG` `MCP_CREDENTIAL_NOT_FOUND` `MCP_TRANSPORT_FAILED` `MCP_PROTOCOL_FAILED` `MCP_TOOL_REPORTED_ERROR`
 - 幂等：`IDEMPOTENCY_KEY_REUSED`
 - Provider：`PROVIDER_NOT_FOUND` `PROVIDER_DRIVER_NOT_FOUND` `PROVIDER_INVALID_CONFIG` `MODEL_NOT_CONFIGURED` `STREAM_INTERRUPTED`
+- Trace：`LOOP_NOT_FOUND`
 - 系统：`INTERNAL_ERROR` `RBAC_PERMISSION_LOAD_FAILED` `KAFKA_PUBLISH_FAILED`
 
 ### SSE 调试协议
@@ -307,6 +313,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 预置权限：
 
 - `run:create` `run:read` `run:replay`
+- `loop:read`
 - `user:read_self` `user:update_self` `user:manage`
 - `chat:use`
 - `agent:create` `agent:read` `agent:update` `agent:activate` `agent:manage`

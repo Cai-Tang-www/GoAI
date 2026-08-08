@@ -422,6 +422,24 @@ type RunDetail struct {
 	DelegationGroups []RunDelegationGroupState `json:"delegation_groups,omitempty"`
 }
 
+// LoopDetail 是管理面查询一个 Loop 时返回的执行记录和评估结果。
+type LoopDetail struct {
+	models.LoopRecord
+	Evaluations []models.LoopEvaluation `json:"evaluations"`
+}
+
+// RunTraceSnapshot 是一个 Run 及其可追踪协作后代的只读观测快照。
+type RunTraceSnapshot struct {
+	RootRun          models.Run               `json:"root_run"`
+	Runs             []models.Run             `json:"runs"`
+	Steps            []models.RunStep         `json:"steps"`
+	Loops            []models.LoopRecord      `json:"loops"`
+	Delegations      []models.Delegation      `json:"delegations"`
+	DelegationGroups []models.DelegationGroup `json:"delegation_groups"`
+	Messages         []models.Message         `json:"messages"`
+	Evaluations      []models.LoopEvaluation  `json:"evaluations"`
+}
+
 // ValidateCreateRunRequest 校验 Run 创建请求的关键字段，避免非法输入进入执行主链路。
 func ValidateCreateRunRequest(req CreateRunRequest) error {
 	agentCode := strings.TrimSpace(req.AgentCode)
@@ -1134,6 +1152,197 @@ func (s *RunService) GetRunDetailByRunID(ctx context.Context, userID uint64, isA
 		LeaseExpiresAt:   delegation.ResumeLeaseExpiresAt,
 	}
 	return detail, nil
+}
+
+// GetRunLoops 返回当前用户可访问 Run 的 Loop 列表，按执行创建顺序稳定排序。
+func (s *RunService) GetRunLoops(ctx context.Context, userID uint64, isAdmin bool, runID string) ([]models.LoopRecord, error) {
+	run, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
+	if err != nil {
+		return nil, err
+	}
+	loops := make([]models.LoopRecord, 0)
+	if err := s.database.WithContext(ctx).
+		Where("run_id = ?", run.RunID).
+		Order("created_at ASC").Order("id ASC").Find(&loops).Error; err != nil {
+		return nil, fmt.Errorf("loading run loops: %w", err)
+	}
+	return loops, nil
+}
+
+// GetLoopDetail 返回单个 Loop 及其评估结果，并沿关联 Run 校验 owner/admin 权限。
+func (s *RunService) GetLoopDetail(ctx context.Context, userID uint64, isAdmin bool, loopID string) (*LoopDetail, error) {
+	loop, err := s.loadAuthorizedLoop(ctx, userID, isAdmin, loopID)
+	if err != nil {
+		return nil, err
+	}
+	evaluations, err := s.loadLoopEvaluations(ctx, []string{loop.LoopID})
+	if err != nil {
+		return nil, err
+	}
+	return &LoopDetail{LoopRecord: *loop, Evaluations: evaluations}, nil
+}
+
+// GetLoopEvaluations 返回单个 Loop 的异步评估记录，并沿关联 Run 校验 owner/admin 权限。
+func (s *RunService) GetLoopEvaluations(ctx context.Context, userID uint64, isAdmin bool, loopID string) ([]models.LoopEvaluation, error) {
+	loop, err := s.loadAuthorizedLoop(ctx, userID, isAdmin, loopID)
+	if err != nil {
+		return nil, err
+	}
+	return s.loadLoopEvaluations(ctx, []string{loop.LoopID})
+}
+
+// GetRunTrace 组装当前 Run 及其可访问 A2A 子 Run 的完整只读追踪快照。
+func (s *RunService) GetRunTrace(ctx context.Context, userID uint64, isAdmin bool, runID string) (*RunTraceSnapshot, error) {
+	root, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
+	if err != nil {
+		return nil, err
+	}
+	runIDs, delegations, err := s.loadTraceRuns(ctx, root, userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot := &RunTraceSnapshot{
+		RootRun:          *root,
+		Runs:             make([]models.Run, 0),
+		Steps:            make([]models.RunStep, 0),
+		Loops:            make([]models.LoopRecord, 0),
+		Delegations:      delegations,
+		DelegationGroups: make([]models.DelegationGroup, 0),
+		Messages:         make([]models.Message, 0),
+		Evaluations:      make([]models.LoopEvaluation, 0),
+	}
+	if err := s.database.WithContext(ctx).Where("run_id IN ?", runIDs).Order("id ASC").Find(&snapshot.Runs).Error; err != nil {
+		return nil, fmt.Errorf("loading trace runs: %w", err)
+	}
+	if err := s.database.WithContext(ctx).Where("run_id IN ?", runIDs).
+		Order("run_id ASC").Order("created_at ASC").Order("attempt ASC").Order("id ASC").Find(&snapshot.Steps).Error; err != nil {
+		return nil, fmt.Errorf("loading trace steps: %w", err)
+	}
+	if err := s.database.WithContext(ctx).Where("run_id IN ?", runIDs).
+		Order("run_id ASC").Order("created_at ASC").Order("id ASC").Find(&snapshot.Loops).Error; err != nil {
+		return nil, fmt.Errorf("loading trace loops: %w", err)
+	}
+	if len(runIDs) > 0 {
+		delegationIDs := make([]string, 0, len(delegations))
+		for _, delegation := range delegations {
+			delegationIDs = append(delegationIDs, delegation.DelegationID)
+		}
+		messageQuery := s.database.WithContext(ctx).Where("run_id IN ?", runIDs)
+		if len(delegationIDs) > 0 {
+			messageQuery = s.database.WithContext(ctx).Where("run_id IN ? OR delegation_id IN ?", runIDs, delegationIDs)
+		}
+		if err := messageQuery.Order("created_at ASC").Order("id ASC").Find(&snapshot.Messages).Error; err != nil {
+			return nil, fmt.Errorf("loading trace messages: %w", err)
+		}
+	}
+	if err := s.database.WithContext(ctx).Where("parent_run_id IN ?", runIDs).
+		Order("id ASC").Find(&snapshot.DelegationGroups).Error; err != nil {
+		return nil, fmt.Errorf("loading trace delegation groups: %w", err)
+	}
+	loopIDs := make([]string, 0, len(snapshot.Loops))
+	for _, loop := range snapshot.Loops {
+		loopIDs = append(loopIDs, loop.LoopID)
+	}
+	snapshot.Evaluations, err = s.loadLoopEvaluations(ctx, loopIDs)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func (s *RunService) loadAuthorizedLoop(ctx context.Context, userID uint64, isAdmin bool, loopID string) (*models.LoopRecord, error) {
+	loopID = strings.TrimSpace(loopID)
+	if loopID == "" {
+		return nil, errLoopNotFound
+	}
+	var loop models.LoopRecord
+	if err := s.database.WithContext(ctx).Where("loop_id = ?", loopID).First(&loop).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errLoopNotFound
+		}
+		return nil, fmt.Errorf("loading loop: %w", err)
+	}
+	var run models.Run
+	if err := s.database.WithContext(ctx).Where("run_id = ?", loop.RunID).First(&run).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errLoopNotFound
+		}
+		return nil, fmt.Errorf("loading loop run: %w", err)
+	}
+	if run.UserID != userID && !isAdmin {
+		return nil, errRunForbidden
+	}
+	return &loop, nil
+}
+
+func (s *RunService) loadLoopEvaluations(ctx context.Context, loopIDs []string) ([]models.LoopEvaluation, error) {
+	evaluations := make([]models.LoopEvaluation, 0)
+	if len(loopIDs) == 0 {
+		return evaluations, nil
+	}
+	if err := s.database.WithContext(ctx).Where("loop_id IN ?", loopIDs).
+		Order("loop_id ASC").Order("created_at ASC").Order("id ASC").Find(&evaluations).Error; err != nil {
+		return nil, fmt.Errorf("loading loop evaluations: %w", err)
+	}
+	return evaluations, nil
+}
+
+func (s *RunService) loadTraceRuns(ctx context.Context, root *models.Run, userID uint64, isAdmin bool) ([]string, []models.Delegation, error) {
+	if root == nil {
+		return nil, nil, errRunNotFound
+	}
+	runIDs := []string{root.RunID}
+	seenRuns := map[string]struct{}{root.RunID: {}}
+	seenDelegations := make(map[string]struct{})
+	frontier := []string{root.RunID}
+	delegations := make([]models.Delegation, 0)
+	for len(frontier) > 0 {
+		var candidates []models.Delegation
+		if err := s.database.WithContext(ctx).Where("parent_run_id IN ?", frontier).Order("id ASC").Find(&candidates).Error; err != nil {
+			return nil, nil, fmt.Errorf("loading trace delegations: %w", err)
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		childIDs := make([]string, 0, len(candidates))
+		for _, delegation := range candidates {
+			if _, seen := seenDelegations[delegation.DelegationID]; seen {
+				continue
+			}
+			seenDelegations[delegation.DelegationID] = struct{}{}
+			childIDs = append(childIDs, delegation.ChildRunID)
+		}
+		if len(childIDs) == 0 {
+			break
+		}
+		var children []models.Run
+		childQuery := s.database.WithContext(ctx).Where("run_id IN ?", childIDs)
+		if !isAdmin {
+			childQuery = childQuery.Where("user_id = ?", userID)
+		}
+		if err := childQuery.Order("id ASC").Find(&children).Error; err != nil {
+			return nil, nil, fmt.Errorf("loading trace child runs: %w", err)
+		}
+		allowedChildren := make(map[string]struct{}, len(children))
+		for _, child := range children {
+			allowedChildren[child.RunID] = struct{}{}
+		}
+		frontier = frontier[:0]
+		for _, delegation := range candidates {
+			if _, allowed := allowedChildren[delegation.ChildRunID]; !allowed {
+				continue
+			}
+			delegations = append(delegations, delegation)
+			if _, seen := seenRuns[delegation.ChildRunID]; seen {
+				continue
+			}
+			seenRuns[delegation.ChildRunID] = struct{}{}
+			runIDs = append(runIDs, delegation.ChildRunID)
+			frontier = append(frontier, delegation.ChildRunID)
+		}
+	}
+	return runIDs, delegations, nil
 }
 
 func (s *RunService) loadRunDelegationGroups(ctx context.Context, runID string) ([]RunDelegationGroupState, error) {

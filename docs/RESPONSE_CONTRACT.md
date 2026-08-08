@@ -69,6 +69,7 @@ Content-Type: application/json
 | `USER_NOT_FOUND` | 404 | User does not exist |
 | `USER_ALREADY_EXISTS` | 409 | Username or email is already registered |
 | `RUN_NOT_FOUND` | 404 | Run does not exist or is not accessible |
+| `LOOP_NOT_FOUND` | 404 | Loop does not exist or its associated Run does not exist |
 | `AGENT_NOT_FOUND` | 404 | Agent does not exist |
 | `AGENT_ALREADY_EXISTS` | 409 | Agent code is already registered |
 | `AGENT_INVALID_STATE` | 409 | Agent or Endpoint changed during the requested state transition |
