@@ -20,15 +20,23 @@ import (
 )
 
 type fakeAGUIRuntime struct {
-	startCommand services.StartRunCommand
-	startResult  *services.StartRunResult
-	startErr     error
-	snapshotFunc func(context.Context, uint64, string) (*services.RunSnapshot, error)
+	startCommand  services.StartRunCommand
+	startResult   *services.StartRunResult
+	startErr      error
+	resumeCommand services.ResumeRunCommand
+	resumeResult  *services.StartRunResult
+	resumeErr     error
+	snapshotFunc  func(context.Context, uint64, string) (*services.RunSnapshot, error)
 }
 
 func (f *fakeAGUIRuntime) StartRun(_ context.Context, command services.StartRunCommand) (*services.StartRunResult, error) {
 	f.startCommand = command
 	return f.startResult, f.startErr
+}
+
+func (f *fakeAGUIRuntime) ResumeRun(_ context.Context, command services.ResumeRunCommand) (*services.StartRunResult, error) {
+	f.resumeCommand = command
+	return f.resumeResult, f.resumeErr
 }
 
 func (f *fakeAGUIRuntime) Snapshot(ctx context.Context, ownerUserID uint64, runID string) (*services.RunSnapshot, error) {
@@ -536,7 +544,7 @@ func TestBuildAGUIStartRunCommandRejectsUnsupportedContent(t *testing.T) {
 				ParentRunID: stringPointer("parent-run-1"),
 				Messages:    []aguitypes.Message{{ID: "message-1", Role: aguitypes.RoleUser, Content: "hello"}},
 			},
-			wantErr: "parentRunId branching is not supported in V1",
+			wantErr: "",
 		},
 		{
 			name: "resume",
@@ -550,6 +558,12 @@ func TestBuildAGUIStartRunCommandRejectsUnsupportedContent(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := buildAGUIStartRunCommand(42, "planner", test.input)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error %v", err)
+				}
+				return
+			}
 			if err == nil || err.Error() != test.wantErr {
 				t.Fatalf("unexpected error %v want=%q", err, test.wantErr)
 			}
@@ -576,6 +590,124 @@ func TestBuildAGUIStartRunCommandAllowsEmptyAdvancedFields(t *testing.T) {
 		t.Fatalf("unsupported fields leaked into runtime input: %s", command.Input)
 	}
 }
+
+func TestBuildAGUIStartRunCommandMapsParentRunID(t *testing.T) {
+	parentID := "parent-run-1"
+	command, err := buildAGUIStartRunCommand(42, "planner", aguitypes.RunAgentInput{
+		ParentRunID: &parentID,
+		Messages:    []aguitypes.Message{{ID: "message-1", Role: aguitypes.RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("build parent lineage command failed: %v", err)
+	}
+	if command.ParentRunID != parentID || command.TriggerType != "agui" {
+		t.Fatalf("unexpected parent lineage command: %+v", command)
+	}
+}
+
+func TestAGUIResumeCallsRuntimeBeforeOpeningStream(t *testing.T) {
+	runtime := &fakeAGUIRuntime{
+		resumeResult: &services.StartRunResult{
+			Thread: &models.Thread{ThreadID: "thread-1"},
+			Run:    &models.Run{RunID: "run-1", UserID: 42, ThreadID: "thread-1", Status: models.RunStatusSuccess},
+		},
+		snapshotFunc: func(context.Context, uint64, string) (*services.RunSnapshot, error) {
+			return &services.RunSnapshot{Run: models.Run{RunID: "run-1", ThreadID: "thread-1", Status: models.RunStatusSuccess}}, nil
+		},
+	}
+	handler, err := NewAGUIHandler(runtime)
+	if err != nil {
+		t.Fatalf("create AG-UI handler failed: %v", err)
+	}
+	router := newAGUITestRouter(handler, true)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/planner/agui", strings.NewReader(`{"runId":"run-1","resume":[{"interruptId":"approval","status":"resolved","payload":{"approved":true}}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d body=%s", response.Code, response.Body.String())
+	}
+	if runtime.resumeCommand.RunID != "run-1" || runtime.resumeCommand.AgentCode != "planner" || runtime.resumeCommand.OwnerUserID != 42 || len(runtime.resumeCommand.Interrupts) != 1 {
+		t.Fatalf("unexpected resume command: %+v", runtime.resumeCommand)
+	}
+	if runtime.resumeCommand.Interrupts[0].PayloadJSON != `{"approved":true}` {
+		t.Fatalf("unexpected resume payload: %s", runtime.resumeCommand.Interrupts[0].PayloadJSON)
+	}
+	events := decodeAGUIEvents(t, response.Body.String())
+	if len(events) != 2 || events[0]["type"] != "RUN_STARTED" || events[1]["type"] != "RUN_FINISHED" {
+		t.Fatalf("resume should stream the completed run lifecycle: %v", events)
+	}
+}
+
+func TestAGUIInterruptSnapshotEmitsOfficialOutcome(t *testing.T) {
+	runtime := &fakeAGUIRuntime{
+		startResult: &services.StartRunResult{
+			Thread: &models.Thread{ThreadID: "thread-1"},
+			Run:    &models.Run{RunID: "run-1", UserID: 42, ThreadID: "thread-1"},
+		},
+		snapshotFunc: func(context.Context, uint64, string) (*services.RunSnapshot, error) {
+			return &services.RunSnapshot{
+				Run:   models.Run{RunID: "run-1", ThreadID: "thread-1", Status: models.RunStatusWaitingInput},
+				Steps: []models.RunStep{{ID: 1, StepKey: "approval", Status: models.RunStepStatusWaitingInput}},
+				Interrupts: []models.RunInterrupt{{
+					RunID: "run-1", InterruptID: "approval", StepKey: "approval", Reason: "approval_required",
+					Message: "Approve?", ResponseSchemaJSON: `{"type":"object"}`, MetadataJSON: `{"source":"test"}`,
+					Status: models.RunInterruptStatusPending,
+				}},
+			}, nil
+		},
+	}
+	handler, err := NewAGUIHandler(runtime)
+	if err != nil {
+		t.Fatalf("create AG-UI handler failed: %v", err)
+	}
+	router := newAGUITestRouter(handler, true)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/planner/agui", strings.NewReader(`{"messages":[{"id":"input-1","role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+
+	events := decodeAGUIEvents(t, response.Body.String())
+	if len(events) != 4 || events[0]["type"] != "RUN_STARTED" || events[1]["type"] != "STEP_STARTED" || events[2]["type"] != "STEP_FINISHED" || events[3]["type"] != "RUN_FINISHED" {
+		t.Fatalf("unexpected interrupt events: %v", events)
+	}
+	outcome, ok := events[3]["outcome"].(map[string]any)
+	if !ok || outcome["type"] != "interrupt" {
+		t.Fatalf("expected interrupt outcome, got %v", events[3]["outcome"])
+	}
+	interrupts, ok := outcome["interrupts"].([]any)
+	if !ok || len(interrupts) != 1 {
+		t.Fatalf("expected one interrupt in outcome, got %v", outcome["interrupts"])
+	}
+}
+
+func TestAGUIResumeValidationFailsBeforeStream(t *testing.T) {
+	runtime := &fakeAGUIRuntime{}
+	handler, err := NewAGUIHandler(runtime)
+	if err != nil {
+		t.Fatalf("create AG-UI handler failed: %v", err)
+	}
+	router := newAGUITestRouter(handler, true)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/planner/agui", strings.NewReader(`{"resume":[{"interruptId":"approval","status":"resolved"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, req)
+
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("invalid resume must fail before SSE: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	var envelope struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode validation envelope failed: %v", err)
+	}
+	if envelope.Code != middlewares.CodeValidationFailed {
+		t.Fatalf("unexpected validation code %q", envelope.Code)
+	}
+}
+
 func stringPointer(value string) *string {
 	return &value
 }
