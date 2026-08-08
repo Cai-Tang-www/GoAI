@@ -106,12 +106,12 @@ func (s *AgentRegistryService) validatePublishState(ctx context.Context, databas
 		if err := validateCapabilityCommand(ctx, database, agent, command); err != nil {
 			return fmt.Errorf("%w: capability %s is invalid: %v", errAgentPublishValidation, capability.CapabilityCode, err)
 		}
-		if capability.CapabilityType == models.AgentCapabilityTypeWorkflow {
+		if capability.CapabilityType == models.AgentCapabilityTypeWorkflow || capability.CapabilityType == models.AgentCapabilityTypeRemote {
 			executableCapabilities++
 		}
 	}
 	if executableCapabilities == 0 {
-		return fmt.Errorf("%w: agent requires at least one active workflow-backed capability", errAgentPublishValidation)
+		return fmt.Errorf("%w: agent requires at least one active executable capability", errAgentPublishValidation)
 	}
 	if err := validatePublishedAgentMCPReferences(ctx, database, agent, capabilities); err != nil {
 		return fmt.Errorf("%w: %v", errAgentPublishValidation, err)

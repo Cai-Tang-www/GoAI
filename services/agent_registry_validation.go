@@ -91,7 +91,7 @@ func validateCapabilityCommand(ctx context.Context, database *gorm.DB, agent mod
 		if command.Version != strconv.Itoa(workflow.Version) {
 			return fmt.Errorf("%w: capability version must match workflow version", errAgentRegistryValidation)
 		}
-	case models.AgentCapabilityTypeTool, models.AgentCapabilityTypeCustom:
+	case models.AgentCapabilityTypeRemote, models.AgentCapabilityTypeTool, models.AgentCapabilityTypeCustom:
 		if command.WorkflowID != nil {
 			return fmt.Errorf("%w: non-workflow capability cannot reference workflow_id", errAgentRegistryValidation)
 		}

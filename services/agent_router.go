@@ -87,7 +87,7 @@ func (r *RegistryAgentRouter) Route(ctx context.Context, request AgentRouteReque
 	}
 
 	matchingCapability := false
-	matchingWorkflow := false
+	matchingExecutable := false
 	for _, agent := range agents {
 		var capability models.AgentCapability
 		if err := r.database.WithContext(ctx).
@@ -99,23 +99,25 @@ func (r *RegistryAgentRouter) Route(ctx context.Context, request AgentRouteReque
 			return nil, fmt.Errorf("loading route capability: %w", err)
 		}
 		matchingCapability = true
-		if capability.CapabilityType != models.AgentCapabilityTypeWorkflow || capability.WorkflowID == nil || *capability.WorkflowID == 0 {
-			continue
-		}
-
 		var workflow models.Workflow
-		if err := r.database.WithContext(ctx).
-			Where("id = ? AND agent_id = ? AND is_active = ?", *capability.WorkflowID, agent.ID, true).
-			First(&workflow).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+		if capability.CapabilityType == models.AgentCapabilityTypeRemote {
+			matchingExecutable = true
+		} else if capability.CapabilityType != models.AgentCapabilityTypeWorkflow || capability.WorkflowID == nil || *capability.WorkflowID == 0 {
+			continue
+		} else {
+			if err := r.database.WithContext(ctx).
+				Where("id = ? AND agent_id = ? AND is_active = ?", *capability.WorkflowID, agent.ID, true).
+				First(&workflow).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return nil, fmt.Errorf("loading route workflow: %w", err)
+			}
+			if capability.Version != "" && capability.Version != strconv.Itoa(workflow.Version) {
 				continue
 			}
-			return nil, fmt.Errorf("loading route workflow: %w", err)
+			matchingExecutable = true
 		}
-		if capability.Version != "" && capability.Version != strconv.Itoa(workflow.Version) {
-			continue
-		}
-		matchingWorkflow = true
 
 		var endpoint models.AgentEndpoint
 		if err := r.database.WithContext(ctx).
@@ -135,10 +137,10 @@ func (r *RegistryAgentRouter) Route(ctx context.Context, request AgentRouteReque
 		}, nil
 	}
 
-	if matchingWorkflow && preferredCode != "" {
+	if matchingExecutable && preferredCode != "" {
 		return nil, fmt.Errorf("%w: preferred agent %s has no healthy A2A endpoint", errAgentRouteUnavailable, preferredCode)
 	}
-	if matchingWorkflow {
+	if matchingExecutable {
 		return nil, fmt.Errorf("%w: capability %s has no healthy A2A endpoint", errAgentRouteUnavailable, capabilityCode)
 	}
 	if matchingCapability {

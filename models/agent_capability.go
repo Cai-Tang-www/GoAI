@@ -4,8 +4,10 @@ import "time"
 
 const (
 	AgentCapabilityTypeWorkflow = "workflow"
-	AgentCapabilityTypeTool     = "tool"
-	AgentCapabilityTypeCustom   = "custom"
+	// AgentCapabilityTypeRemote 表示由外部 A2A Agent 执行、由 Registry 受控发现的能力。
+	AgentCapabilityTypeRemote = "remote"
+	AgentCapabilityTypeTool   = "tool"
+	AgentCapabilityTypeCustom = "custom"
 )
 
 const (
