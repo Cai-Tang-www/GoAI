@@ -6,6 +6,7 @@ type WorkflowDefinition = workflow.Definition
 type WorkflowNode = workflow.Node
 type WorkflowEdge = workflow.Edge
 type AgentNodeConfig = workflow.AgentNodeConfig
+type ToolNodeConfig = workflow.ToolNodeConfig
 type AgentGroupNodeConfig = workflow.AgentGroupNodeConfig
 type AgentGroupMember = workflow.AgentGroupMember
 
@@ -17,6 +18,11 @@ func ParseAndValidateWorkflowDefinition(raw string) (*WorkflowDefinition, error)
 // ParseAgentNodeConfig 解析 Workflow agent 节点配置。
 func ParseAgentNodeConfig(node WorkflowNode) (*AgentNodeConfig, error) {
 	return workflow.ParseAgentNodeConfig(node)
+}
+
+// ParseToolNodeConfig 解析 Workflow tool 节点配置。
+func ParseToolNodeConfig(node WorkflowNode) (*ToolNodeConfig, error) {
+	return workflow.ParseToolNodeConfig(node)
 }
 
 // ParseAgentGroupNodeConfig 解析 Workflow agent_group 节点配置。

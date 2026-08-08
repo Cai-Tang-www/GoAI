@@ -35,6 +35,64 @@ type AgentNodeConfig struct {
 	TimeoutMS   int      `json:"timeout_ms,omitempty"`
 }
 
+// ToolNodeConfig 定义 Workflow 中 tool 节点的 MCP 稳定引用与输入来源。
+type ToolNodeConfig struct {
+	ServerCode string         `json:"server_code"`
+	ToolName   string         `json:"tool_name"`
+	Input      map[string]any `json:"input,omitempty"`
+	InputFrom  []string       `json:"input_from,omitempty"`
+	TimeoutMS  int            `json:"timeout_ms,omitempty"`
+}
+
+// ParseToolNodeConfig 解析并严格校验 MCP tool 节点配置。
+func ParseToolNodeConfig(node Node) (*ToolNodeConfig, error) {
+	if strings.TrimSpace(node.Type) != "tool" {
+		return nil, fmt.Errorf("node %s is not a tool node", node.Key)
+	}
+	if len(node.Config) == 0 {
+		return nil, fmt.Errorf("tool node %s config is required", node.Key)
+	}
+	var config ToolNodeConfig
+	decoder := json.NewDecoder(strings.NewReader(string(node.Config)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("tool node %s config is invalid: %w", node.Key, err)
+	}
+	config.ServerCode = strings.TrimSpace(config.ServerCode)
+	config.ToolName = strings.TrimSpace(config.ToolName)
+	if config.ServerCode == "" {
+		return nil, fmt.Errorf("tool node %s server_code is required", node.Key)
+	}
+	if config.ToolName == "" {
+		return nil, fmt.Errorf("tool node %s tool_name is required", node.Key)
+	}
+	if config.TimeoutMS < 0 || config.TimeoutMS > 300000 {
+		return nil, fmt.Errorf("tool node %s timeout_ms must be between 0 and 300000", node.Key)
+	}
+	if config.Input == nil && len(config.InputFrom) == 0 {
+		return nil, fmt.Errorf("tool node %s requires input or input_from", node.Key)
+	}
+	if config.Input != nil && len(config.InputFrom) > 0 {
+		return nil, fmt.Errorf("tool node %s input and input_from cannot be used together", node.Key)
+	}
+	seen := make(map[string]struct{}, len(config.InputFrom))
+	for index, reference := range config.InputFrom {
+		reference = strings.TrimSpace(reference)
+		config.InputFrom[index] = reference
+		if reference == "" {
+			return nil, fmt.Errorf("tool node %s input_from contains an empty step", node.Key)
+		}
+		if reference == node.Key {
+			return nil, fmt.Errorf("tool node %s input_from cannot reference itself", node.Key)
+		}
+		if _, exists := seen[reference]; exists {
+			return nil, fmt.Errorf("tool node %s input_from contains duplicate step: %s", node.Key, reference)
+		}
+		seen[reference] = struct{}{}
+	}
+	return &config, nil
+}
+
 // AgentGroupMember 定义 agent_group 节点中的一个稳定委派成员。
 type AgentGroupMember struct {
 	Key         string `json:"key"`
@@ -208,6 +266,12 @@ func Validate(def *Definition) error {
 			inputFrom = config.InputFrom
 		case "agent_group":
 			config, err := ParseAgentGroupNodeConfig(node)
+			if err != nil {
+				return err
+			}
+			inputFrom = config.InputFrom
+		case "tool":
+			config, err := ParseToolNodeConfig(node)
 			if err != nil {
 				return err
 			}
