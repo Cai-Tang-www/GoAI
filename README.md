@@ -131,8 +131,9 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
 - 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Task 查询/取消、Push Notification callback、Child Run 与结果 Artifact 回流
 - Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、带 PushConfig 的 `message:send`、Task cancel 和 accepted 结果收敛
+- Workflow `agent_tool` 节点：将 Registry Capability 包装为 Eino `InvokableTool`，但实际调用仍经过 A2A HTTP(S) 和目标 Agent Gateway
 - 外部 A2A Agent 互操作：Registry `remote` Capability、标准 Agent Card/Message 入站降级、独立 external Agent conformance 测试
-- Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` 节点统一交给 A2A Client 委派
+- Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` / `agent_tool` 节点统一交给 A2A Client 委派
 - `agent_group` fan-out/fan-in：显式把一个 Workflow 节点分派给多个 Agent，每个成员都创建独立 Delegation、Child Run、A2A Task 和 Message
 - 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路
 - A2A 调用使用稳定的 TaskID/MessageID/DelegationID，节点重试不会重复创建协议任务，并透传 `traceId` 关联父子 Run
@@ -245,7 +246,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 
 来源 Agent 可以通过 A2A `CancelTask` 取消自己发起的 Child Run。目标 Runtime 会校验来源、目标和 Task 归属，在事务内将 Child Run 推进为 `cancelled`、关闭当前活动 RunStep，并通过已有认证 callback 回送取消终态；重复取消是幂等操作。取消不通过进程内 Service 直调，也不使用 Kafka 冒充 A2A 控制消息。
 
-当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 节点先由 Registry Router 选出满足能力、Workflow 版本和健康 Endpoint 门禁的 Worker，再通过 Agent Card discovery 和官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。`agent_group` 是显式的多 Agent 并行边界：每个成员都通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum` 聚合及失败收敛；group coordinator 负责一次性恢复 Parent Run。Kafka 只承担内部 `run_execute/run_resume` 调度与恢复，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。Parent Workflow 仍保持串行，只有 `agent_group` 节点内部允许 fan-out/fan-in。
+当前实现已经覆盖 callback 驱动的 A2A 异步闭环：Workflow `agent` 和 `agent_tool` 节点先由 Registry Router 选出满足能力、Workflow 版本和健康 Endpoint 门禁的 Worker，再通过 Agent Card discovery 和官方 A2A HTTP+JSON Client 携带 PushConfig 发起 `message:send`。`agent_tool` 只是 Eino `InvokableTool` 适配器，不能绕过 A2A。目标返回 accepted 后，Parent Run 与当前 RunStep 进入 `waiting_external`，Worker 立即释放；目标 Child Run 独立执行并在终态发送带机器身份签名和 notification token 的 callback。源 Runtime 幂等收敛 Result Message，发布 Kafka `run_resume`，Resume Worker 从 Delegation 保存的后继节点游标继续执行 Graph。`agent_group` 是显式的多 Agent 并行边界：每个成员都通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum` 聚合及失败收敛；group coordinator 负责一次性恢复 Parent Run。Kafka 只承担内部 `run_execute/run_resume` 调度与恢复，不承载 Agent 委派语义；本地和远程调用都不能绕过 A2A HTTP(S)。Parent Workflow 仍保持串行，只有 `agent_group` 节点内部允许 fan-out/fan-in。
 
 > 安全边界：A2A 业务路由默认要求 `goai_hmac_sha256` 机器身份签名。数据库仅保存 `credential_ref`，真实 secret 由 `A2A_AUTH_CREDENTIALS_JSON` 在部署侧解析；Endpoint `config_json` 只能保存非敏感元数据；远程 Endpoint 仍必须使用 HTTPS。
 

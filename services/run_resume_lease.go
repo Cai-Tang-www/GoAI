@@ -293,7 +293,7 @@ func (s *RunService) resumeNodeCheckpoint(ctx context.Context, run *models.Run, 
 		return step.OutputJSON, true, nil
 	case models.RunStepStatusWaitingExternal:
 		nodeType := strings.ToLower(strings.TrimSpace(node.Type))
-		if nodeType != "agent" && nodeType != "agent_group" {
+		if nodeType != "agent" && nodeType != "agent_tool" && nodeType != "agent_group" {
 			return "", false, fmt.Errorf("resume checkpoint step %s waits externally but is not an agent node", step.StepKey)
 		}
 		delegation, err := s.loadSuspendedNodeCoordinator(ctx, run.RunID, node.Key, nodeType)
