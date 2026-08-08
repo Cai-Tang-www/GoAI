@@ -90,6 +90,8 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - Agent 创建后默认 `inactive`；V1 发布前必须至少有一个由当前 active Workflow 支撑且版本一致的 active Capability，以及一个通过 Agent Card 健康检查的 active A2A Endpoint
 - 本地 Endpoint 只允许 loopback HTTP，远程 Endpoint 必须使用 HTTPS
 - Endpoint 更新后会重置为 `inactive`，需要重新健康检查
+- Workflow 定义通过管理 API 按 Agent 版本化维护；创建默认 `inactive`，active 版本不可原地修改
+- Workflow 可以多个版本同时 active，Capability 切换完成后再停用旧版本，支持滚动发布
 - member 只能管理自己的 Agent；拥有 `agent:manage` 的管理员可以跨 owner 管理
 - API 只返回 `credential_ref`，真实 HMAC secret 只由配置驱动的 CredentialResolver 解析；Endpoint `config_json` 仅允许非敏感传输元数据，密钥、Token、密码等字段会被拒绝
 
@@ -124,6 +126,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - Workflow DSL 基础校验与拓扑排序
 - Provider Registry 与 OpenAI-compatible 调试通道
 - Agent Registry 管理 API：Agent / Capability / Endpoint 注册、ownership、健康检查、发布校验与发现
+- Workflow 管理 API：定义校验、规范化 checksum、版本查询、激活/停用和 Capability 引用审计
 - MCP Tool Runtime：MCP Server owner-scoped Registry、官方 SDK 健康检查、Tool discovery snapshot 与 Eino `tool` 节点调用
 - HTTP / SSE / Kafka / Worker 优雅关闭
 - 服务治理：进程内限流、下游超时、按 target 熔断、快速失败和恢复观测（见 `docs/SERVICE_GOVERNANCE.md`）
@@ -271,6 +274,17 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `POST/GET/PUT`、停用、健康检查和 Tool discovery：`/api/mcp/servers/*`
 - `/api/users/*`：用户管理接口
 
+Workflow 管理接口：
+
+- `POST /api/agents/:agent_code/workflows`：创建 inactive Workflow 版本
+- `GET /api/agents/:agent_code/workflows`：按版本倒序查询 Workflow 及 Capability 引用
+- `GET /api/agents/:agent_code/workflows/:version`：查询指定版本
+- `PUT /api/agents/:agent_code/workflows/:version`：更新 inactive 版本定义
+- `POST /api/agents/:agent_code/workflows/:version/activate`：激活版本
+- `POST /api/agents/:agent_code/workflows/:version/deactivate`：停用版本
+
+Workflow 管理 API 只管理 Agent 的执行能力，不直接执行 Run，也不绕过 A2A Gateway。`agent`、`agent_tool` 和 `agent_group` 节点仍由 Runtime 通过 A2A HTTP(S) 委派给目标 Agent。
+
 ### 统一响应
 
 普通 JSON API 使用：
@@ -290,6 +304,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - 授权：`AUTH_FORBIDDEN`
 - 参数：`VALIDATION_FAILED` `INVALID_ID`
 - 资源：`USER_NOT_FOUND` `USER_ALREADY_EXISTS` `RUN_NOT_FOUND` `RUN_NOT_REPLAYABLE` `THREAD_NOT_FOUND` `THREAD_UNAVAILABLE`
+- Agent/Workflow：`AGENT_NOT_FOUND` `CAPABILITY_NOT_FOUND` `WORKFLOW_NOT_FOUND` `WORKFLOW_ALREADY_EXISTS` `WORKFLOW_INVALID_STATE`
 - MCP：`MCP_SERVER_NOT_FOUND` `MCP_SERVER_ALREADY_EXISTS` `MCP_SERVER_INVALID_STATE` `MCP_SERVER_UNHEALTHY` `MCP_TOOL_NOT_FOUND` `MCP_TOOL_INVOCATION_FAILED` `MCP_INVALID_CONFIG` `MCP_CREDENTIAL_NOT_FOUND` `MCP_TRANSPORT_FAILED` `MCP_PROTOCOL_FAILED` `MCP_TOOL_REPORTED_ERROR`
 - 幂等：`IDEMPOTENCY_KEY_REUSED`
 - Provider：`PROVIDER_NOT_FOUND` `PROVIDER_DRIVER_NOT_FOUND` `PROVIDER_INVALID_CONFIG` `MODEL_NOT_CONFIGURED` `STREAM_INTERRUPTED`
