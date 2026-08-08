@@ -430,6 +430,7 @@ func migrateE2ADB(t *testing.T, database *gorm.DB) {
 		&models.A2APushConfig{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.RunIdempotency{},
 	); err != nil {
 		t.Fatalf("migrate e2e database: %v", err)

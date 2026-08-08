@@ -45,6 +45,41 @@ type ToolNodeConfig struct {
 	TimeoutMS  int            `json:"timeout_ms,omitempty"`
 }
 
+// InterruptNodeConfig 定义一个需要用户输入后继续的 Workflow 暂停节点。
+type InterruptNodeConfig struct {
+	InterruptID    string         `json:"interrupt_id"`
+	Reason         string         `json:"reason"`
+	Message        string         `json:"message,omitempty"`
+	ResponseSchema map[string]any `json:"response_schema,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+}
+
+// ParseInterruptNodeConfig 解析并严格校验 interrupt 节点配置。
+func ParseInterruptNodeConfig(node Node) (*InterruptNodeConfig, error) {
+	if strings.TrimSpace(node.Type) != "interrupt" {
+		return nil, fmt.Errorf("node %s is not an interrupt node", node.Key)
+	}
+	if len(node.Config) == 0 {
+		return nil, fmt.Errorf("interrupt node %s config is required", node.Key)
+	}
+	var config InterruptNodeConfig
+	decoder := json.NewDecoder(strings.NewReader(string(node.Config)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("interrupt node %s config is invalid: %w", node.Key, err)
+	}
+	config.InterruptID = strings.TrimSpace(config.InterruptID)
+	config.Reason = strings.TrimSpace(config.Reason)
+	config.Message = strings.TrimSpace(config.Message)
+	if config.InterruptID == "" || len(config.InterruptID) > 128 {
+		return nil, fmt.Errorf("interrupt node %s interrupt_id is required and must be at most 128 characters", node.Key)
+	}
+	if config.Reason == "" || len(config.Reason) > 128 {
+		return nil, fmt.Errorf("interrupt node %s reason is required and must be at most 128 characters", node.Key)
+	}
+	return &config, nil
+}
+
 // ParseToolNodeConfig 解析并严格校验 MCP tool 节点配置。
 func ParseToolNodeConfig(node Node) (*ToolNodeConfig, error) {
 	if strings.TrimSpace(node.Type) != "tool" {
@@ -283,6 +318,10 @@ func Validate(def *Definition) error {
 				return err
 			}
 			inputFrom = config.InputFrom
+		case "interrupt":
+			if _, err := ParseInterruptNodeConfig(node); err != nil {
+				return err
+			}
 		default:
 			continue
 		}
@@ -291,6 +330,20 @@ func Validate(def *Definition) error {
 				return fmt.Errorf("%s node %s input_from node not found: %s", node.Type, node.Key, reference)
 			}
 		}
+	}
+	interruptIDs := make(map[string]string)
+	for _, node := range nodeSet {
+		if node.Type != "interrupt" {
+			continue
+		}
+		config, err := ParseInterruptNodeConfig(node)
+		if err != nil {
+			return err
+		}
+		if previous, exists := interruptIDs[config.InterruptID]; exists {
+			return fmt.Errorf("duplicate interrupt_id %s in nodes %s and %s", config.InterruptID, previous, node.Key)
+		}
+		interruptIDs[config.InterruptID] = node.Key
 	}
 
 	for _, e := range def.Edges {

@@ -51,6 +51,7 @@ func setupResumeLeaseFixture(t *testing.T, definitionJSON, resumeNodeKey string)
 		&models.Workflow{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.Delegation{},
 		&models.DelegationGroup{},
 		&models.Message{},

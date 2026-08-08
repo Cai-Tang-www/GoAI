@@ -28,7 +28,7 @@ func (p *recordingRunPublisher) PublishRunExecute(_ context.Context, runID strin
 func setupRunTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRunPublisher) {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}, &models.Message{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunInterrupt{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}, &models.Message{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	publisher := &recordingRunPublisher{}
@@ -1152,7 +1152,7 @@ func TestNewRunServiceRejectsMissingDependencies(t *testing.T) {
 func TestRunServiceInstancesKeepDatabaseAndPublisherIsolated(t *testing.T) {
 	openDatabase := func(suffix string) *gorm.DB {
 		gdb := openSQLiteTestDB(t, suffix)
-		if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}, &models.Message{}); err != nil {
+		if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Thread{}, &models.Run{}, &models.RunStep{}, &models.RunInterrupt{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}, &models.Message{}); err != nil {
 			t.Fatalf("auto migrate %s failed: %v", suffix, err)
 		}
 		return gdb
@@ -1526,6 +1526,7 @@ func setupRunLoopTestService(t *testing.T) (*gorm.DB, *RunService, *recordingRun
 		&models.Thread{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.RunIdempotency{},
 		&models.Delegation{},
 		&models.DelegationGroup{},

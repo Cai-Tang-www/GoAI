@@ -6,6 +6,7 @@ const (
 	RunStepStatusPending         = "pending"
 	RunStepStatusRunning         = "running"
 	RunStepStatusWaitingExternal = "waiting_external"
+	RunStepStatusWaitingInput    = "waiting_input"
 	RunStepStatusSuccess         = "success"
 	RunStepStatusFailed          = "failed"
 	RunStepStatusSkipped         = "skipped"

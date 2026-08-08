@@ -22,6 +22,7 @@ func setupRuntimeTestService(t *testing.T) (*gorm.DB, *RuntimeService, *RunServi
 		&models.Message{},
 		&models.Run{},
 		&models.RunStep{},
+		&models.RunInterrupt{},
 		&models.RunIdempotency{},
 		&models.Delegation{},
 		&models.DelegationGroup{},

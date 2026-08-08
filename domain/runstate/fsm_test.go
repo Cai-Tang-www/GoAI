@@ -98,3 +98,30 @@ func TestRunStepWaitingExternalTransitions(t *testing.T) {
 		})
 	}
 }
+
+func TestRunWaitingInputTransitions(t *testing.T) {
+	if !IsValidRunTransition(models.RunStatusRunning, models.RunStatusWaitingInput) {
+		t.Fatal("running should enter waiting_input")
+	}
+	if !IsValidRunTransition(models.RunStatusWaitingInput, models.RunStatusQueued) {
+		t.Fatal("waiting_input should resume to queued")
+	}
+	if !IsValidRunTransition(models.RunStatusWaitingInput, models.RunStatusCancelled) {
+		t.Fatal("waiting_input should be cancellable")
+	}
+	if IsValidRunTransition(models.RunStatusWaitingInput, models.RunStatusSuccess) {
+		t.Fatal("waiting_input must not jump directly to success")
+	}
+}
+
+func TestRunStepWaitingInputTransitions(t *testing.T) {
+	if !IsValidRunStepTransition(models.RunStepStatusRunning, models.RunStepStatusWaitingInput) {
+		t.Fatal("running step should enter waiting_input")
+	}
+	if !IsValidRunStepTransition(models.RunStepStatusWaitingInput, models.RunStepStatusSuccess) {
+		t.Fatal("waiting_input step should resolve")
+	}
+	if !IsValidRunStepTransition(models.RunStepStatusWaitingInput, models.RunStepStatusSkipped) {
+		t.Fatal("waiting_input step should be cancellable")
+	}
+}
