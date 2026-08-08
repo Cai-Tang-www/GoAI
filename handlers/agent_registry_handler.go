@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 
 	"GoAI/middlewares"
 	"GoAI/models"
@@ -198,6 +199,101 @@ func (h *AgentRegistryHandler) CheckEndpointHealth(c *gin.Context) {
 	}
 	view, err := h.service.CheckEndpointHealth(c.Request.Context(), actor, c.Param("agent_code"), c.Param("endpoint_code"))
 	respondRegistry(c, http.StatusOK, view, err)
+}
+
+// CreateWorkflow 创建目标 Agent 的 inactive Workflow 版本。
+func (h *AgentRegistryHandler) CreateWorkflow(c *gin.Context) {
+	var command services.CreateWorkflowCommand
+	if err := c.ShouldBindJSON(&command); err != nil {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid workflow payload", nil))
+		return
+	}
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	view, err := h.service.CreateWorkflow(c.Request.Context(), actor, c.Param("agent_code"), command)
+	respondRegistry(c, http.StatusCreated, view, err)
+}
+
+// ListWorkflows 返回目标 Agent 的全部 Workflow 版本。
+func (h *AgentRegistryHandler) ListWorkflows(c *gin.Context) {
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	views, err := h.service.ListWorkflows(c.Request.Context(), actor, c.Param("agent_code"))
+	respondRegistry(c, http.StatusOK, views, err)
+}
+
+// GetWorkflow 返回目标 Agent 的指定 Workflow 版本。
+func (h *AgentRegistryHandler) GetWorkflow(c *gin.Context) {
+	version, ok := parseWorkflowVersion(c)
+	if !ok {
+		return
+	}
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	view, err := h.service.GetWorkflow(c.Request.Context(), actor, c.Param("agent_code"), version)
+	respondRegistry(c, http.StatusOK, view, err)
+}
+
+// UpdateWorkflow 替换 inactive Workflow 的定义。
+func (h *AgentRegistryHandler) UpdateWorkflow(c *gin.Context) {
+	version, ok := parseWorkflowVersion(c)
+	if !ok {
+		return
+	}
+	var command services.UpdateWorkflowCommand
+	if err := c.ShouldBindJSON(&command); err != nil {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid workflow payload", nil))
+		return
+	}
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	view, err := h.service.UpdateWorkflow(c.Request.Context(), actor, c.Param("agent_code"), version, command)
+	respondRegistry(c, http.StatusOK, view, err)
+}
+
+// ActivateWorkflow 激活目标 Agent 的指定 Workflow 版本。
+func (h *AgentRegistryHandler) ActivateWorkflow(c *gin.Context) {
+	version, ok := parseWorkflowVersion(c)
+	if !ok {
+		return
+	}
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	view, err := h.service.ActivateWorkflow(c.Request.Context(), actor, c.Param("agent_code"), version)
+	respondRegistry(c, http.StatusOK, view, err)
+}
+
+// DeactivateWorkflow 停用目标 Agent 的指定 Workflow 版本。
+func (h *AgentRegistryHandler) DeactivateWorkflow(c *gin.Context) {
+	version, ok := parseWorkflowVersion(c)
+	if !ok {
+		return
+	}
+	actor, ok := registryActor(c)
+	if !ok {
+		return
+	}
+	view, err := h.service.DeactivateWorkflow(c.Request.Context(), actor, c.Param("agent_code"), version)
+	respondRegistry(c, http.StatusOK, view, err)
+}
+
+func parseWorkflowVersion(c *gin.Context) (int, bool) {
+	version, err := strconv.Atoi(c.Param("version"))
+	if err != nil || version <= 0 {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid workflow version", nil))
+		return 0, false
+	}
+	return version, true
 }
 
 func registryActor(c *gin.Context) (services.RegistryActor, bool) {

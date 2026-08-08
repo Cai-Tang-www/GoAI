@@ -139,6 +139,13 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/deactivate", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.DeactivateEndpoint)
 		apiGroup.POST("/agents/:agent_code/endpoints/:endpoint_code/health-check", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CheckEndpointHealth)
 
+		apiGroup.POST("/agents/:agent_code/workflows", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.CreateWorkflow)
+		apiGroup.GET("/agents/:agent_code/workflows", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.ListWorkflows)
+		apiGroup.GET("/agents/:agent_code/workflows/:version", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.GetWorkflow)
+		apiGroup.PUT("/agents/:agent_code/workflows/:version", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateWorkflow)
+		apiGroup.POST("/agents/:agent_code/workflows/:version/activate", middlewares.RequirePermission(models.PermissionAgentActivate), agentRegistryHandler.ActivateWorkflow)
+		apiGroup.POST("/agents/:agent_code/workflows/:version/deactivate", middlewares.RequirePermission(models.PermissionAgentActivate), agentRegistryHandler.DeactivateWorkflow)
+
 		apiGroup.POST("/mcp/servers", middlewares.RequirePermission(models.PermissionMCPCreate), mcpRegistryHandler.CreateServer)
 		apiGroup.GET("/mcp/servers", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.ListServers)
 		apiGroup.GET("/mcp/servers/:server_code", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.GetServer)
