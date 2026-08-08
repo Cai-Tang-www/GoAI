@@ -10,6 +10,7 @@ import (
 	"GoAI/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // SeedRBAC 在启动阶段执行 RBAC 角色、权限和映射的幂等补种。
@@ -40,6 +41,27 @@ func SeedRBAC(database *gorm.DB, cfg *config.Config) error {
 	}
 	if err := ensureBootstrapAdmin(database, cfg, roleIDs[models.RoleAdmin]); err != nil {
 		return err
+	}
+	return nil
+}
+
+// AssignMemberRole 为新用户补齐 member 角色；调用方可以在用户创建事务中使用它。
+func AssignMemberRole(database *gorm.DB, userID uint64) error {
+	if database == nil {
+		return fmt.Errorf("assigning member role: database is nil")
+	}
+	if userID == 0 {
+		return fmt.Errorf("assigning member role: user id is required")
+	}
+
+	var role models.Role
+	if err := database.Where("name = ?", models.RoleMember).First(&role).Error; err != nil {
+		return fmt.Errorf("loading member role: %w", err)
+	}
+
+	binding := models.UserRole{UserID: userID, RoleID: role.ID}
+	if err := database.Clauses(clause.OnConflict{DoNothing: true}).Create(&binding).Error; err != nil {
+		return fmt.Errorf("creating member role binding: %w", err)
 	}
 	return nil
 }
