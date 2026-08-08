@@ -30,6 +30,9 @@ type fakeDelegationRuntime struct {
 	acceptErr       error
 	snapshot        *services.DelegationSnapshot
 	snapshotErr     error
+	cancelErr       error
+	cancelCalls     int
+	cancelTaskID    string
 	acceptedCommand services.AcceptDelegationCommand
 	acceptCalls     int
 	snapshotCalls   int
@@ -60,6 +63,14 @@ func (f *fakeDelegationRuntime) DelegationSnapshot(context.Context, string, stri
 	defer f.mu.Unlock()
 	f.snapshotCalls++
 	return f.snapshot, f.snapshotErr
+}
+
+func (f *fakeDelegationRuntime) CancelDelegation(_ context.Context, _, _, taskID string) (*services.DelegationSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelCalls++
+	f.cancelTaskID = taskID
+	return f.snapshot, f.cancelErr
 }
 
 func (f *fakeDelegationRuntime) CreateDelegationPushConfig(_ context.Context, _, _ string, config services.DelegationPushConfig) (*services.DelegationPushConfig, error) {
@@ -475,6 +486,44 @@ func TestGatewayServesAgentCardSendAndTaskRoutes(t *testing.T) {
 	}
 }
 
+func TestGatewayServesA2ACancelTaskRoute(t *testing.T) {
+	runtime := &fakeDelegationRuntime{
+		descriptor: validDescriptor(),
+		snapshot:   validSnapshot(models.RunStatusCancelled),
+	}
+	gateway, err := New(runtime)
+	if err != nil {
+		t.Fatalf("create gateway failed: %v", err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/a2a/agents/writer/tasks/run_child:cancel", strings.NewReader(`{"id":"run_child"}`))
+	if err != nil {
+		t.Fatalf("create cancel request failed: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("cancel request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("cancel status=%d body=%s", response.StatusCode, body)
+	}
+	var task a2a.Task
+	if err := json.NewDecoder(response.Body).Decode(&task); err != nil {
+		t.Fatalf("decode canceled task failed: %v", err)
+	}
+	if task.ID != "run_child" || task.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("unexpected canceled task: %+v", task)
+	}
+	if runtime.cancelCalls != 1 || runtime.cancelTaskID != "run_child" {
+		t.Fatalf("unexpected cancel runtime call: calls=%d task=%s", runtime.cancelCalls, runtime.cancelTaskID)
+	}
+}
+
 func TestRequestHandlerDuplicateSendReturnsCurrentTask(t *testing.T) {
 	runtime := &fakeDelegationRuntime{
 		acceptResult: &services.DelegationResult{Run: &models.Run{RunID: "run_child"}, Delegation: &models.Delegation{DelegationID: "dlg_1"}, Reused: true},
@@ -518,7 +567,7 @@ func TestRequestHandlerMapsRuntimeErrorsAndUnsupportedOperations(t *testing.T) {
 	}
 
 	handler := &requestHandler{runtime: &fakeDelegationRuntime{}}
-	if _, err := handler.CancelTask(context.Background(), nil); !errors.Is(err, a2a.ErrTaskNotCancelable) {
+	if _, err := handler.CancelTask(context.WithValue(context.Background(), targetAgentContextKey{}, "writer"), nil); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Fatalf("cancel error got=%v", err)
 	}
 	pushContext := context.WithValue(context.Background(), targetAgentContextKey{}, "writer")
@@ -535,6 +584,22 @@ func TestRequestHandlerMapsRuntimeErrorsAndUnsupportedOperations(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("unsupported stream returned no error event")
+	}
+}
+
+func TestRequestHandlerCancelsTaskAndReturnsTerminalSnapshot(t *testing.T) {
+	runtime := &fakeDelegationRuntime{snapshot: validSnapshot(models.RunStatusCancelled)}
+	handler := &requestHandler{runtime: runtime}
+	ctx := context.WithValue(context.Background(), targetAgentContextKey{}, "writer")
+	result, err := handler.CancelTask(ctx, &a2a.CancelTaskRequest{ID: "run_child"})
+	if err != nil {
+		t.Fatalf("cancel task failed: %v", err)
+	}
+	if result == nil || result.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("unexpected canceled task: %#v", result)
+	}
+	if runtime.cancelCalls != 1 || runtime.cancelTaskID != "run_child" {
+		t.Fatalf("unexpected cancel call: calls=%d task=%s", runtime.cancelCalls, runtime.cancelTaskID)
 	}
 }
 
@@ -656,6 +721,68 @@ func TestGatewayRequiresSignedAgentIdentityAndRejectsReplay(t *testing.T) {
 		if response.StatusCode != http.StatusUnauthorized || runtime.acceptCalls != 1 {
 			t.Fatalf("source=%s status=%d acceptCalls=%d", source, response.StatusCode, runtime.acceptCalls)
 		}
+	}
+}
+
+func TestGatewayRequiresSignedAgentIdentityForCancelTask(t *testing.T) {
+	const secret = "test-only-a2a-secret-at-least-32-bytes-long"
+	resolver, err := a2aauth.NewStaticCredentialResolver(map[string]string{"planner-key": secret})
+	if err != nil {
+		t.Fatalf("create resolver failed: %v", err)
+	}
+	verifier, err := a2aauth.NewVerifier(resolver, a2aauth.NewMemoryNonceStore(), time.Minute)
+	if err != nil {
+		t.Fatalf("create verifier failed: %v", err)
+	}
+	writer := validDescriptor()
+	planner := &services.AgentDescriptor{Code: "planner", Endpoints: []services.AgentEndpointDescriptor{{
+		Code: "local", Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1/a2a/agents/planner",
+		AuthType: models.AgentEndpointAuthTypeHMACSHA256, CredentialRef: "planner-key",
+	}}}
+	runtime := &fakeDelegationRuntime{
+		descriptors: map[string]*services.AgentDescriptor{"planner": planner, "writer": writer},
+		snapshot:    validSnapshot(models.RunStatusCancelled),
+	}
+	gateway, err := New(runtime, WithAuthentication(verifier, true))
+	if err != nil {
+		t.Fatalf("create authenticated gateway failed: %v", err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+
+	body := []byte(`{"id":"run_child"}`)
+	unsigned, err := server.Client().Post(server.URL+"/a2a/agents/writer/tasks/run_child:cancel", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unsigned cancel request failed: %v", err)
+	}
+	unsigned.Body.Close()
+	if unsigned.StatusCode != http.StatusUnauthorized || runtime.cancelCalls != 0 {
+		t.Fatalf("unsigned cancel status=%d cancelCalls=%d", unsigned.StatusCode, runtime.cancelCalls)
+	}
+
+	signer, err := a2aauth.NewSigner(server.Client().Transport, resolver, "planner", "planner-key",
+		a2aauth.WithNonceGenerator(func() (string, error) { return "cancel-task-nonce", nil }),
+	)
+	if err != nil {
+		t.Fatalf("create signer failed: %v", err)
+	}
+	signed := *server.Client()
+	signed.Transport = signer
+	response, err := signed.Post(server.URL+"/a2a/agents/writer/tasks/run_child:cancel", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("signed cancel request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(response.Body)
+		t.Fatalf("signed cancel status=%d body=%s", response.StatusCode, payload)
+	}
+	var task a2a.Task
+	if err := json.NewDecoder(response.Body).Decode(&task); err != nil {
+		t.Fatalf("decode signed cancel result failed: %v", err)
+	}
+	if task.ID != "run_child" || task.Status.State != a2a.TaskStateCanceled || runtime.cancelCalls != 1 {
+		t.Fatalf("unexpected signed cancel task=%+v cancelCalls=%d", task, runtime.cancelCalls)
 	}
 }
 

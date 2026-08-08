@@ -146,6 +146,112 @@ func TestAcceptDelegationCreatesAtomicCollaborationState(t *testing.T) {
 	}
 }
 
+func TestCancelDelegationCancelsChildRunAndIsIdempotent(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	accepted, err := fixture.runtime.AcceptDelegation(context.Background(), delegationCommand())
+	if err != nil {
+		t.Fatalf("accept delegation failed: %v", err)
+	}
+	startedAt := time.Now().Add(-time.Second)
+	if err := fixture.database.Model(&models.Run{}).Where("run_id = ?", accepted.Run.RunID).Updates(map[string]any{
+		"status": models.RunStatusRunning, "started_at": startedAt,
+	}).Error; err != nil {
+		t.Fatalf("mark child run running failed: %v", err)
+	}
+	if err := fixture.database.Create(&models.RunStep{
+		RunID: accepted.Run.RunID, StepKey: "work", StepType: "noop", Attempt: 1,
+		Status: models.RunStepStatusRunning, InputJSON: `{}`, OutputJSON: `{}`, StartedAt: &startedAt,
+	}).Error; err != nil {
+		t.Fatalf("create child step failed: %v", err)
+	}
+
+	snapshot, err := fixture.runtime.CancelDelegation(context.Background(), "writer", "planner", accepted.Run.RunID)
+	if err != nil {
+		t.Fatalf("cancel delegation failed: %v", err)
+	}
+	if snapshot.Run.Status != models.RunStatusCancelled {
+		t.Fatalf("snapshot run status=%s want cancelled", snapshot.Run.Status)
+	}
+	var run models.Run
+	if err := fixture.database.Where("run_id = ?", accepted.Run.RunID).First(&run).Error; err != nil {
+		t.Fatalf("load cancelled child run failed: %v", err)
+	}
+	var step models.RunStep
+	if err := fixture.database.Where("run_id = ?", accepted.Run.RunID).First(&step).Error; err != nil {
+		t.Fatalf("load cancelled child step failed: %v", err)
+	}
+	var delegation models.Delegation
+	if err := fixture.database.Where("child_run_id = ?", accepted.Run.RunID).First(&delegation).Error; err != nil {
+		t.Fatalf("load cancelled delegation failed: %v", err)
+	}
+	if run.Status != models.RunStatusCancelled || step.Status != models.RunStepStatusSkipped || delegation.Status != models.DelegationStatusCancelled {
+		t.Fatalf("unexpected cancellation state run=%s step=%s delegation=%s", run.Status, step.Status, delegation.Status)
+	}
+
+	if _, err := fixture.runtime.CancelDelegation(context.Background(), "writer", "planner", accepted.Run.RunID); err != nil {
+		t.Fatalf("duplicate cancellation should be idempotent: %v", err)
+	}
+	var resultMessages int64
+	if err := fixture.database.Model(&models.Message{}).Where("delegation_id = ? AND message_type = ?", delegation.DelegationID, models.MessageTypeResult).Count(&resultMessages).Error; err != nil {
+		t.Fatalf("count cancellation result messages failed: %v", err)
+	}
+	if resultMessages != 1 {
+		t.Fatalf("cancellation result message count=%d want 1", resultMessages)
+	}
+}
+
+func TestCancelDelegationRejectsWrongSource(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	accepted, err := fixture.runtime.AcceptDelegation(context.Background(), delegationCommand())
+	if err != nil {
+		t.Fatalf("accept delegation failed: %v", err)
+	}
+	if _, err := fixture.runtime.CancelDelegation(context.Background(), "writer", "reviewer", accepted.Run.RunID); !errors.Is(err, ErrDelegationForbidden()) {
+		t.Fatalf("wrong source error=%v want forbidden", err)
+	}
+}
+
+func TestCancelDelegationStopsActiveChildExecution(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	accepted, err := fixture.runtime.AcceptDelegation(context.Background(), delegationCommand())
+	if err != nil {
+		t.Fatalf("accept delegation failed: %v", err)
+	}
+	started := make(chan struct{})
+	fixture.runtime.runService.executeNode = func(ctx context.Context, _ *models.Run, _ WorkflowNode, _ int) (string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- fixture.runtime.runService.HandleRunExecute(context.Background(), accepted.Run.RunID)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("child execution did not start")
+	}
+	if _, err := fixture.runtime.CancelDelegation(context.Background(), "writer", "planner", accepted.Run.RunID); err != nil {
+		t.Fatalf("cancel active delegation failed: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cancelled child execution returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled child execution did not stop")
+	}
+	var steps []models.RunStep
+	if err := fixture.database.Where("run_id = ?", accepted.Run.RunID).Find(&steps).Error; err != nil {
+		t.Fatalf("load child steps failed: %v", err)
+	}
+	if len(steps) != 1 || steps[0].Status != models.RunStepStatusSkipped {
+		t.Fatalf("unexpected child steps after cancellation: %+v", steps)
+	}
+}
+
 func TestAcceptDelegationSupportsRemoteParentRun(t *testing.T) {
 	fixture := setupDelegationFixture(t)
 	command := delegationCommand()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -110,6 +111,49 @@ func TestClientInvokeReturnsAcceptedTaskWithoutPolling(t *testing.T) {
 	}
 	if transportCount.Load() != 2 {
 		t.Fatalf("injected transport calls = %d, want 2", transportCount.Load())
+	}
+}
+
+func TestClientCancelTaskUsesA2ACancelEndpoint(t *testing.T) {
+	var cancelCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/a2a/agents/writer/.well-known/agent-card.json":
+			_ = json.NewEncoder(w).Encode(testCard(serverBaseURL(r), "write"))
+		case "/a2a/agents/writer/tasks/task-to-cancel:cancel":
+			cancelCount.Add(1)
+			if r.Body != http.NoBody {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read cancel request: %v", err)
+				}
+				if len(body) != 0 {
+					t.Fatalf("cancel request unexpectedly contained a body: %s", body)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(&a2a.Task{
+				ID: "task-to-cancel", ContextID: "thread-cancel",
+				Status: a2a.TaskStatus{State: a2a.TaskStateCanceled},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.Client(), time.Second, WithCallbackBaseURL("http://127.0.0.1"))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if err := client.CancelTask(context.Background(), services.AgentTaskCancellationRequest{
+		SourceAgentCode: "planner", TargetAgentCode: "writer", TaskID: "task-to-cancel",
+		Endpoints: []services.AgentInvocationEndpoint{{Address: server.URL + "/a2a/agents/writer", Transport: "http"}},
+	}); err != nil {
+		t.Fatalf("cancel task failed: %v", err)
+	}
+	if cancelCount.Load() != 1 {
+		t.Fatalf("cancel endpoint calls=%d want 1", cancelCount.Load())
 	}
 }
 

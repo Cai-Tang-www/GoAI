@@ -936,6 +936,55 @@ func TestHandleRunExecuteCancellationPersistsFailedRunAndStep(t *testing.T) {
 	}
 }
 
+func TestRunCancellationContextIsSharedAcrossDuplicateConsumers(t *testing.T) {
+	_, service, _ := setupRunTestService(t)
+	first, stopFirst := service.withRunCancellation(context.Background(), "run-shared-cancel")
+	second, stopSecond := service.withRunCancellation(context.Background(), "run-shared-cancel")
+	if first.Done() != second.Done() {
+		t.Fatal("duplicate consumers must share one cancellation context")
+	}
+	stopSecond()
+	service.cancelActiveRun("run-shared-cancel")
+	select {
+	case <-first.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shared cancellation context was not cancelled")
+	}
+	stopFirst()
+	service.executionMu.Lock()
+	defer service.executionMu.Unlock()
+	if _, ok := service.executionCancels["run-shared-cancel"]; ok {
+		t.Fatal("run cancellation registration was not cleaned up")
+	}
+}
+
+func TestStartRunStepRejectsCancelledRunUnderRunLock(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	run := models.Run{
+		RunID:       "run_cancelled_before_step",
+		AgentID:     1,
+		WorkflowID:  1,
+		UserID:      1,
+		TriggerType: "a2a",
+		InputJSON:   `{}`,
+		Status:      models.RunStatusCancelled,
+	}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create cancelled run failed: %v", err)
+	}
+	_, err := service.startRunStep(context.Background(), &run, WorkflowNode{Key: "work", Type: "noop"}, 1)
+	if err == nil {
+		t.Fatal("creating a step for a cancelled run should fail")
+	}
+	var stepCount int64
+	if err := gdb.Model(&models.RunStep{}).Where("run_id = ?", run.RunID).Count(&stepCount).Error; err != nil {
+		t.Fatalf("count run steps failed: %v", err)
+	}
+	if stepCount != 0 {
+		t.Fatalf("cancelled run created %d run steps", stepCount)
+	}
+}
+
 func TestTransitionRunStatusUsesCompareAndSwap(t *testing.T) {
 	gdb, _, _ := setupRunTestService(t)
 	run := models.Run{
