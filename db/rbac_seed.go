@@ -91,6 +91,11 @@ func ensurePermissions(database *gorm.DB) (map[string]uint64, error) {
 		{Code: models.PermissionAgentUpdate, Description: "Update owned agents"},
 		{Code: models.PermissionAgentActivate, Description: "Activate owned agents"},
 		{Code: models.PermissionAgentManage, Description: "Manage all agents"},
+		{Code: models.PermissionMCPCreate, Description: "Create MCP servers"},
+		{Code: models.PermissionMCPRead, Description: "Read owned MCP servers"},
+		{Code: models.PermissionMCPUpdate, Description: "Update owned MCP servers"},
+		{Code: models.PermissionMCPInvoke, Description: "Invoke tools on owned MCP servers"},
+		{Code: models.PermissionMCPManage, Description: "Manage all MCP servers"},
 	}
 	result := make(map[string]uint64, len(seeds))
 	for _, seed := range seeds {
@@ -125,6 +130,11 @@ func ensureRolePermissions(database *gorm.DB, roleIDs map[string]uint64, permiss
 		models.PermissionAgentUpdate,
 		models.PermissionAgentActivate,
 		models.PermissionAgentManage,
+		models.PermissionMCPCreate,
+		models.PermissionMCPRead,
+		models.PermissionMCPUpdate,
+		models.PermissionMCPInvoke,
+		models.PermissionMCPManage,
 	}
 	memberPerms := []string{
 		models.PermissionRunCreate,
@@ -137,6 +147,10 @@ func ensureRolePermissions(database *gorm.DB, roleIDs map[string]uint64, permiss
 		models.PermissionAgentRead,
 		models.PermissionAgentUpdate,
 		models.PermissionAgentActivate,
+		models.PermissionMCPCreate,
+		models.PermissionMCPRead,
+		models.PermissionMCPUpdate,
+		models.PermissionMCPInvoke,
 	}
 
 	if err := bindRolePermissions(database, roleIDs[models.RoleAdmin], adminPerms, permissionIDs); err != nil {

@@ -20,6 +20,7 @@ func TestSeedRBACValidatesExplicitDependencies(t *testing.T) {
 	if err := SeedRBAC(nil, &config.Config{RBACEnable: false}); err != nil {
 		t.Fatalf("disabled RBAC should not require a database: %v", err)
 	}
+
 }
 
 func TestSeedRBACIdempotent(t *testing.T) {
@@ -69,8 +70,8 @@ func TestSeedRBACIdempotent(t *testing.T) {
 	if err := gdb.Model(&models.Permission{}).Count(&permCount).Error; err != nil {
 		t.Fatalf("count permissions failed: %v", err)
 	}
-	if permCount != 12 {
-		t.Fatalf("expected 12 permissions, got %d", permCount)
+	if permCount != 17 {
+		t.Fatalf("expected 17 permissions, got %d", permCount)
 	}
 
 	var adminRole models.Role
@@ -121,6 +122,10 @@ func TestSeedRBACIdempotent(t *testing.T) {
 		models.PermissionAgentRead,
 		models.PermissionAgentUpdate,
 		models.PermissionAgentActivate,
+		models.PermissionMCPCreate,
+		models.PermissionMCPRead,
+		models.PermissionMCPUpdate,
+		models.PermissionMCPInvoke,
 	} {
 		var count int64
 		if err := gdb.Table("role_permissions AS rp").
@@ -132,5 +137,16 @@ func TestSeedRBACIdempotent(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("member role must have %s exactly once, got %d", code, count)
 		}
+	}
+
+	var memberMCPManageBindings int64
+	if err := gdb.Table("role_permissions AS rp").
+		Joins("JOIN permissions p ON p.id = rp.permission_id").
+		Where("rp.role_id = ? AND p.code = ?", memberRole.ID, models.PermissionMCPManage).
+		Count(&memberMCPManageBindings).Error; err != nil {
+		t.Fatalf("count member mcp manage permission failed: %v", err)
+	}
+	if memberMCPManageBindings != 0 {
+		t.Fatalf("member role must not have mcp:manage, got %d bindings", memberMCPManageBindings)
 	}
 }

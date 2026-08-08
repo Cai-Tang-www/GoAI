@@ -43,6 +43,8 @@ func Migrate(database *gorm.DB) error {
 		&models.Agent{},
 		&models.AgentEndpoint{},
 		&models.AgentCapability{},
+		&models.MCPServer{},
+		&models.MCPTool{},
 		&models.Workflow{},
 		&models.Thread{},
 		&models.Message{},
