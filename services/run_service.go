@@ -1670,6 +1670,12 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 			return "", err
 		}
 		explicitInputs = len(config.InputFrom) > 0
+	case "agent_tool":
+		config, err := ParseAgentToolNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		explicitInputs = len(config.InputFrom) > 0
 	}
 	if explicitInputs {
 		var err error
@@ -2228,6 +2234,12 @@ func (s *RunService) resolveNodeInput(ctx context.Context, run *models.Run, node
 			return "", err
 		}
 		inputFrom = config.InputFrom
+	case "agent_tool":
+		config, err := ParseAgentToolNodeConfig(node)
+		if err != nil {
+			return "", err
+		}
+		inputFrom = config.InputFrom
 	case "tool":
 		config, err := ParseToolNodeConfig(node)
 		if err != nil {
@@ -2279,6 +2291,8 @@ func (s *RunService) executeWorkflowNodeWithInput(ctx context.Context, run *mode
 		return "", &runInterruptExecutionError{Config: config}
 	case "agent":
 		return s.executeAgentNode(ctx, &nodeRun, node)
+	case "agent_tool":
+		return s.executeAgentToolNode(ctx, &nodeRun, node)
 	case "agent_group":
 		return s.executeAgentGroupNode(ctx, &nodeRun, node)
 	default:
@@ -2295,6 +2309,8 @@ func (s *RunService) executeWorkflowNode(ctx context.Context, run *models.Run, n
 		return "", &runInterruptExecutionError{Config: config}
 	case "agent":
 		return s.executeAgentNode(ctx, run, node)
+	case "agent_tool":
+		return s.executeAgentToolNode(ctx, run, node)
 	case "agent_group":
 		return s.executeAgentGroupNode(ctx, run, node)
 	default:
@@ -2310,105 +2326,26 @@ func (s *RunService) executeAgentNode(ctx context.Context, run *models.Run, node
 	if err != nil {
 		return "", err
 	}
-	var source models.Agent
-	if err := s.database.WithContext(ctx).Where("id = ? AND status = ?", run.AgentID, models.AgentStatusActive).First(&source).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", errAgentNotFound
-		}
-		return "", fmt.Errorf("loading source agent: %w", err)
-	}
-	if config.TargetAgent != "" && source.AgentCode == config.TargetAgent {
-		return "", fmt.Errorf("%w: agent node %s cannot target source agent %s", errAgentRouteInvalid, node.Key, source.AgentCode)
-	}
-	if s.agentRouter == nil {
-		return "", fmt.Errorf("%w: agent router is not configured", errAgentRouteInvalid)
-	}
-	route, err := s.agentRouter.Route(ctx, AgentRouteRequest{
-		SourceAgentID: source.ID, CapabilityCode: config.Capability, PreferredAgentCode: config.TargetAgent,
-	})
+	tool, err := s.newAgentAsToolForNode(ctx, run, node, config.TargetAgent, config.Capability, config.RoutingPolicy, "", config.TimeoutMS, "agent")
 	if err != nil {
 		return "", err
 	}
-	target := route.Agent
-	capability := route.Capability
-	if source.ID == target.ID {
-		return "", fmt.Errorf("%w: agent node %s cannot target source agent %s", errAgentRouteInvalid, node.Key, source.AgentCode)
+	return tool.InvokableRun(ctx, run.InputJSON)
+}
+
+func (s *RunService) executeAgentToolNode(ctx context.Context, run *models.Run, node WorkflowNode) (string, error) {
+	if s.agentInvoker == nil {
+		return "", errors.New("agent_tool workflow node requires an A2A agent invoker")
 	}
-	var sourceEndpoint models.AgentEndpoint
-	if err := s.database.WithContext(ctx).Where("agent_id = ? AND protocol = ? AND status = ?", source.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).Order("id ASC").First(&sourceEndpoint).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			sourceEndpoint.AuthType = models.AgentEndpointAuthTypeNone
-		} else {
-			return "", fmt.Errorf("loading source A2A identity endpoint: %w", err)
-		}
-	}
-	invocationEndpoints := []AgentInvocationEndpoint{{Address: route.Endpoint.Address, Transport: route.Endpoint.Transport}}
-	timeout := 120 * time.Second
-	if config.TimeoutMS > 0 {
-		timeout = time.Duration(config.TimeoutMS) * time.Millisecond
-	}
-	invokeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := s.agentInvoker.Invoke(invokeCtx, AgentInvocationRequest{
-		SourceAgentCode:     source.AgentCode,
-		SourceAuthType:      sourceEndpoint.AuthType,
-		SourceCredentialRef: sourceEndpoint.CredentialRef,
-		TargetAgentCode:     target.AgentCode,
-		CapabilityCode:      capability.CapabilityCode,
-		ParentRunID:         run.RunID,
-		TraceID:             run.TraceID,
-		DelegationID:        stableA2AID("delegation", run.RunID, node.Key),
-		ThreadID:            run.ThreadID,
-		TaskID:              stableA2AID("task", run.RunID, node.Key),
-		MessageID:           stableA2AID("message", run.RunID, node.Key),
-		InputJSON:           run.InputJSON,
-		Endpoints:           invocationEndpoints,
-	})
+	config, err := ParseAgentToolNodeConfig(node)
 	if err != nil {
 		return "", err
 	}
-	result = normalizeInvocationResult(result)
-	if result == nil {
-		return "", errors.New("A2A agent invoker returned an empty result")
-	}
-	if result.State != AgentInvocationStateAccepted && result.State != AgentInvocationStateCompleted {
-		return "", fmt.Errorf("target agent returned unsupported invocation state %q", result.State)
-	}
-	var raw json.RawMessage = json.RawMessage(result.OutputJSON)
-	if !json.Valid(raw) {
-		return "", errors.New("A2A agent result is not valid JSON")
-	}
-	routingPolicy := config.RoutingPolicy
-	if routingPolicy == "" {
-		routingPolicy = "explicit"
-	}
-	output := map[string]any{
-		"type":             "agent",
-		"target_agent":     target.AgentCode,
-		"capability":       capability.CapabilityCode,
-		"task_id":          result.TaskID,
-		"state":            result.State,
-		"result":           raw,
-		"routing_policy":   routingPolicy,
-		"selection_reason": route.SelectionReason,
-		"workflow_version": route.Workflow.Version,
-	}
-	if result.Message != "" {
-		output["message"] = result.Message
-	}
-	encoded, err := json.Marshal(output)
+	tool, err := s.newAgentAsToolForNode(ctx, run, node, config.TargetAgent, config.Capability, config.RoutingPolicy, config.ToolName, config.TimeoutMS, "agent_tool")
 	if err != nil {
-		return "", fmt.Errorf("encoding A2A agent result: %w", err)
+		return "", err
 	}
-	if result.State == AgentInvocationStateAccepted {
-		return "", &agentInvocationAcceptedError{
-			TaskID: result.TaskID, DelegationID: stableA2AID("delegation", run.RunID, node.Key),
-			MessageID: stableA2AID("message", run.RunID, node.Key), SourceAgentID: source.ID,
-			TargetAgentID: target.ID, CapabilityCode: capability.CapabilityCode, OutputJSON: string(encoded),
-			CallbackTokenHash: callbackTokenHash(result.NotificationToken),
-		}
-	}
-	return string(encoded), nil
+	return tool.InvokableRun(ctx, run.InputJSON)
 }
 
 // suspendRunForInterrupt 将当前步骤和 Run 原子置为 waiting_input，并保存可恢复游标。

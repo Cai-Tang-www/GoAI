@@ -17,6 +17,11 @@ func validateCapabilityInput(schemaJSON, inputJSON string) error {
 	return validateJSONSchema(schemaJSON, inputJSON)
 }
 
+// validateCapabilityOutput 校验 A2A 同步结果或 Child Run 终态是否满足输出契约。
+func validateCapabilityOutput(schemaJSON, outputJSON string) error {
+	return validateJSONSchema(schemaJSON, outputJSON)
+}
+
 // validateRunOutputContract 校验 Child Run 的最终输出是否满足其委派 capability 的输出契约。
 func (s *RunService) validateRunOutputContract(ctx context.Context, run *models.Run, outputJSON string) error {
 	if run == nil {

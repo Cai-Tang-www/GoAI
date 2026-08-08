@@ -36,6 +36,17 @@ type AgentNodeConfig struct {
 	TimeoutMS     int      `json:"timeout_ms,omitempty"`
 }
 
+// AgentToolNodeConfig 定义将已注册 Agent 暴露为 Eino Tool 的 Workflow 节点。
+// Tool 的实际执行仍通过 A2A Client 访问目标 Agent Gateway。
+type AgentToolNodeConfig struct {
+	TargetAgent   string   `json:"target_agent,omitempty"`
+	Capability    string   `json:"capability"`
+	ToolName      string   `json:"tool_name,omitempty"`
+	RoutingPolicy string   `json:"routing_policy,omitempty"`
+	InputFrom     []string `json:"input_from,omitempty"`
+	TimeoutMS     int      `json:"timeout_ms,omitempty"`
+}
+
 // ToolNodeConfig 定义 Workflow 中 tool 节点的 MCP 稳定引用与输入来源。
 type ToolNodeConfig struct {
 	ServerCode string         `json:"server_code"`
@@ -186,6 +197,57 @@ func ParseAgentNodeConfig(node Node) (*AgentNodeConfig, error) {
 	return &config, nil
 }
 
+// ParseAgentToolNodeConfig 解析并校验 agent_tool 节点配置。
+func ParseAgentToolNodeConfig(node Node) (*AgentToolNodeConfig, error) {
+	if strings.TrimSpace(node.Type) != "agent_tool" {
+		return nil, fmt.Errorf("node %s is not an agent_tool node", node.Key)
+	}
+	if len(node.Config) == 0 {
+		return nil, fmt.Errorf("agent_tool node %s config is required", node.Key)
+	}
+	var config AgentToolNodeConfig
+	decoder := json.NewDecoder(strings.NewReader(string(node.Config)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("agent_tool node %s config is invalid: %w", node.Key, err)
+	}
+	config.TargetAgent = strings.TrimSpace(config.TargetAgent)
+	config.Capability = strings.TrimSpace(config.Capability)
+	config.ToolName = strings.TrimSpace(config.ToolName)
+	config.RoutingPolicy = strings.ToLower(strings.TrimSpace(config.RoutingPolicy))
+	if config.TargetAgent == "" && config.RoutingPolicy != "registry" {
+		return nil, fmt.Errorf("agent_tool node %s requires target_agent or routing_policy=registry", node.Key)
+	}
+	if config.RoutingPolicy != "" && config.RoutingPolicy != "registry" {
+		return nil, fmt.Errorf("agent_tool node %s routing_policy must be registry", node.Key)
+	}
+	if config.Capability == "" {
+		return nil, fmt.Errorf("agent_tool node %s capability is required", node.Key)
+	}
+	if config.ToolName != "" && len(config.ToolName) > 64 {
+		return nil, fmt.Errorf("agent_tool node %s tool_name must be at most 64 characters", node.Key)
+	}
+	if config.TimeoutMS < 0 || config.TimeoutMS > 300000 {
+		return nil, fmt.Errorf("agent_tool node %s timeout_ms must be between 0 and 300000", node.Key)
+	}
+	seen := make(map[string]struct{}, len(config.InputFrom))
+	for index, reference := range config.InputFrom {
+		reference = strings.TrimSpace(reference)
+		config.InputFrom[index] = reference
+		if reference == "" {
+			return nil, fmt.Errorf("agent_tool node %s input_from contains an empty step", node.Key)
+		}
+		if reference == node.Key {
+			return nil, fmt.Errorf("agent_tool node %s input_from cannot reference itself", node.Key)
+		}
+		if _, exists := seen[reference]; exists {
+			return nil, fmt.Errorf("agent_tool node %s input_from contains duplicate step: %s", node.Key, reference)
+		}
+		seen[reference] = struct{}{}
+	}
+	return &config, nil
+}
+
 // ParseAgentGroupNodeConfig 解析并校验 agent_group 节点配置。
 func ParseAgentGroupNodeConfig(node Node) (*AgentGroupNodeConfig, error) {
 	if strings.TrimSpace(node.Type) != "agent_group" {
@@ -302,6 +364,12 @@ func Validate(def *Definition) error {
 		switch node.Type {
 		case "agent":
 			config, err := ParseAgentNodeConfig(node)
+			if err != nil {
+				return err
+			}
+			inputFrom = config.InputFrom
+		case "agent_tool":
+			config, err := ParseAgentToolNodeConfig(node)
 			if err != nil {
 				return err
 			}
