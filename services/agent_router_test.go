@@ -99,3 +99,42 @@ func TestRegistryAgentRouterRejectsUnpublishedOrUnavailableCandidates(t *testing
 		t.Fatalf("expected invalid route request, got %v", err)
 	}
 }
+
+func TestRegistryAgentRouterSelectsRemoteA2ACapabilityWithoutLocalWorkflow(t *testing.T) {
+	database := openSQLiteTestDB(t)
+	if err := database.AutoMigrate(&models.Agent{}, &models.AgentCapability{}, &models.AgentEndpoint{}); err != nil {
+		t.Fatalf("auto migrate remote router tables: %v", err)
+	}
+	source := models.Agent{AgentCode: "planner", Name: "Planner", OwnerUserID: 1, Status: models.AgentStatusActive}
+	remote := models.Agent{AgentCode: "external-writer", Name: "External Writer", OwnerUserID: 2, Status: models.AgentStatusActive}
+	if err := database.Create(&source).Error; err != nil {
+		t.Fatalf("create source agent: %v", err)
+	}
+	if err := database.Create(&remote).Error; err != nil {
+		t.Fatalf("create remote agent: %v", err)
+	}
+	if err := database.Create(&models.AgentCapability{
+		AgentID: remote.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeRemote,
+		Version: "1", Status: models.AgentCapabilityStatusActive,
+	}).Error; err != nil {
+		t.Fatalf("create remote capability: %v", err)
+	}
+	if err := database.Create(&models.AgentEndpoint{
+		AgentID: remote.ID, EndpointCode: "primary", Protocol: models.AgentEndpointProtocolA2A,
+		Transport: models.AgentEndpointTransportHTTPS, Address: "https://agents.example.com/a2a/agents/external-writer",
+		Status: models.AgentEndpointStatusActive,
+	}).Error; err != nil {
+		t.Fatalf("create remote endpoint: %v", err)
+	}
+	router, err := NewRegistryAgentRouter(database)
+	if err != nil {
+		t.Fatalf("create router: %v", err)
+	}
+	route, err := router.Route(context.Background(), AgentRouteRequest{SourceAgentID: source.ID, CapabilityCode: "write"})
+	if err != nil {
+		t.Fatalf("route remote capability: %v", err)
+	}
+	if route.Agent.AgentCode != remote.AgentCode || route.Capability.CapabilityType != models.AgentCapabilityTypeRemote || route.Workflow.ID != 0 {
+		t.Fatalf("unexpected remote route: %+v", route)
+	}
+}

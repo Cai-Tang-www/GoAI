@@ -146,6 +146,45 @@ func TestAcceptDelegationCreatesAtomicCollaborationState(t *testing.T) {
 	}
 }
 
+func TestAcceptDelegationSelectsOnlyWorkflowCapabilityForStandardA2ARequest(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	command := delegationCommand()
+	command.CapabilityCode = ""
+	command.ParentRunID = "external-parent"
+	command.ThreadID = "external-thread"
+	command.RequestedChildRunID = "external-child"
+	command.RequestMessageID = "external-message"
+
+	result, err := fixture.runtime.AcceptDelegation(context.Background(), command)
+	if err != nil {
+		t.Fatalf("accept standard A2A delegation failed: %v", err)
+	}
+	if result.Delegation.CapabilityCode != "write" || result.Run.WorkflowID != fixture.targetWorkflow.ID {
+		t.Fatalf("standard A2A capability was not resolved safely: delegation=%+v run=%+v", result.Delegation, result.Run)
+	}
+}
+
+func TestAcceptDelegationRejectsAmbiguousStandardA2ACapability(t *testing.T) {
+	fixture := setupDelegationFixture(t)
+	secondWorkflow := models.Workflow{AgentID: fixture.targetAgent.ID, Version: 3, DefinitionJSON: `{"entry_node":"work","nodes":[{"key":"work","type":"noop"}],"edges":[]}`, Checksum: "target-v3", IsActive: true, CreatedBy: 22}
+	if err := fixture.database.Create(&secondWorkflow).Error; err != nil {
+		t.Fatalf("create second target workflow: %v", err)
+	}
+	if err := fixture.database.Create(&models.AgentCapability{
+		AgentID: fixture.targetAgent.ID, CapabilityCode: "review", Name: "Review", CapabilityType: models.AgentCapabilityTypeWorkflow,
+		WorkflowID: &secondWorkflow.ID, Version: "3", Status: models.AgentCapabilityStatusActive,
+	}).Error; err != nil {
+		t.Fatalf("create second target capability: %v", err)
+	}
+	command := delegationCommand()
+	command.CapabilityCode = ""
+	command.RequestedChildRunID = "ambiguous-child"
+	command.RequestMessageID = "ambiguous-message"
+	if _, err := fixture.runtime.AcceptDelegation(context.Background(), command); !errors.Is(err, ErrInvalidDelegation()) {
+		t.Fatalf("ambiguous standard A2A request error=%v, want invalid delegation", err)
+	}
+}
+
 func TestCancelDelegationCancelsChildRunAndIsIdempotent(t *testing.T) {
 	fixture := setupDelegationFixture(t)
 	accepted, err := fixture.runtime.AcceptDelegation(context.Background(), delegationCommand())

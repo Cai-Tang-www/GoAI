@@ -216,6 +216,21 @@ func TestAgentRegistryActivationRejectsNonExecutableCapabilities(t *testing.T) {
 	}
 }
 
+func TestAgentRegistryAcceptsRemoteCapabilityWithoutLocalWorkflow(t *testing.T) {
+	_, service, _ := setupAgentRegistryTest(t, false)
+	actor := RegistryActor{UserID: 1}
+	createRegistryAgent(t, service, actor, "external-writer")
+	view, err := service.CreateCapability(context.Background(), actor, "external-writer", UpsertCapabilityCommand{
+		CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeRemote, Version: "1",
+	})
+	if err != nil {
+		t.Fatalf("create remote capability: %v", err)
+	}
+	if view.CapabilityType != models.AgentCapabilityTypeRemote || view.WorkflowID != nil {
+		t.Fatalf("unexpected remote capability view: %+v", view)
+	}
+}
+
 func TestAgentRegistryHealthAndActivationHappyPath(t *testing.T) {
 	_, service, checker := setupAgentRegistryTest(t, false)
 	actor := RegistryActor{UserID: 1}

@@ -58,13 +58,6 @@ func TestCheckAgentCardRejectsIdentityAndInterfaceMismatch(t *testing.T) {
 			wantError: "declares agent_code",
 		},
 		{
-			name: "delegation extension missing",
-			mutate: func(card *a2a.AgentCard) {
-				card.Capabilities.Extensions = nil
-			},
-			wantError: "delegation extension",
-		},
-		{
 			name: "different origin interface",
 			mutate: func(card *a2a.AgentCard) {
 				card.SupportedInterfaces = []*a2a.AgentInterface{
@@ -118,7 +111,7 @@ func TestCheckAgentCardPropagatesDiscoveryFailure(t *testing.T) {
 	}
 }
 
-func TestCheckAgentCardRequiresDelegationAgentCode(t *testing.T) {
+func TestCheckAgentCardAcceptsOptionalDelegationAgentCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		card := testCard(serverBaseURL(r), "write")
 		card.Capabilities.Extensions = []a2a.AgentExtension{{URI: a2aprotocol.DelegationExtensionURI}}
@@ -131,7 +124,7 @@ func TestCheckAgentCardRequiresDelegationAgentCode(t *testing.T) {
 		AgentCode: "writer",
 		Address:   server.URL + "/a2a/agents/writer",
 	})
-	if err == nil || !strings.Contains(err.Error(), "declares agent_code") {
-		t.Fatalf("got %v, want missing delegation agent_code failure", err)
+	if err != nil {
+		t.Fatalf("optional delegation agent_code must not block discovery: %v", err)
 	}
 }

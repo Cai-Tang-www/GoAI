@@ -131,6 +131,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - 官方 Go SDK 驱动的 AG-UI Gateway：请求映射、Thread 创建/复用、Run 触发、Step/Message SSE 回传
 - 官方 A2A Go SDK 驱动的 A2A Gateway：Agent Card、入站委派、Task 查询/取消、Push Notification callback、Child Run 与结果 Artifact 回流
 - Workflow `agent` 节点的出站 A2A Client：Agent Card discovery、能力校验、带 PushConfig 的 `message:send`、Task cancel 和 accepted 结果收敛
+- 外部 A2A Agent 互操作：Registry `remote` Capability、标准 Agent Card/Message 入站降级、独立 external Agent conformance 测试
 - Eino Graph 执行器：在单个 Agent 内执行串行/可达 Workflow 节点，并将 `agent` 节点统一交给 A2A Client 委派
 - `agent_group` fan-out/fan-in：显式把一个 Workflow 节点分派给多个 Agent，每个成员都创建独立 Delegation、Child Run、A2A Task 和 Message
 - 本地 Agent 使用 loopback HTTP，远程 Agent 强制 HTTPS；跨 Agent 不提供进程内 Service 直调旁路

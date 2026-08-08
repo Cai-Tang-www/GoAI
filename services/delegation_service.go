@@ -251,17 +251,21 @@ func (s *RuntimeService) DescribeAgent(ctx context.Context, agentCode string) (*
 		Endpoints:    make([]AgentEndpointDescriptor, 0, len(endpoints)),
 	}
 	for _, capability := range capabilities {
-		if capability.CapabilityType != models.AgentCapabilityTypeWorkflow || capability.WorkflowID == nil || *capability.WorkflowID == 0 {
-			continue
-		}
-		var workflow models.Workflow
-		if err := s.database.WithContext(ctx).Where("id = ? AND agent_id = ? AND is_active = ?", *capability.WorkflowID, agent.ID, true).First(&workflow).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+		if capability.CapabilityType == models.AgentCapabilityTypeWorkflow {
+			if capability.WorkflowID == nil || *capability.WorkflowID == 0 {
 				continue
 			}
-			return nil, fmt.Errorf("loading capability workflow: %w", err)
-		}
-		if capability.Version != "" && capability.Version != strconv.Itoa(workflow.Version) {
+			var workflow models.Workflow
+			if err := s.database.WithContext(ctx).Where("id = ? AND agent_id = ? AND is_active = ?", *capability.WorkflowID, agent.ID, true).First(&workflow).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return nil, fmt.Errorf("loading capability workflow: %w", err)
+			}
+			if capability.Version != "" && capability.Version != strconv.Itoa(workflow.Version) {
+				continue
+			}
+		} else if capability.CapabilityType != models.AgentCapabilityTypeRemote {
 			continue
 		}
 		descriptor.Capabilities = append(descriptor.Capabilities, AgentCapabilityDescriptor{
@@ -331,8 +335,8 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 			slog.String("target_agent_code", targetCode),
 		)
 	}()
-	if sourceCode == "" || targetCode == "" || capabilityCode == "" || parentRunID == "" || childRunID == "" || messageID == "" || threadID == "" {
-		return nil, fmt.Errorf("%w: source_agent_code, target_agent_code, capability_code, parent_run_id, child_run_id, message_id and thread_id are required", errInvalidDelegation)
+	if sourceCode == "" || targetCode == "" || parentRunID == "" || childRunID == "" || messageID == "" || threadID == "" {
+		return nil, fmt.Errorf("%w: source_agent_code, target_agent_code, parent_run_id, child_run_id, message_id and thread_id are required", errInvalidDelegation)
 	}
 	if len(childRunID) > 64 || len(threadID) > 64 || len(messageID) > 64 || len(parentRunID) > 64 || len(requestedDelegationID) > 64 {
 		return nil, fmt.Errorf("%w: delegation identifiers must be at most 64 characters", errInvalidDelegation)
@@ -381,6 +385,22 @@ func (s *RuntimeService) AcceptDelegation(ctx context.Context, command AcceptDel
 	}
 	if sourceAgent.ID == targetAgent.ID {
 		return nil, fmt.Errorf("%w: source and target agents must be different", errInvalidDelegation)
+	}
+	if capabilityCode == "" {
+		var capabilities []models.AgentCapability
+		if err := s.database.WithContext(ctx).
+			Where("agent_id = ? AND capability_type = ? AND status = ?", targetAgent.ID, models.AgentCapabilityTypeWorkflow, models.AgentCapabilityStatusActive).
+			Order("capability_code ASC").Find(&capabilities).Error; err != nil {
+			return nil, fmt.Errorf("loading target workflow capabilities: %w", err)
+		}
+		switch len(capabilities) {
+		case 0:
+			return nil, errCapabilityNotFound
+		case 1:
+			capabilityCode = capabilities[0].CapabilityCode
+		default:
+			return nil, fmt.Errorf("%w: standard A2A message does not identify a capability and target exposes multiple workflow capabilities", errInvalidDelegation)
+		}
 	}
 
 	var capability models.AgentCapability
