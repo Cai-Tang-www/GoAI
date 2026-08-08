@@ -367,6 +367,48 @@ func TestHandleRunResumeKeepsPersistedExternalWaitWithoutReinvokingAgent(t *test
 	}
 }
 
+func TestHandleRunResumeKeepsPersistedExternalWaitWithoutReinvokingAgentTool(t *testing.T) {
+	definition := `{"entry_node":"delegate_parent","nodes":[{"key":"delegate_parent","type":"noop"},{"key":"delegate_reviewer","type":"agent_tool","config":{"target_agent":"reviewer","capability":"review"}}],"edges":[{"from":"delegate_parent","to":"delegate_reviewer"}]}`
+	fixture := setupResumeLeaseFixture(t, definition, "delegate_reviewer")
+	if err := fixture.database.Model(&models.Run{}).Where("id = ?", fixture.run.ID).Update("current_step", "delegate_reviewer").Error; err != nil {
+		t.Fatalf("persist external wait cursor failed: %v", err)
+	}
+	startedAt := time.Now().Add(-time.Second)
+	if err := fixture.database.Create(&models.RunStep{
+		RunID: fixture.run.RunID, TraceID: fixture.run.TraceID, StepKey: "delegate_reviewer", StepType: "agent_tool",
+		Attempt: 1, Status: models.RunStepStatusWaitingExternal, InputJSON: "{}", OutputJSON: "{}", StartedAt: &startedAt,
+	}).Error; err != nil {
+		t.Fatalf("create persisted external wait failed: %v", err)
+	}
+	taskID := "task_reviewer_tool_existing"
+	secondDelegation := models.Delegation{
+		DelegationID: "delegation_reviewer_tool_existing", ThreadID: fixture.run.ThreadID, ParentRunID: fixture.run.RunID,
+		ChildRunID: "child_reviewer_tool_existing", A2ATaskID: &taskID, TraceID: fixture.run.TraceID,
+		SourceAgentID: fixture.delegation.SourceAgentID, TargetAgentID: fixture.delegation.TargetAgentID,
+		CapabilityCode: "review", RequestMessageID: "message_reviewer_tool_existing", ParentStepKey: "delegate_reviewer",
+		InputJSON: "{}", OutputJSON: "{}", Status: models.DelegationStatusAccepted,
+	}
+	if err := fixture.database.Create(&secondDelegation).Error; err != nil {
+		t.Fatalf("create existing reviewer tool delegation failed: %v", err)
+	}
+	invoker := &countingResumeAgentInvoker{}
+	fixture.service.agentInvoker = invoker
+
+	if err := fixture.service.HandleRunResume(context.Background(), fixture.run.RunID, fixture.delegation.DelegationID); err != nil {
+		t.Fatalf("resume persisted agent_tool wait failed: %v", err)
+	}
+	if invoker.calls.Load() != 0 {
+		t.Fatalf("persisted A2A agent_tool delegation was invoked again %d times", invoker.calls.Load())
+	}
+	var storedRun models.Run
+	if err := fixture.database.Where("run_id = ?", fixture.run.RunID).First(&storedRun).Error; err != nil {
+		t.Fatalf("reload suspended run failed: %v", err)
+	}
+	if storedRun.Status != models.RunStatusWaitingExternal || storedRun.CurrentStep != "delegate_reviewer" {
+		t.Fatalf("run did not remain on persisted agent_tool external wait: %+v", storedRun)
+	}
+}
+
 type countingResumeAgentInvoker struct {
 	calls atomic.Int32
 }

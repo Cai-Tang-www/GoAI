@@ -40,6 +40,43 @@ func TestParseAgentNodeConfigSupportsRegistryRouting(t *testing.T) {
 	}
 }
 
+func TestValidateAgentToolNodeConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "missing config", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool"}]}`, wantErr: "config is required"},
+		{name: "missing target and policy", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool","config":{"capability":"write"}}]}`, wantErr: "requires target_agent or routing_policy=registry"},
+		{name: "unknown field", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool","config":{"target_agent":"writer","capability":"write","unknown":true}}]}`, wantErr: "unknown field"},
+		{name: "duplicate input", raw: `{"entry_node":"delegate","nodes":[{"key":"planner","type":"noop"},{"key":"delegate","type":"agent_tool","config":{"target_agent":"writer","capability":"write","input_from":["planner","planner"]}}],"edges":[{"from":"planner","to":"delegate"}]}`, wantErr: "duplicate step"},
+		{name: "timeout too large", raw: `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool","config":{"target_agent":"writer","capability":"write","timeout_ms":300001}}]}`, wantErr: "timeout_ms must be between"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseAndValidate(tt.raw)
+			if err == nil || !containsText(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParseAgentToolNodeConfigSupportsRegistryRouting(t *testing.T) {
+	def, err := ParseAndValidate(`{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool","config":{"capability":"write","routing_policy":" REGISTRY ","tool_name":"writer_tool"}}]}`)
+	if err != nil {
+		t.Fatalf("parse registry-routed agent tool node: %v", err)
+	}
+	config, err := ParseAgentToolNodeConfig(def.Nodes[0])
+	if err != nil {
+		t.Fatalf("parse agent tool config: %v", err)
+	}
+	if config.RoutingPolicy != "registry" || config.TargetAgent != "" || config.ToolName != "writer_tool" {
+		t.Fatalf("unexpected agent tool config: %+v", config)
+	}
+}
+
 func TestValidateAgentGroupNodeConfig(t *testing.T) {
 	tests := []struct {
 		name    string

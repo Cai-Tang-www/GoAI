@@ -1295,8 +1295,103 @@ func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T)
 	if err := json.Unmarshal([]byte(steps[1].OutputJSON), &output); err != nil {
 		t.Fatalf("decode agent step output: %v", err)
 	}
-	if output["target_agent"] != target.AgentCode || output["capability"] != capability.CapabilityCode {
+	if output["target_agent"] != target.AgentCode || output["capability"] != capability.CapabilityCode || output["routing_policy"] != "explicit" {
 		t.Fatalf("unexpected agent step output: %+v", output)
+	}
+}
+
+func TestHandleRunExecuteAgentToolNodeUsesA2AAndPersistsToolResult(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"planner","nodes":[{"key":"planner","type":"planner"},{"key":"delegate","type":"agent_tool","config":{"target_agent":"writer","capability":"write","tool_name":"writer_tool","input_from":["planner"]}}],"edges":[{"from":"planner","to":"delegate"}]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+	target := models.Agent{AgentCode: "writer", Name: "Writer", OwnerUserID: 1, Status: models.AgentStatusActive}
+	if err := gdb.Create(&target).Error; err != nil {
+		t.Fatalf("create target agent failed: %v", err)
+	}
+	targetWorkflow := models.Workflow{AgentID: target.ID, Version: 1, DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`, Checksum: "target-workflow", IsActive: true, CreatedBy: 1}
+	if err := gdb.Create(&targetWorkflow).Error; err != nil {
+		t.Fatalf("create target workflow failed: %v", err)
+	}
+	capability := models.AgentCapability{
+		AgentID: target.ID, CapabilityCode: "write", Name: "Write", Description: "Write documents", CapabilityType: models.AgentCapabilityTypeWorkflow,
+		WorkflowID: &targetWorkflow.ID, Version: "1", InputSchemaJSON: `{}`, OutputSchemaJSON: `{"type":"object","required":["document"]}`, ConfigJSON: "{}", Status: models.AgentCapabilityStatusActive,
+	}
+	if err := gdb.Create(&capability).Error; err != nil {
+		t.Fatalf("create capability failed: %v", err)
+	}
+	if err := gdb.Create(&models.AgentEndpoint{AgentID: target.ID, EndpointCode: "writer-local", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:18080/a2a/agents/writer", Status: models.AgentEndpointStatusActive}).Error; err != nil {
+		t.Fatalf("create endpoint failed: %v", err)
+	}
+	invoker := &recordingAgentInvoker{result: &AgentInvocationResult{TaskID: "child-tool", State: AgentInvocationStateCompleted, OutputJSON: `{"document":"ok"}`}}
+	service.agentInvoker = invoker
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+	run := models.Run{RunID: "run_agent_tool", ThreadID: "thread-agent-tool", AgentID: source.ID, WorkflowID: workflow.ID, UserID: 1, TriggerType: "api", InputJSON: `{"prompt":"draft"}`, Status: models.RunStatusQueued}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err != nil {
+		t.Fatalf("handle run failed: %v", err)
+	}
+	if len(invoker.requests) != 1 || invoker.requests[0].TargetAgentCode != "writer" || !strings.Contains(invoker.requests[0].InputJSON, `"step_outputs"`) || !strings.Contains(invoker.requests[0].InputJSON, `"planner"`) {
+		t.Fatalf("unexpected A2A tool invocation: %+v", invoker.requests)
+	}
+	var step models.RunStep
+	if err := gdb.Where("run_id = ? AND step_key = ?", run.RunID, "delegate").First(&step).Error; err != nil {
+		t.Fatalf("load agent tool step: %v", err)
+	}
+	if step.Status != models.RunStepStatusSuccess || step.InputJSON != invoker.requests[0].InputJSON || !strings.Contains(step.OutputJSON, `"type":"agent_tool"`) {
+		t.Fatalf("unexpected agent tool step: %+v", step)
+	}
+}
+
+func TestHandleRunExecuteAgentToolAcceptedEntersA2AWaitingState(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent_tool","config":{"target_agent":"writer","capability":"write"}}],"edges":[]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+	target := models.Agent{AgentCode: "writer", Name: "Writer", OwnerUserID: 1, Status: models.AgentStatusActive}
+	if err := gdb.Create(&target).Error; err != nil {
+		t.Fatalf("create target agent failed: %v", err)
+	}
+	targetWorkflow := models.Workflow{AgentID: target.ID, Version: 1, DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`, Checksum: "target-workflow", IsActive: true, CreatedBy: 1}
+	if err := gdb.Create(&targetWorkflow).Error; err != nil {
+		t.Fatalf("create target workflow failed: %v", err)
+	}
+	if err := gdb.Create(&models.AgentCapability{AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow, WorkflowID: &targetWorkflow.ID, Version: "1", InputSchemaJSON: "{}", OutputSchemaJSON: "{}", ConfigJSON: "{}", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
+		t.Fatalf("create capability failed: %v", err)
+	}
+	if err := gdb.Create(&models.AgentEndpoint{AgentID: target.ID, EndpointCode: "writer-local", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1:18080/a2a/agents/writer", Status: models.AgentEndpointStatusActive}).Error; err != nil {
+		t.Fatalf("create endpoint failed: %v", err)
+	}
+	service.agentInvoker = &recordingAgentInvoker{invoke: func(request AgentInvocationRequest) (*AgentInvocationResult, error) {
+		return &AgentInvocationResult{TaskID: request.TaskID, State: AgentInvocationStateAccepted, OutputJSON: `{}`, NotificationToken: "token"}, nil
+	}}
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+	run := models.Run{RunID: "run_agent_tool_waiting", ThreadID: "thread-agent-tool-waiting", AgentID: source.ID, WorkflowID: workflow.ID, UserID: 1, TriggerType: "api", InputJSON: `{}`, Status: models.RunStatusQueued}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err != nil {
+		t.Fatalf("accepted tool invocation should suspend without worker error: %v", err)
+	}
+	var storedRun models.Run
+	if err := gdb.Where("run_id = ?", run.RunID).First(&storedRun).Error; err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if storedRun.Status != models.RunStatusWaitingExternal {
+		t.Fatalf("expected waiting_external run, got %s", storedRun.Status)
+	}
+	var delegation models.Delegation
+	if err := gdb.Where("parent_run_id = ?", run.RunID).First(&delegation).Error; err != nil {
+		t.Fatalf("load delegation: %v", err)
+	}
+	if delegation.ChildRunID == "" || delegation.Status != models.DelegationStatusAccepted {
+		t.Fatalf("unexpected delegation: %+v", delegation)
 	}
 }
 
