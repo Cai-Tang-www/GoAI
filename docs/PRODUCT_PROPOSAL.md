@@ -475,6 +475,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放
 - 已引入平台自己的 Eino Graph executor，Runtime 可解析、校验并串行执行 Agent Workflow，将节点输入输出、重试和终态持久化为 RunStep
 - Workflow 的 `agent` 节点通过官方 A2A Go SDK 完成 Agent Card discovery，并使用带 PushConfig 的 HTTP+JSON `message:send` 异步委派；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
+- Supervisor 的 `agent` 节点支持 `routing_policy=registry`；Registry Router 只选择 active Agent、版本一致的 Workflow Capability 和健康 A2A Endpoint，并把选路结果写入 RunStep
 - A2A Gateway 已将协议请求映射为内部 Thread、Message、Delegation 和 Child Run；目标返回 accepted 后 Parent Run/RunStep 进入 `waiting_external` 并释放 Worker，目标 Agent 执行自己的 Eino Graph 后通过认证 callback 回流，源 Runtime 再经 Kafka `run_resume` 从持久化游标继续执行并回传 AG-UI SSE
 - `agent_group` 已实现显式多 Agent fan-out/fan-in：每个成员通过 A2A HTTP(S) 创建独立 Delegation、Child Run、A2A Task 和 Message，支持 `all`、`any`、`quorum`，group coordinator 负责聚合结果和恢复 Parent Run；late callback 仅更新审计，不改变已推进的 Parent checkpoint
 - callback、Result Message 与 resume 消息具备幂等收敛和持久化恢复能力，重复投递或进程重启不会重复执行后继节点
@@ -486,6 +487,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - 多 Runtime 部署下 callback/resume 恢复扫描的分片与共享协调
+- 基于负载、租户、成本或模型能力的高级 Supervisor / Router 策略
 - 任意并行 DAG、主动取消剩余远程 Child Task 与更复杂的跨节点补偿策略
 - AgentAsTool、多模态消息，以及完整前端管理控制台、批量运维和跨租户治理
 - 完整 Eval、成本分析和管理控制台
