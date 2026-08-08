@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"GoAI/db"
 	"GoAI/middlewares"
 	"GoAI/models"
 	"net/http"
@@ -13,12 +14,13 @@ import (
 
 // UserHandler 处理用户认证与用户管理接口，并显式持有数据库依赖。
 type UserHandler struct {
-	database *gorm.DB
+	database   *gorm.DB
+	rbacEnable bool
 }
 
-// NewUserHandler 创建用户接口处理器。
-func NewUserHandler(database *gorm.DB) *UserHandler {
-	return &UserHandler{database: database}
+// NewUserHandler 创建用户接口处理器，并显式注入 RBAC 开关。
+func NewUserHandler(database *gorm.DB, rbacEnable bool) *UserHandler {
+	return &UserHandler{database: database, rbacEnable: rbacEnable}
 }
 
 // RegisterUser 处理用户注册请求
@@ -51,8 +53,8 @@ func (h *UserHandler) RegisterUser(c *gin.Context) {
 		Email:    req.Email,
 		Password: string(hashedPassword),
 	}
-	if result := h.database.Create(&user); result.Error != nil {
-		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
+	if err := h.createUser(&user); err != nil {
+		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", err))
 		return
 	}
 
@@ -125,12 +127,27 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		Email:    req.Email,
 		Password: string(hashedPassword),
 	}
-	if result := h.database.Create(&user); result.Error != nil {
-		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", result.Error))
+	if err := h.createUser(&user); err != nil {
+		middlewares.AbortWithError(c, middlewares.InternalError("create user failed", err))
 		return
 	}
 
 	middlewares.Success(c, http.StatusCreated, buildUserPayload(user.ID, user.Username, user.Email, user.CreatedAt, user.UpdatedAt), "success")
+}
+
+func (h *UserHandler) createUser(user *models.User) error {
+	if user == nil {
+		return gorm.ErrInvalidData
+	}
+	return h.database.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(user).Error; err != nil {
+			return err
+		}
+		if !h.rbacEnable {
+			return nil
+		}
+		return db.AssignMemberRole(tx, uint64(user.ID))
+	})
 }
 
 // GetUserByID 处理根据 ID 获取用户的请求

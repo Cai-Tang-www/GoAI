@@ -204,6 +204,7 @@ func run(ctx context.Context) error {
 
 	router, err := routers.New(routers.Dependencies{
 		Database:         database,
+		RBACEnable:       cfg.RBACEnable,
 		RunService:       runService,
 		Runtime:          runtimeService,
 		A2AGateway:       a2aGateway,

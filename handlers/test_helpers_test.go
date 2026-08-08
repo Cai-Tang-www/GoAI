@@ -147,6 +147,7 @@ func newTestRouterWithRegistryAndMCPClient(t *testing.T, database *gorm.DB, publ
 	}
 	router, err := routers.New(routers.Dependencies{
 		Database:      database,
+		RBACEnable:    appConfig != nil && appConfig.RBACEnable,
 		RunService:    runService,
 		ChatService:   chatService,
 		AgentRegistry: agentRegistry,
