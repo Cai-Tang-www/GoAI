@@ -70,6 +70,21 @@ type AgentInvoker interface {
 	Invoke(context.Context, AgentInvocationRequest) (*AgentInvocationResult, error)
 }
 
+// AgentTaskCancellationRequest 描述通过 A2A 取消已发起任务所需的最小协议参数。
+type AgentTaskCancellationRequest struct {
+	SourceAgentCode     string
+	SourceAuthType      string
+	SourceCredentialRef string
+	TargetAgentCode     string
+	TaskID              string
+	Endpoints           []AgentInvocationEndpoint
+}
+
+// AgentTaskCanceller 定义 Runtime 通过 A2A 取消远程 Agent Task 的边界。
+type AgentTaskCanceller interface {
+	CancelTask(context.Context, AgentTaskCancellationRequest) error
+}
+
 // RunServiceOption 为 RunService 装配可选运行时依赖。
 type RunServiceOption func(*RunService) error
 

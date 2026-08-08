@@ -239,6 +239,8 @@ func taskState(status string) (a2a.TaskState, error) {
 		return a2a.TaskStateSubmitted, nil
 	case models.RunStatusRunning:
 		return a2a.TaskStateWorking, nil
+	case models.RunStatusWaitingExternal:
+		return a2a.TaskStateWorking, nil
 	case models.RunStatusSuccess:
 		return a2a.TaskStateCompleted, nil
 	case models.RunStatusFailed:

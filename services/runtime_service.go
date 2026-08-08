@@ -68,6 +68,7 @@ type RuntimeService struct {
 	observability   *observability.Bundle
 	resumePublisher RunResumePublisher
 	callbackSender  DelegationCallbackSender
+	taskCanceller   AgentTaskCanceller
 }
 
 // RuntimeServiceOption 配置 RuntimeService 的可选运行时依赖。
@@ -106,6 +107,17 @@ func WithDelegationCallbackSender(sender DelegationCallbackSender) RuntimeServic
 	}
 }
 
+// WithAgentTaskCanceller 注入通过 A2A 取消远程 Child Task 的协议客户端。
+func WithAgentTaskCanceller(canceller AgentTaskCanceller) RuntimeServiceOption {
+	return func(service *RuntimeService) error {
+		if canceller == nil {
+			return errors.New("configuring runtime service: agent task canceller is nil")
+		}
+		service.taskCanceller = canceller
+		return nil
+	}
+}
+
 // NewRuntimeService 使用显式依赖构造 RuntimeService。
 func NewRuntimeService(database *gorm.DB, runService *RunService, options ...RuntimeServiceOption) (*RuntimeService, error) {
 	if database == nil {
@@ -124,6 +136,14 @@ func NewRuntimeService(database *gorm.DB, runService *RunService, options ...Run
 		}
 	}
 	return service, nil
+}
+
+// CancelRemoteTask 提供 Runtime 使用的远程 A2A Task 取消边界。
+func (s *RuntimeService) CancelRemoteTask(ctx context.Context, request AgentTaskCancellationRequest) error {
+	if s == nil || s.taskCanceller == nil {
+		return errors.New("cancelling remote task: A2A task canceller is unavailable")
+	}
+	return s.taskCanceller.CancelTask(ctx, request)
 }
 
 // StartRun 在同一事务中创建或复用 Thread、持久化输入 Message 并创建 Run。
