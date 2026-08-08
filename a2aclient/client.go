@@ -217,6 +217,66 @@ func (c *Client) CheckAgentCard(ctx context.Context, request services.AgentCardH
 	}
 	return nil
 }
+
+// CancelTask 通过目标 Agent 的 A2A CancelTask 方法取消已存在的远程任务。
+func (c *Client) CancelTask(ctx context.Context, request services.AgentTaskCancellationRequest) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c == nil {
+		return invocationError(errors.New("A2A client is nil"), false)
+	}
+	if err := validateCancellationRequest(request); err != nil {
+		return invocationError(err, false)
+	}
+	var failures []error
+	for _, endpoint := range request.Endpoints {
+		baseURL, parseErr := parseEndpoint(endpoint)
+		if parseErr != nil {
+			failures = append(failures, invocationError(parseErr, false))
+			continue
+		}
+		card, resolveErr := agentcard.NewResolver(c.httpClient).Resolve(ctx, strings.TrimRight(baseURL.String(), "/"))
+		if resolveErr != nil {
+			failures = append(failures, invocationError(fmt.Errorf("discovering target agent card: %w", resolveErr), true))
+			continue
+		}
+		if validateErr := validateCardIdentity(card, request.TargetAgentCode, baseURL); validateErr != nil {
+			failures = append(failures, invocationError(validateErr, false))
+			continue
+		}
+		businessClient, clientErr := c.businessHTTPClient(services.AgentInvocationRequest{
+			SourceAgentCode: request.SourceAgentCode, SourceAuthType: request.SourceAuthType,
+			SourceCredentialRef: request.SourceCredentialRef,
+			TargetAgentCode:     request.TargetAgentCode,
+		}, card)
+		if clientErr != nil {
+			failures = append(failures, invocationError(fmt.Errorf("configuring business authentication: %w", clientErr), false))
+			continue
+		}
+		client, clientErr := sdkclient.NewFromCard(
+			ctx,
+			card,
+			sdkclient.WithDefaultsDisabled(),
+			sdkclient.WithRESTTransport(businessClient),
+			sdkclient.WithConfig(sdkclient.Config{PreferredTransports: []a2a.TransportProtocol{a2a.TransportProtocolHTTPJSON}}),
+		)
+		if clientErr != nil {
+			failures = append(failures, invocationError(fmt.Errorf("creating A2A transport: %w", clientErr), true))
+			continue
+		}
+		_, cancelErr := client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: a2a.TaskID(request.TaskID)})
+		if cancelErr == nil {
+			return nil
+		}
+		mappedErr := invocationError(fmt.Errorf("cancelling A2A task: %w", cancelErr), isRetryable(cancelErr))
+		failures = append(failures, mappedErr)
+		if ctx.Err() != nil || !isRetryable(mappedErr) {
+			return mappedErr
+		}
+	}
+	return invocationError(fmt.Errorf("all A2A cancellation endpoints failed: %w", errors.Join(failures...)), true)
+}
 func (c *Client) invokeEndpoint(ctx context.Context, request services.AgentInvocationRequest, endpoint services.AgentInvocationEndpoint) (*services.AgentInvocationResult, error) {
 	baseURL, err := parseEndpoint(endpoint)
 	if err != nil {
@@ -483,6 +543,22 @@ func validateRequest(request services.AgentInvocationRequest) error {
 	}
 	if !json.Valid([]byte(request.InputJSON)) {
 		return errors.New("agent invocation input must be valid JSON")
+	}
+	if len(request.Endpoints) == 0 {
+		return errors.New("target agent has no active A2A endpoint")
+	}
+	return nil
+}
+
+func validateCancellationRequest(request services.AgentTaskCancellationRequest) error {
+	if strings.TrimSpace(request.SourceAgentCode) == "" || strings.TrimSpace(request.TargetAgentCode) == "" {
+		return errors.New("source and target agent codes are required")
+	}
+	if strings.TrimSpace(request.TaskID) == "" {
+		return errors.New("task id is required")
+	}
+	if len(request.TaskID) > 64 {
+		return errors.New("task id must not exceed 64 characters")
 	}
 	if len(request.Endpoints) == 0 {
 		return errors.New("target agent has no active A2A endpoint")

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"GoAI/ai"
@@ -36,6 +37,7 @@ var (
 	errWorkflowNotFound      = errors.New("workflow not found")
 	errInvalidRunTransition  = errors.New("invalid run status transition")
 	errInvalidStepTransition = errors.New("invalid step status transition")
+	errRunCancelled          = errors.New("run execution cancelled")
 )
 
 type agentInvocationAcceptedError struct {
@@ -129,6 +131,14 @@ type RunService struct {
 	resumeLeaseDuration      time.Duration
 	resumeHeartbeatInterval  time.Duration
 	resumePersistenceTimeout time.Duration
+	executionMu              sync.Mutex
+	executionCancels         map[string]*runCancellation
+}
+
+type runCancellation struct {
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	refs   int
 }
 
 // NewRunService 使用显式数据库和事件发布器构造 RunService。
@@ -147,6 +157,7 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 		resumeLeaseDuration:      30 * time.Second,
 		resumeHeartbeatInterval:  10 * time.Second,
 		resumePersistenceTimeout: runFailurePersistenceTimeout,
+		executionCancels:         make(map[string]*runCancellation),
 	}
 	router, err := NewRegistryAgentRouter(database)
 	if err != nil {
@@ -163,6 +174,68 @@ func NewRunService(database *gorm.DB, publisher RunEventPublisher, options ...Ru
 		}
 	}
 	return service, nil
+}
+
+// withRunCancellation 为一个 Run 注册进程内取消信号，并在执行结束后移除注册。
+func (s *RunService) withRunCancellation(parent context.Context, runID string) (context.Context, func()) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	runID = strings.TrimSpace(runID)
+	s.executionMu.Lock()
+	if s.executionCancels == nil {
+		s.executionCancels = make(map[string]*runCancellation)
+	}
+	if existing, ok := s.executionCancels[runID]; ok {
+		existing.refs++
+		ctx := existing.ctx
+		s.executionMu.Unlock()
+		return ctx, s.releaseRunCancellation(runID, existing)
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	entry := &runCancellation{ctx: ctx, cancel: cancel, refs: 1}
+	s.executionCancels[runID] = entry
+	s.executionMu.Unlock()
+	return ctx, s.releaseRunCancellation(runID, entry)
+}
+
+func (s *RunService) releaseRunCancellation(runID string, entry *runCancellation) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			var cancel context.CancelCauseFunc
+			s.executionMu.Lock()
+			if current, ok := s.executionCancels[runID]; ok && current == entry {
+				current.refs--
+				if current.refs == 0 {
+					delete(s.executionCancels, runID)
+					cancel = current.cancel
+				}
+			}
+			s.executionMu.Unlock()
+			if cancel != nil {
+				cancel(nil)
+			}
+		})
+	}
+}
+
+// cancelActiveRun 停止当前进程内正在执行的 Run；持久化状态由 Runtime 事务负责。
+func (s *RunService) cancelActiveRun(runID string) {
+	runID = strings.TrimSpace(runID)
+	s.executionMu.Lock()
+	entry := s.executionCancels[runID]
+	s.executionMu.Unlock()
+	if entry != nil && entry.cancel != nil {
+		entry.cancel(errRunCancelled)
+	}
+}
+
+func isRunCancellation(ctx context.Context, err error) bool {
+	if errors.Is(err, errRunCancelled) {
+		return true
+	}
+	return ctx != nil && errors.Is(context.Cause(ctx), errRunCancelled)
 }
 
 var allowedRunTriggerTypes = map[string]struct{}{
@@ -1035,7 +1108,9 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 		}, err)
 	}()
 
-	run, claimed, err := s.claimRunForExecution(observedCtx, runID)
+	executeCtx, stopExecution := s.withRunCancellation(observedCtx, runID)
+	defer stopExecution()
+	run, claimed, err := s.claimRunForExecution(executeCtx, runID)
 	if err != nil {
 		return err
 	}
@@ -1046,18 +1121,24 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 
 	var workflow models.Workflow
 	if err := s.database.WithContext(observedCtx).First(&workflow, "id = ?", run.WorkflowID).Error; err != nil {
-		return s.failClaimedRun(observedCtx, run.RunID, err)
+		if isRunCancellation(executeCtx, err) {
+			return nil
+		}
+		return s.failClaimedRun(executeCtx, run.RunID, err)
 	}
 
 	def, err := ParseAndValidateWorkflowDefinition(workflow.DefinitionJSON)
 	if err != nil {
-		return s.failClaimedRun(observedCtx, run.RunID, err)
+		if isRunCancellation(executeCtx, err) {
+			return nil
+		}
+		return s.failClaimedRun(executeCtx, run.RunID, err)
 	}
 
 	if s.graphExecutor == nil {
-		return s.failClaimedRun(observedCtx, run.RunID, errors.New("run service graph executor is nil"))
+		return s.failClaimedRun(executeCtx, run.RunID, errors.New("run service graph executor is nil"))
 	}
-	outputJSON, err := s.graphExecutor.Execute(observedCtx, def, run.InputJSON, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
+	outputJSON, err := s.graphExecutor.Execute(executeCtx, def, run.InputJSON, func(nodeCtx context.Context, node WorkflowNode, input string) (string, error) {
 		if err := s.updateCurrentStep(nodeCtx, run.RunID, node.Key); err != nil {
 			return "", err
 		}
@@ -1068,17 +1149,26 @@ func (s *RunService) HandleRunExecute(ctx context.Context, runID string) (err er
 		return s.executeNodeWithRetryInputAt(nodeCtx, run, node, input, resumeNodeKey)
 	})
 	if err != nil {
-		if runExecutionStopped(err) {
+		if runExecutionStopped(err) || isRunCancellation(executeCtx, err) {
 			return nil
 		}
-		return s.failClaimedRun(observedCtx, run.RunID, err)
+		return s.failClaimedRun(executeCtx, run.RunID, err)
 	}
-	if err := s.validateRunOutputContract(observedCtx, run, outputJSON); err != nil {
-		return s.failClaimedRun(observedCtx, run.RunID, err)
+	if isRunCancellation(executeCtx, nil) {
+		return nil
+	}
+	if err := s.validateRunOutputContract(executeCtx, run, outputJSON); err != nil {
+		if isRunCancellation(executeCtx, err) {
+			return nil
+		}
+		return s.failClaimedRun(executeCtx, run.RunID, err)
 	}
 
-	if err := s.transitionRun(observedCtx, run, models.RunStatusSuccess, ""); err != nil {
-		return s.failClaimedRun(observedCtx, run.RunID, err)
+	if err := s.transitionRun(executeCtx, run, models.RunStatusSuccess, ""); err != nil {
+		if isRunCancellation(executeCtx, err) {
+			return nil
+		}
+		return s.failClaimedRun(executeCtx, run.RunID, err)
 	}
 	return nil
 }
@@ -1091,12 +1181,14 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 		return errors.New("resuming run: run_id and delegation_id are required")
 	}
 
-	run, delegation, lease, claimed, err := s.claimRunResume(ctx, runID, delegationID)
+	executeCtx, stopExecution := s.withRunCancellation(ctx, runID)
+	defer stopExecution()
+	run, delegation, lease, claimed, err := s.claimRunResume(executeCtx, runID, delegationID)
 	if err != nil || !claimed {
 		return err
 	}
 
-	executeCtx, stopHeartbeat := s.startResumeLeaseHeartbeat(ctx, lease)
+	executeCtx, stopHeartbeat := s.startResumeLeaseHeartbeat(executeCtx, lease)
 	stopped := false
 	stopLease := func() error {
 		stopped = true
@@ -1201,7 +1293,7 @@ func (s *RunService) HandleRunResume(ctx context.Context, runID, delegationID st
 		return s.executeNodeWithRetryInputAt(nodeCtx, &run, node, input, next)
 	})
 	if err != nil {
-		if runExecutionStopped(err) {
+		if runExecutionStopped(err) || isRunCancellation(executeCtx, err) {
 			return completeDelegation()
 		}
 		return fail(err)
@@ -1306,6 +1398,9 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 		return "", err
 	}
 	for offset := 0; offset <= maxNodeRetries; offset++ {
+		if isRunCancellation(ctx, nil) {
+			return "", errRunCancelled
+		}
 		attempt := startAttempt + offset
 		nodeRun := *run
 		nodeRun.InputJSON = nodeInput
@@ -1320,6 +1415,9 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 		}
 		if execErr == nil && ctx.Err() != nil {
 			execErr = ctx.Err()
+		}
+		if isRunCancellation(ctx, execErr) {
+			return "", errRunCancelled
 		}
 		finishedAt := time.Now()
 		latencyMS := finishedAt.Sub(*step.StartedAt).Milliseconds()
@@ -1385,6 +1483,9 @@ func (s *RunService) executeNodeWithRetryInputAt(ctx context.Context, run *model
 		finishErr := s.completeRunStep(persistCtx, run, step, outputJSON, latencyMS, &finishedAt)
 		cancel()
 		if finishErr != nil {
+			if isRunCancellation(ctx, finishErr) || isRunCancellation(ctx, nil) {
+				return "", errRunCancelled
+			}
 			failureCtx, failureCancel := runFailurePersistenceContext(ctx)
 			markErr := s.finishRunStep(failureCtx, run, step, models.RunStepStatusFailed, "{}", finishErr.Error(), latencyMS, &finishedAt)
 			failureCancel()
@@ -1623,6 +1724,14 @@ func (s *RunService) startRunStep(ctx context.Context, run *models.Run, node Wor
 	if err := s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := s.guardResumeLeaseTx(ctx, tx); err != nil {
 			return err
+		}
+		var currentRun models.Run
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("run_id = ?", run.RunID).First(&currentRun).Error; err != nil {
+			return fmt.Errorf("loading run before creating step: %w", err)
+		}
+		if currentRun.Status != models.RunStatusRunning {
+			return fmt.Errorf("%w: cannot create step for run %s in status %s", errInvalidRunTransition, run.RunID, currentRun.Status)
 		}
 		if err := tx.Create(step).Error; err != nil {
 			return err

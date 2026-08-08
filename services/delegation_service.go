@@ -16,6 +16,7 @@ import (
 	"GoAI/requestctx"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -118,6 +119,7 @@ type AgentDescriptor struct {
 type DelegationRuntime interface {
 	DescribeAgent(context.Context, string) (*AgentDescriptor, error)
 	AcceptDelegation(context.Context, AcceptDelegationCommand) (*DelegationResult, error)
+	CancelDelegation(context.Context, string, string, string) (*DelegationSnapshot, error)
 	DelegationSnapshot(context.Context, string, string, string) (*DelegationSnapshot, error)
 	CreateDelegationPushConfig(context.Context, string, string, DelegationPushConfig) (*DelegationPushConfig, error)
 	GetDelegationPushConfig(context.Context, string, string, string, string) (*DelegationPushConfig, error)
@@ -125,6 +127,88 @@ type DelegationRuntime interface {
 	DeleteDelegationPushConfig(context.Context, string, string, string, string) error
 	AcceptDelegationCallback(context.Context, DelegationCallbackCommand) error
 	ReconcileDelegation(context.Context, string) error
+}
+
+// CancelDelegation 通过 A2A 取消来源 Agent 发起的 Child Run，并回送统一终态 callback。
+func (s *RuntimeService) CancelDelegation(ctx context.Context, targetAgentCode, sourceAgentCode, taskID string) (snapshot *DelegationSnapshot, err error) {
+	targetAgentCode = strings.TrimSpace(targetAgentCode)
+	sourceAgentCode = strings.TrimSpace(sourceAgentCode)
+	taskID = strings.TrimSpace(taskID)
+	if targetAgentCode == "" || taskID == "" {
+		return nil, fmt.Errorf("%w: target agent and task id are required", errInvalidDelegation)
+	}
+	const cancellationMessage = "A2A task cancelled by source agent"
+	var childRunID string
+	err = s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var delegation models.Delegation
+		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("a2_a_task_id = ? OR child_run_id = ?", taskID, taskID).
+			First(&delegation)
+		if errors.Is(query.Error, gorm.ErrRecordNotFound) {
+			return errDelegationNotFound
+		}
+		if query.Error != nil {
+			return fmt.Errorf("loading delegation for cancellation: %w", query.Error)
+		}
+		var source, target models.Agent
+		if err := tx.First(&source, "id = ?", delegation.SourceAgentID).Error; err != nil {
+			return fmt.Errorf("loading delegation source agent: %w", err)
+		}
+		if err := tx.First(&target, "id = ?", delegation.TargetAgentID).Error; err != nil {
+			return fmt.Errorf("loading delegation target agent: %w", err)
+		}
+		if target.AgentCode != targetAgentCode || (sourceAgentCode != "" && source.AgentCode != sourceAgentCode) {
+			return errDelegationForbidden
+		}
+
+		var run models.Run
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("run_id = ?", delegation.ChildRunID).First(&run).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errRunNotFound
+			}
+			return fmt.Errorf("loading child run for cancellation: %w", err)
+		}
+		childRunID = run.RunID
+		if run.Status == models.RunStatusSuccess || run.Status == models.RunStatusFailed || run.Status == models.RunStatusCancelled {
+			return nil
+		}
+		if run.Status != models.RunStatusPending && run.Status != models.RunStatusQueued && run.Status != models.RunStatusRunning && run.Status != models.RunStatusWaitingExternal {
+			return fmt.Errorf("%w: cannot cancel child run in status %s", errInvalidRunTransition, run.Status)
+		}
+
+		now := time.Now()
+		var steps []models.RunStep
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("run_id = ? AND status IN ?", run.RunID, []string{models.RunStepStatusPending, models.RunStepStatusRunning, models.RunStepStatusWaitingExternal}).
+			Order("id ASC").Find(&steps).Error; err != nil {
+			return fmt.Errorf("loading active child run steps for cancellation: %w", err)
+		}
+		for index := range steps {
+			step := &steps[index]
+			latency := int64(0)
+			if step.StartedAt != nil {
+				latency = now.Sub(*step.StartedAt).Milliseconds()
+			}
+			if err := transitionStepStatus(ctx, tx, step, models.RunStepStatusSkipped, "{}", cancellationMessage, latency, &now); err != nil {
+				return err
+			}
+			if err := s.runService.finishRunStepLoopTx(ctx, tx, &run, step, models.RunStepStatusSkipped, "{}", cancellationMessage, latency, &now); err != nil {
+				return err
+			}
+		}
+		if err := transitionRunStatus(ctx, tx, &run, models.RunStatusCancelled, cancellationMessage); err != nil {
+			return err
+		}
+		return s.runService.finishRunLoopTx(ctx, tx, &run, models.RunStatusCancelled, cancellationMessage)
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.runService.cancelActiveRun(childRunID)
+	if err := s.ReconcileDelegation(ctx, childRunID); err != nil {
+		return nil, err
+	}
+	return s.DelegationSnapshot(ctx, targetAgentCode, sourceAgentCode, childRunID)
 }
 
 // DescribeAgent 返回活跃 Agent、能力和 A2A Endpoint 的协议无关发现描述。

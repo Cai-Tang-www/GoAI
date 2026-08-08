@@ -47,8 +47,26 @@ func (h *requestHandler) ListTasks(context.Context, *a2a.ListTasksRequest) (*a2a
 	return nil, a2a.ErrUnsupportedOperation
 }
 
-func (h *requestHandler) CancelTask(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
-	return nil, a2a.ErrTaskNotCancelable
+func (h *requestHandler) CancelTask(ctx context.Context, request *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	target, err := targetAgentFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if request == nil || strings.TrimSpace(string(request.ID)) == "" {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "task id is required")
+	}
+	source, err := h.authenticatedSource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := h.runtime.CancelDelegation(ctx, target, source, string(request.ID))
+	if err != nil {
+		if errors.Is(err, services.ErrDelegationForbidden()) {
+			h.logAuthorizationRejection(ctx, target, source, "delegation_cancel_forbidden")
+		}
+		return nil, mapRuntimeError(err)
+	}
+	return taskFromSnapshot(snapshot, nil)
 }
 
 func (h *requestHandler) SendMessage(ctx context.Context, request *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {

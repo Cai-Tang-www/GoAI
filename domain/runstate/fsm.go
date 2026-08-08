@@ -6,7 +6,8 @@ import "GoAI/models"
 func IsValidRunTransition(from, to string) bool {
 	transitions := map[string]map[string]struct{}{
 		models.RunStatusPending: {
-			models.RunStatusQueued: {},
+			models.RunStatusQueued:    {},
+			models.RunStatusCancelled: {},
 		},
 		models.RunStatusQueued: {
 			models.RunStatusRunning:   {},

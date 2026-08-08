@@ -55,6 +55,29 @@ func TestRunWaitingExternalTransitions(t *testing.T) {
 	}
 }
 
+func TestRunCancellationTransitions(t *testing.T) {
+	tests := []struct {
+		name string
+		from string
+		want bool
+	}{
+		{name: "pending can cancel", from: models.RunStatusPending, want: true},
+		{name: "queued can cancel", from: models.RunStatusQueued, want: true},
+		{name: "running can cancel", from: models.RunStatusRunning, want: true},
+		{name: "waiting can cancel", from: models.RunStatusWaitingExternal, want: true},
+		{name: "success cannot cancel", from: models.RunStatusSuccess, want: false},
+		{name: "failed cannot cancel", from: models.RunStatusFailed, want: false},
+		{name: "cancelled cannot cancel again", from: models.RunStatusCancelled, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsValidRunTransition(test.from, models.RunStatusCancelled); got != test.want {
+				t.Fatalf("IsValidRunTransition(%q, %q)=%v want=%v", test.from, models.RunStatusCancelled, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunStepWaitingExternalTransitions(t *testing.T) {
 	tests := []struct {
 		name string

@@ -173,6 +173,7 @@ func run(ctx context.Context) error {
 		services.WithRuntimeObservability(telemetry),
 		services.WithRunResumePublisher(producer),
 		services.WithDelegationCallbackSender(callbackSender),
+		services.WithAgentTaskCanceller(agentInvoker),
 	)
 	if err != nil {
 		return errors.Join(err, producer.Close(), redisinfra.Close(redisClient), db.Close(database))
