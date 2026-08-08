@@ -32,13 +32,13 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - Endpoint 使用统一 A2A 协议语义；本地开发通过同一 Gateway 的 loopback HTTP，远程通过 HTTPS，不提供 Service 直调旁路
 - 内部模型不直接复制 AG-UI/A2A 外部协议字段
 
-### 5. AG-UI Gateway（已完成，Issue #19）
+### 5. AG-UI Gateway（已完成，Issue #19、Issue #61）
 - 使用官方 AG-UI Go SDK 接收 `RunAgentInput`
 - 将协议请求映射为内部 `Thread / Message / Run`
 - 支持 Thread 创建与本人 active Thread 复用
 - 通过官方 SSE 事件回传 Run、RunStep 与 Result Message
 - 支持请求取消、稳定错误事件和历史消息去重
-- V1 仅支持普通文本消息，多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 显式拒绝；空对象/空数组不渗透到内部模型。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 分开建模
+- V1 仅支持普通文本消息，多模态、高级消息字段、非空 `state / tools / context / forwardedProps` 仍显式拒绝；空对象/空数组不渗透到内部模型。Issue #61 已支持 `parentRunId` Thread 分支 lineage、`waiting_input` interrupt 和用户主动 `resume`，并与 A2A Delegation Parent/Child Run 分开建模
 
 ### 6. A2A Gateway（已完成，Issue #20）
 - 使用官方 A2A Go SDK 提供 Agent Card、`message:send` 与 Task 状态查询
@@ -82,7 +82,6 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 
 后续补齐：
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
-- AG-UI `parentRunId` 分支和用户主动 resume
 - 更复杂的 Supervisor / Router / Worker 策略：基于负载、租户、成本或模型能力的动态路由
 ### 8. Eino Graph 能力化接入（Issue #37，V1 已落地）
 - 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制

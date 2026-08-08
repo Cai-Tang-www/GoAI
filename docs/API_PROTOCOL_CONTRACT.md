@@ -259,7 +259,11 @@ X-Trace-ID: trace-agui-001
 }
 ```
 
-V1 接受普通文本 `user / assistant / system / developer` 消息。非空 `state`、`tools`、`context`、`forwardedProps`、`parentRunId` 和 `resume` 会在进入流式阶段前拒绝；多模态和高级消息字段也不在 V1 范围内。
+V1 接受普通文本 `user / assistant / system / developer` 消息。非空 `state`、`tools`、`context` 和 `forwardedProps` 仍会在进入流式阶段前拒绝；多模态和高级消息字段也不在 V1 范围内。`parentRunId` 与 `resume` 已支持，分别用于创建 AG-UI 分支 Run 和恢复等待用户输入的 Run。
+
+`parentRunId` 只表达 AG-UI Thread 内的 Run lineage：父 Run 必须属于当前用户，子 Run 默认继承父 Run 的 Thread；显式传入的 `threadId` 必须与父 Run 一致。它不等价于 A2A Delegation 的 Parent/Child Run 关系。
+
+当 Run 进入 `waiting_input` 时，服务端会在 `RUN_FINISHED` 事件中返回 interrupt outcome。客户端使用同一个 `runId` 和 `resume` 数组重新调用本入口；每个 entry 必须包含 `interruptId`、`status`（`resolved` 或 `cancelled`）和 JSON `payload`。所有 pending interrupt 处理完成后，Run 会重新排队，并从持久化的后继节点继续执行。
 
 ### Event Stream
 
@@ -279,6 +283,31 @@ data: {"type":"TEXT_MESSAGE_END","messageId":"message-result"}
 data: {"type":"STEP_FINISHED","stepName":"prepare"}
 
 data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo"}
+```
+
+暂停等待用户输入时：
+
+```text
+data: {"type":"RUN_FINISHED","threadId":"thread-demo","runId":"run-demo","outcome":{"type":"interrupt","interrupts":[{"id":"approval","reason":"approval_required","message":"Approve this action?"}]}}
+```
+
+恢复请求示例：
+
+```http
+POST /api/agents/planner/agui HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "runId": "run-demo",
+  "resume": [
+    {
+      "interruptId": "approval",
+      "status": "resolved",
+      "payload": {"approved": true}
+    }
+  ]
+}
 ```
 
 当前可能出现的事件包括 `RUN_STARTED`、`STEP_STARTED`、`STEP_FINISHED`、`TEXT_MESSAGE_START`、`TEXT_MESSAGE_CONTENT`、`TEXT_MESSAGE_END`、`RUN_FINISHED` 和 `RUN_ERROR`。流开始前的参数错误使用普通 JSON envelope；流开始后的失败使用 AG-UI `RUN_ERROR`。
@@ -448,7 +477,7 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 ## 9. Compatibility and Current Limits
 
 - V1 只做文本消息和 callback 驱动的 Child suspend/resume；显式 `agent_group` 已支持多个 Child Run 的 `all`、`any`、`quorum` fan-out/fan-in 和部分失败聚合。不在当前范围内的是多模态和任意并行 DAG。
-- AG-UI `parentRunId` 分支和用户主动 resume 尚未开放；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。
+- AG-UI `parentRunId` 分支与用户主动 resume 已在 Issue #61 落地；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。当前仍不支持多模态消息和任意并行 DAG。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，不改变当前协议字段。
 - A2A 业务请求必须携带 `Authorization`、`X-GoAI-Agent-Code`、`X-GoAI-Timestamp`、`X-GoAI-Nonce`、`X-GoAI-Content-SHA256`；来源身份必须匹配委派 metadata，Task 查询仅允许委派来源 Agent。
 - 外部协议版本升级时，先更新 Gateway 适配和本文件，再变更内部领域模型；不要把 SDK 类型直接作为 Service 接口。

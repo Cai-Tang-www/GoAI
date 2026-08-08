@@ -472,7 +472,7 @@ V1 不要求一步做到完整 CozeLoop，但要提前预留：
 - AG-UI Gateway 已使用官方 Go SDK 完成首版接入
 - AG-UI 请求先映射到协议无关 Runtime，再原子创建或复用 Thread、持久化 Message 并触发 Run
 - RunStep 与 Result Message 可通过官方 SSE 事件回传
-- 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps`、`parentRunId` 和 `resume` 会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。AG-UI `parentRunId` 的 Thread 分支 lineage 与 A2A Delegation Parent/Child Run 是两套独立语义；前者和 resume 尚未开放
+- 当前仅支持普通文本消息；多模态、高级消息字段、非空 `state / tools / context / forwardedProps` 仍会显式拒绝，空对象/空数组仅作为 SDK 默认输入接受且不会写入内部 Run。Issue #61 已支持 `parentRunId` 的 Thread 分支 lineage、`waiting_input` interrupt 和用户主动 `resume`；AG-UI lineage 与 A2A Delegation Parent/Child Run 是两套独立语义
 - 已引入平台自己的 Eino Graph executor，Runtime 可解析、校验并串行执行 Agent Workflow，将节点输入输出、重试和终态持久化为 RunStep
 - Workflow 的 `agent` 节点通过官方 A2A Go SDK 完成 Agent Card discovery，并使用带 PushConfig 的 HTTP+JSON `message:send` 异步委派；同进程 Agent 也必须经过 loopback HTTP，远程 Agent 强制 HTTPS，不提供 Service 直调或 Kafka 旁路
 - Supervisor 的 `agent` 节点支持 `routing_policy=registry`；Registry Router 只选择 active Agent、版本一致的 Workflow Capability 和健康 A2A Endpoint，并把选路结果写入 RunStep
