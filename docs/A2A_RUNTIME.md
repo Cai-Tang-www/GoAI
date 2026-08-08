@@ -215,7 +215,8 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 - Parent Workflow 默认按拓扑顺序串行执行；显式 `agent_group` 节点支持多个 Agent 子任务 fan-out/fan-in，并提供 `all`、`any`、`quorum` 聚合和部分失败收敛。每个 group member 都通过 A2A HTTP(S) 建立独立 Delegation、Child Run、A2A Task 和 Message；任意并行 DAG 仍不在当前范围。
 - A2A 业务请求默认使用来源 Agent 自身 Endpoint 的 `credential_ref` 解析 HMAC-SHA256 密钥；Gateway 校验签名、时间窗、nonce 和来源身份，Agent Card discovery 公开且不泄露凭据。
 - V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
-- 尚未实现 mTLS/OIDC、跨副本共享 nonce store、AG-UI `parentRunId` 分支和用户主动 resume。
+- AG-UI `parentRunId` Thread 分支 lineage、`waiting_input` 中断和用户主动 `resume` 已实现；它们分别描述同一 Thread 内的分支关系与同一 Run 的继续执行，不等同于 A2A Delegation 的 Parent/Child Run。
+- 尚未实现 mTLS/OIDC 和跨副本共享 nonce store；当前 nonce store 是单进程内存实现，部署多个 Runtime 副本前必须替换为共享实现。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，但不改变现有 A2A 契约。
 - Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow、Registry Router、`agent_tool` 和显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
 
