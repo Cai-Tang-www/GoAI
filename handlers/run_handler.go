@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"GoAI/middlewares"
 	"GoAI/services"
@@ -14,11 +17,12 @@ const idempotencyKeyHeader = "Idempotency-Key"
 // RunHandler 负责把 Run HTTP 请求映射到显式注入的 RunService。
 type RunHandler struct {
 	service *services.RunService
+	runtime services.Runtime
 }
 
 // NewRunHandler 创建 Run 接口处理器。
-func NewRunHandler(service *services.RunService) *RunHandler {
-	return &RunHandler{service: service}
+func NewRunHandler(service *services.RunService, runtime services.Runtime) *RunHandler {
+	return &RunHandler{service: service, runtime: runtime}
 }
 
 // CreateRun 处理创建 Run 请求，并在进入 service 前完成基础参数校验。
@@ -198,6 +202,64 @@ func (h *RunHandler) ReplayRun(c *gin.Context) {
 		return
 	}
 	result, err := h.service.ReplayRun(c.Request.Context(), userID, isAdmin, runID, idempotencyKey)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	status := http.StatusAccepted
+	if result.IdempotentHit {
+		status = http.StatusOK
+	}
+	middlewares.Success(c, status, services.CreateRunResponse{
+		RunID:  result.Run.RunID,
+		Status: result.Run.Status,
+	}, "success")
+}
+
+// ReplayThread 基于 Thread 的持久化消息历史创建新的 replay Run。
+func (h *RunHandler) ReplayThread(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	threadID := c.Param("thread_id")
+	if appErr := validateResourceIDParam("thread_id", threadID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+
+	var payload struct {
+		SourceRunID string `json:"source_run_id"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil && !errors.Is(err, io.EOF) {
+		middlewares.AbortWithError(c, middlewares.ValidationFailed("invalid thread replay payload", nil))
+		return
+	}
+	payload.SourceRunID = strings.TrimSpace(payload.SourceRunID)
+	if payload.SourceRunID != "" {
+		if appErr := validateResourceIDParam("source_run_id", payload.SourceRunID); appErr != nil {
+			middlewares.AbortWithError(c, appErr)
+			return
+		}
+	}
+	idempotencyKey := c.GetHeader(idempotencyKeyHeader)
+	if appErr := validateIdempotencyKey(idempotencyKey); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	if h.runtime == nil {
+		middlewares.AbortWithError(c, middlewares.InternalError("thread replay runtime is unavailable", nil))
+		return
+	}
+
+	result, err := h.runtime.ReplayThread(c.Request.Context(), services.ThreadReplayCommand{
+		OwnerUserID:    userID,
+		IsAdmin:        isAdmin,
+		ThreadID:       threadID,
+		SourceRunID:    payload.SourceRunID,
+		IdempotencyKey: idempotencyKey,
+	})
 	if err != nil {
 		middlewares.AbortWithError(c, middlewares.WrapError(err))
 		return

@@ -30,10 +30,12 @@ const (
 	CodeRunNotFound               = "RUN_NOT_FOUND"
 	CodeRunAlreadyExists          = "RUN_ALREADY_EXISTS"
 	CodeRunNotWaitingInput        = "RUN_NOT_WAITING_INPUT"
+	CodeRunNotReplayable          = "RUN_NOT_REPLAYABLE"
 	CodeInterruptNotFound         = "INTERRUPT_NOT_FOUND"
 	CodeInterruptAlreadyResolved  = "INTERRUPT_ALREADY_RESOLVED"
 	CodeParentRunThreadMismatch   = "PARENT_RUN_THREAD_MISMATCH"
 	CodeThreadUnavailable         = "THREAD_UNAVAILABLE"
+	CodeThreadNotFound            = "THREAD_NOT_FOUND"
 	CodeMessageConflict           = "MESSAGE_CONFLICT"
 	CodeAgentNotFound             = "AGENT_NOT_FOUND"
 	CodeAgentAlreadyExists        = "AGENT_ALREADY_EXISTS"
@@ -343,6 +345,11 @@ func RunNotWaitingInputError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeRunNotWaitingInput, Message: "run is not waiting for input"}
 }
 
+// RunNotReplayableError 构造来源 Run 尚未进入可回放终态的错误。
+func RunNotReplayableError() *AppError {
+	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeRunNotReplayable, Message: "run is not replayable"}
+}
+
 // InterruptNotFoundError 构造不存在的 Interrupt 错误。
 func InterruptNotFoundError() *AppError {
 	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeInterruptNotFound, Message: "interrupt not found"}
@@ -361,6 +368,11 @@ func ParentRunThreadMismatchError() *AppError {
 // ThreadUnavailableError 构造 Thread 已关闭或归档错误。
 func ThreadUnavailableError() *AppError {
 	return &AppError{HTTPStatus: http.StatusConflict, Code: CodeThreadUnavailable, Message: "thread is not active"}
+}
+
+// ThreadNotFoundError 构造 Thread 不存在错误。
+func ThreadNotFoundError() *AppError {
+	return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeThreadNotFound, Message: "thread not found"}
 }
 
 // MessageConflictError 构造 MessageID 内容冲突错误。
@@ -412,6 +424,8 @@ func WrapError(err error) *AppError {
 		return RunAlreadyExistsError()
 	case errors.Is(err, services.ErrRunNotWaitingInput()):
 		return RunNotWaitingInputError()
+	case errors.Is(err, services.ErrRunNotReplayable()):
+		return RunNotReplayableError()
 	case errors.Is(err, services.ErrInterruptNotFound()):
 		return InterruptNotFoundError()
 	case errors.Is(err, services.ErrInterruptAlreadyResolved()):
@@ -420,6 +434,8 @@ func WrapError(err error) *AppError {
 		return ParentRunThreadMismatchError()
 	case errors.Is(err, services.ErrThreadUnavailable()):
 		return ThreadUnavailableError()
+	case errors.Is(err, services.ErrThreadNotFound()):
+		return ThreadNotFoundError()
 	case errors.Is(err, services.ErrMessageConflict()):
 		return MessageConflictError()
 	case errors.Is(err, services.ErrAgentNotFound()):

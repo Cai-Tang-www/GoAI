@@ -77,6 +77,7 @@ type Runtime interface {
 	StartRun(context.Context, StartRunCommand) (*StartRunResult, error)
 	ResumeRun(context.Context, ResumeRunCommand) (*StartRunResult, error)
 	Snapshot(context.Context, uint64, string) (*RunSnapshot, error)
+	ReplayThread(context.Context, ThreadReplayCommand) (*ThreadReplayResult, error)
 }
 
 // RuntimeService 协调 Thread、Message 与 Run 的原子创建和查询。

@@ -60,7 +60,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 	}
 
 	userHandler := handlers.NewUserHandler(deps.Database, deps.RBACEnable)
-	runHandler := handlers.NewRunHandler(deps.RunService)
+	runHandler := handlers.NewRunHandler(deps.RunService, deps.Runtime)
 	chatHandler := handlers.NewChatHandler(deps.ChatService)
 	agentRegistryHandler := handlers.NewAgentRegistryHandler(deps.AgentRegistry)
 	mcpRegistryHandler := handlers.NewMCPRegistryHandler(deps.MCPRegistry)
@@ -153,6 +153,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.GET("/runs/:run_id/trace", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetRunTrace)
 		apiGroup.GET("/runs/:run_id/loops", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.ListRunLoops)
 		apiGroup.POST("/runs/:run_id/replay", middlewares.RequirePermission(models.PermissionRunReplay), runHandler.ReplayRun)
+		apiGroup.POST("/threads/:thread_id/replay", middlewares.RequirePermission(models.PermissionRunReplay), runHandler.ReplayThread)
 		apiGroup.GET("/loops/:loop_id", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetLoop)
 		apiGroup.GET("/loops/:loop_id/evaluations", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.ListLoopEvaluations)
 
