@@ -55,6 +55,18 @@ Agent Registry 是 A2A Runtime 的管理面前置条件，不是新的执行 tra
 10. 成功 callback 发布 Kafka `run_resume`；Resume Worker 原子 claim Delegation 与 Parent Run，从持久化后继节点游标继续 Eino Graph。
 11. Parent Run 终态和 Result Message 继续由 AG-UI SSE 从数据库快照回传；客户端断开不会取消已经落库的跨 Agent 协作。
 
+## Task cancel
+
+来源 Agent 可以对自己发起的 Task 调用官方 A2A `CancelTask`：
+
+1. A2A Gateway 校验机器身份，并把 `task_id`、来源 Agent 和目标 Agent 交给 Runtime。
+2. Runtime 在事务中锁定 Delegation 和 Child Run，校验来源/目标归属。
+3. `pending/queued/running/waiting_external` Child Run 进入 `cancelled`，活动 RunStep 进入 `skipped`；终态重复取消直接返回当前快照。
+4. 目标 Runtime 取消进程内执行上下文，禁止后续 Workflow 节点继续创建。
+5. 事务提交后复用已有 Delegation reconciliation 和认证 callback，把取消终态回送源 Agent；源 Runtime 按既有 callback 规则终结 Parent Run 或 group。
+
+取消仍然通过 A2A HTTP(S) 发生。Kafka 只承载目标 Run 的内部执行/恢复消息，不能替代取消请求。
+
 ## 委派关联元数据
 
 GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信息：
@@ -174,7 +186,7 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 
 ## 当前限制
 
-- Parent Workflow 默认按拓扑顺序串行执行；显式 `agent_group` 节点支持多个 Agent 子任务 fan-out/fan-in，并提供 `all`、`any`、`quorum` 聚合和部分失败收敛。每个 group member 都通过 A2A HTTP(S) 建立独立 Delegation、Child Run、A2A Task 和 Message；任意并行 DAG、主动取消剩余远程 Child Task 仍不在当前范围。
+- Parent Workflow 默认按拓扑顺序串行执行；显式 `agent_group` 节点支持多个 Agent 子任务 fan-out/fan-in，并提供 `all`、`any`、`quorum` 聚合和部分失败收敛。每个 group member 都通过 A2A HTTP(S) 建立独立 Delegation、Child Run、A2A Task 和 Message；任意并行 DAG 仍不在当前范围。
 - A2A 业务请求默认使用来源 Agent 自身 Endpoint 的 `credential_ref` 解析 HMAC-SHA256 密钥；Gateway 校验签名、时间窗、nonce 和来源身份，Agent Card discovery 公开且不泄露凭据。
 - V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
 - 尚未实现 mTLS/OIDC、跨副本共享 nonce store、AG-UI `parentRunId` 分支和用户主动 resume。
@@ -189,6 +201,7 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 - HTTPS endpoint 成功调用。
 - Agent Card 缺少能力或 Delegation extension 时拒绝。
 - Task ID mismatch、失败终态、callback token/签名错误和 context cancellation。
+- A2A CancelTask 的来源校验、目标状态迁移、重复取消幂等和真实 HTTP transport。
 - accepted 后 Parent Run/RunStep 进入 `waiting_external`，Worker 不进行 Task polling。
 - 重复 callback、重复 resume 消息、callback/resume 发布失败和进程重启恢复。
 - `input_from` 聚合、稳定 TaskID/MessageID、节点重试不重复创建子任务。

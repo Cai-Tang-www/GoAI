@@ -16,7 +16,7 @@
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
 - Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
 - MCP Server 管理接口使用 `mcp:create`、`mcp:read`、`mcp:update`；`mcp:manage` 允许管理员跨 owner 管理，Tool Runtime 的调用权限为 `mcp:invoke`。
-- A2A Agent Card discovery 公开；`message:send`、Task 查询、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
+- A2A Agent Card discovery 公开；`message:send`、Task 查询/取消、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
 
@@ -47,6 +47,7 @@
 | `GET` | `/a2a/agents/:agent_code/.well-known/agent-card.json` | protocol gateway | A2A Agent Card |
 | `POST` | `/a2a/agents/:agent_code/message:send` | protocol gateway | A2A Task |
 | `GET` | `/a2a/agents/:agent_code/tasks/:task_id` | protocol gateway | A2A Task |
+| `POST` | `/a2a/agents/:agent_code/tasks/:task_id:cancel` | protocol gateway | canceled A2A Task |
 | `POST` | `/a2a/agents/:source_agent_code/callbacks/tasks/:task_id` | protocol gateway | callback accepted |
 
 ## 3. Authentication Examples
@@ -383,6 +384,21 @@ Accept: application/json
 
 返回的 Task 状态由 Child Run 和 Delegation 快照映射而来。Task 查询保留为诊断与兼容接口；Parent Worker 不轮询该接口等待终态，主链路使用 Push Notification callback。
 
+### Cancel Task
+
+来源 Agent 只能取消自己发起且目标 Agent 匹配的 Task：
+
+```http
+POST /a2a/agents/writer/tasks/run-child-001:cancel HTTP/1.1
+Authorization: GoAI-HMAC-SHA256 ...
+X-GoAI-Agent-Code: planner
+X-GoAI-Timestamp: 2026-08-08T10:00:00Z
+X-GoAI-Nonce: nonce-cancel-001
+X-GoAI-Content-SHA256: <sha256-of-empty-body>
+```
+
+目标 Runtime 在事务中将可取消的 Child Run 推进为 `cancelled`，将活动 RunStep 推进为 `skipped`，再通过已有 PushConfig callback 回送取消终态。已处于 `completed`、`failed` 或 `canceled` 的 Task 重复取消直接返回当前终态快照；来源不匹配、目标不匹配或 Task 不存在分别映射为 `Unauthorized` 或 `TaskNotFound`。
+
 ### Terminal Callback and Parent Resume
 
 Target Child Run 进入 `completed / failed / canceled / rejected` 后，将官方 A2A `StreamResponse` 事件发送到：
@@ -431,7 +447,7 @@ A2A 错误使用官方 JSON-RPC/HTTP+JSON 错误结构，不使用 GoAI 普通 H
 
 ## 9. Compatibility and Current Limits
 
-- V1 只做文本消息和 callback 驱动的 Child suspend/resume；显式 `agent_group` 已支持多个 Child Run 的 `all`、`any`、`quorum` fan-out/fan-in 和部分失败聚合。不在当前范围内的是多模态、A2A Cancel、任意并行 DAG 和主动取消剩余远程 Child Task。
+- V1 只做文本消息和 callback 驱动的 Child suspend/resume；显式 `agent_group` 已支持多个 Child Run 的 `all`、`any`、`quorum` fan-out/fan-in 和部分失败聚合。不在当前范围内的是多模态和任意并行 DAG。
 - AG-UI `parentRunId` 分支和用户主动 resume 尚未开放；它们与 A2A Delegation 的 Parent/Child Run 不是同一语义。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，不改变当前协议字段。
 - A2A 业务请求必须携带 `Authorization`、`X-GoAI-Agent-Code`、`X-GoAI-Timestamp`、`X-GoAI-Nonce`、`X-GoAI-Content-SHA256`；来源身份必须匹配委派 metadata，Task 查询仅允许委派来源 Agent。

@@ -78,6 +78,7 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - 持久化 Workflow/Delegation 游标与成功 RunStep checkpoint 支持从 crash point 继续；遗留 running Step、再次 A2A 挂起和终态残留租约均可幂等收敛
 - **Issue #47 已落地**：显式 `agent_group` 支持多 Child Run fan-out/fan-in、`all`/`any`/`quorum` 聚合、部分失败收敛、group coordinator resume lease 和真实 A2A HTTP 多 Runtime 闭环
 - **Issue #55 已落地**：Supervisor 的 `agent` 节点可通过 `routing_policy=registry` 按 active Agent、版本一致的 Workflow Capability 和健康 A2A Endpoint 确定性选择 Worker；选择结果进入 RunStep，跨 Agent 委派仍固定经过 A2A Client/Gateway
+- **Issue #57 已落地**：来源 Agent 可通过 A2A `CancelTask` 取消 Child Run；目标 Runtime 原子收敛 Child Run/RunStep、停止本地执行上下文并通过认证 callback 回送取消终态，重复取消幂等
 
 后续补齐：
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
