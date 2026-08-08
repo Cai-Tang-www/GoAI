@@ -16,6 +16,7 @@
 - `/api/agents/:agent_code/agui` 和 `/api/runs` 需要 `run:create`。
 - Agent Registry 管理接口分别使用 `agent:create`、`agent:read`、`agent:update`、`agent:activate`；`agent:manage` 只提供跨 owner 管理能力，不替代路由权限。
 - MCP Server 管理接口使用 `mcp:create`、`mcp:read`、`mcp:update`；`mcp:manage` 允许管理员跨 owner 管理，Tool Runtime 的调用权限为 `mcp:invoke`。
+- Loop / Trace 查询接口使用 `loop:read`；member 只能查询自己 Run 关联的数据，admin 可以跨 owner 查询。
 - A2A Agent Card discovery 公开；`message:send`、Task 查询/取消、终态 callback 及其他业务路由默认要求 `GoAI-HMAC-SHA256` 机器身份认证。
 
 ### Trace and Errors
@@ -43,6 +44,10 @@
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
 | `GET` | `/api/runs/:run_id/steps` | JWT + `run:read` | JSON envelope |
+| `GET` | `/api/runs/:run_id/trace` | JWT + `loop:read` | Run/Step/Loop/A2A trace snapshot |
+| `GET` | `/api/runs/:run_id/loops` | JWT + `loop:read` | Loop list |
+| `GET` | `/api/loops/:loop_id` | JWT + `loop:read` | Loop detail with evaluations |
+| `GET` | `/api/loops/:loop_id/evaluations` | JWT + `loop:read` | Evaluation list |
 | `POST` | `/api/runs/:run_id/replay` | JWT + `run:replay` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/a2a/agents/:agent_code/.well-known/agent-card.json` | protocol gateway | A2A Agent Card |
 | `POST` | `/a2a/agents/:agent_code/message:send` | protocol gateway | A2A Task |
@@ -147,6 +152,36 @@ Idempotency-Key: replay-demo-001
 ```
 
 Replay 使用原 Run 的输入和 Workflow 创建新 Run；管理员可以跨用户查询或回放，普通用户只能访问自己的 Run。
+
+### Loop / Trace 查询
+
+Loop / Trace 查询是只读管理接口，不改变 Run、Delegation 或 Evaluation 状态。`GET /api/runs/:run_id/trace` 返回根 Run、可访问的 A2A 子 Run、RunStep、LoopRecord、Delegation、DelegationGroup、Message 和 LoopEvaluation；集合字段始终返回空数组而不是 `null`。
+
+```http
+GET /api/runs/run-demo/trace HTTP/1.1
+Authorization: Bearer <jwt>
+X-Trace-ID: trace-observe-001
+```
+
+```json
+{
+  "code": "OK",
+  "message": "success",
+  "data": {
+    "root_run": {"RunID": "run-demo", "Status": "success"},
+    "runs": [],
+    "steps": [],
+    "loops": [],
+    "delegations": [],
+    "delegation_groups": [],
+    "messages": [],
+    "evaluations": []
+  },
+  "trace_id": "trace-observe-001"
+}
+```
+
+`/api/runs/:run_id/loops` 只返回指定 Run 的 Loop；`/api/loops/:loop_id` 返回单个 Loop 和其评估结果；`/api/loops/:loop_id/evaluations` 只返回评估记录。普通用户访问其他 owner 的 Run 或 Loop 返回 `403 AUTH_FORBIDDEN`，不存在的 Loop 返回 `404 LOOP_NOT_FOUND`。
 
 Run 查询保持既有 Run 字段格式，并在 Parent resume 存在时增加可选的 `resume` 对象：
 
