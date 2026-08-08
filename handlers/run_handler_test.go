@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"GoAI/config"
+	"GoAI/db"
 	"GoAI/middlewares"
 	"GoAI/models"
 	"GoAI/requestctx"
@@ -20,10 +21,151 @@ import (
 func setupRunIntegrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	gdb := openSQLiteTestDB(t)
-	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Run{}, &models.RunStep{}, &models.RunInterrupt{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}); err != nil {
+	if err := gdb.AutoMigrate(&models.User{}, &models.Agent{}, &models.Workflow{}, &models.Thread{}, &models.Message{}, &models.Run{}, &models.RunStep{}, &models.RunInterrupt{}, &models.RunIdempotency{}, &models.Delegation{}, &models.DelegationGroup{}); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
 	return gdb
+}
+
+func TestThreadReplayAPIUsesHistoryIdempotencyAndOwnership(t *testing.T) {
+	gdb := setupRunIntegrationDB(t)
+	user1, user2, agent, workflow := seedRunIntegrationData(t, gdb)
+	config.AppConfig = &config.Config{JWTSecret: "test-secret", RBACEnable: false}
+	thread := models.Thread{ThreadID: "thread-api-replay", OwnerUserID: uint64(user1.ID), Status: models.ThreadStatusActive, MetadataJSON: "{}"}
+	if err := gdb.Create(&thread).Error; err != nil {
+		t.Fatalf("create thread failed: %v", err)
+	}
+	if err := gdb.Create(&models.Message{
+		MessageID: "message-api-replay", ThreadID: thread.ThreadID, RunID: "run-api-source",
+		SenderType: models.MessageSenderUser, ReceiverType: models.MessageSenderAgent,
+		MessageType: models.MessageTypeInput, ContentType: "text", ContentJSON: `{"text":"hello"}`,
+		MetadataJSON: "{}", Status: models.MessageStatusDelivered,
+	}).Error; err != nil {
+		t.Fatalf("create thread message failed: %v", err)
+	}
+	loopID := "loop-api-source"
+	if err := gdb.Create(&models.Run{
+		RunID: "run-api-source", ThreadID: thread.ThreadID, TraceID: "trace-api-source", LoopID: &loopID,
+		AgentID: agent.ID, WorkflowID: workflow.ID, UserID: uint64(user1.ID), TriggerType: "agui",
+		InputJSON: `{}`, Status: models.RunStatusSuccess, Provider: "deepseek", Model: "deepseek-chat",
+	}).Error; err != nil {
+		t.Fatalf("create source run failed: %v", err)
+	}
+	token1, err := middlewares.GenerateToken(user1.ID)
+	if err != nil {
+		t.Fatalf("generate token1 failed: %v", err)
+	}
+	token2, err := middlewares.GenerateToken(user2.ID)
+	if err != nil {
+		t.Fatalf("generate token2 failed: %v", err)
+	}
+	router := newTestRouter(t, gdb, nil)
+
+	replay := func(token, key string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/threads/"+thread.ThreadID+"/replay", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	first := replay(token1, "thread-replay-key", []byte(`{"source_run_id":"run-api-source"}`))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first thread replay expected 202, got %d body=%s", first.Code, first.Body.String())
+	}
+	firstEnvelope := decodeEnvelope(t, first)
+	if firstEnvelope.Code != "OK" {
+		t.Fatalf("unexpected first replay response: %s", first.Body.String())
+	}
+	var firstData services.CreateRunResponse
+	if err := json.Unmarshal(firstEnvelope.Data, &firstData); err != nil {
+		t.Fatalf("decode first replay data failed: %v", err)
+	}
+	if firstData.RunID == "" || firstData.Status != models.RunStatusQueued {
+		t.Fatalf("unexpected first replay data: %+v", firstData)
+	}
+
+	repeated := replay(token1, "thread-replay-key", []byte(`{"source_run_id":"run-api-source"}`))
+	if repeated.Code != http.StatusOK {
+		t.Fatalf("repeated thread replay expected 200, got %d body=%s", repeated.Code, repeated.Body.String())
+	}
+	var repeatedData services.CreateRunResponse
+	if err := json.Unmarshal(decodeEnvelope(t, repeated).Data, &repeatedData); err != nil {
+		t.Fatalf("decode repeated replay data failed: %v", err)
+	}
+	if repeatedData.RunID != firstData.RunID {
+		t.Fatalf("idempotent replay returned different run: first=%s repeated=%s", firstData.RunID, repeatedData.RunID)
+	}
+
+	forbidden := replay(token2, "other-key", []byte(`{"source_run_id":"run-api-source"}`))
+	if forbidden.Code != http.StatusForbidden || decodeEnvelope(t, forbidden).Code != middlewares.CodeAuthForbidden {
+		t.Fatalf("foreign thread replay should be forbidden, status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+}
+
+func TestThreadReplayAPIAppliesRBACOwnershipAndAdminOverride(t *testing.T) {
+	gdb := setupRBACIntegrationDB(t)
+	owner, foreign, agent, workflow := seedRunIntegrationData(t, gdb)
+	admin := models.User{Username: "thread-replay-admin", Email: "thread-replay-admin@test.com", Password: "p3"}
+	if err := gdb.Create(&admin).Error; err != nil {
+		t.Fatalf("create admin failed: %v", err)
+	}
+	config.AppConfig = &config.Config{
+		JWTSecret:                  "thread-replay-rbac-secret",
+		RBACEnable:                 true,
+		RBACBootstrapAdminUsername: admin.Username,
+		ModelProviders:             map[string]config.ModelProviderConfig{},
+	}
+	if err := db.SeedRBAC(gdb, config.AppConfig); err != nil {
+		t.Fatalf("seed RBAC failed: %v", err)
+	}
+	thread := models.Thread{ThreadID: "thread-rbac-replay", OwnerUserID: uint64(owner.ID), Status: models.ThreadStatusActive, MetadataJSON: "{}"}
+	if err := gdb.Create(&thread).Error; err != nil {
+		t.Fatalf("create thread failed: %v", err)
+	}
+	loopID := "loop-rbac-replay-source"
+	if err := gdb.Create(&models.Run{
+		RunID: "run-rbac-replay-source", ThreadID: thread.ThreadID, TraceID: "trace-rbac-replay-source", LoopID: &loopID,
+		AgentID: agent.ID, WorkflowID: workflow.ID, UserID: uint64(owner.ID), TriggerType: "agui", InputJSON: `{}`, Status: models.RunStatusSuccess,
+	}).Error; err != nil {
+		t.Fatalf("create source run failed: %v", err)
+	}
+	ownerToken, err := middlewares.GenerateToken(owner.ID)
+	if err != nil {
+		t.Fatalf("generate owner token failed: %v", err)
+	}
+	foreignToken, err := middlewares.GenerateToken(foreign.ID)
+	if err != nil {
+		t.Fatalf("generate foreign token failed: %v", err)
+	}
+	adminToken, err := middlewares.GenerateToken(admin.ID)
+	if err != nil {
+		t.Fatalf("generate admin token failed: %v", err)
+	}
+	router := newTestRouter(t, gdb, nil)
+	replay := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/threads/"+thread.ThreadID+"/replay", bytes.NewBufferString(`{"source_run_id":"run-rbac-replay-source"}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+
+	ownerResponse := replay(ownerToken)
+	if ownerResponse.Code != http.StatusAccepted {
+		t.Fatalf("owner replay expected 202, got %d body=%s", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	foreignResponse := replay(foreignToken)
+	if foreignResponse.Code != http.StatusForbidden || decodeEnvelope(t, foreignResponse).Code != middlewares.CodeAuthForbidden {
+		t.Fatalf("foreign member replay expected 403 AUTH_FORBIDDEN, got %d body=%s", foreignResponse.Code, foreignResponse.Body.String())
+	}
+	adminResponse := replay(adminToken)
+	if adminResponse.Code != http.StatusAccepted {
+		t.Fatalf("admin replay expected 202, got %d body=%s", adminResponse.Code, adminResponse.Body.String())
+	}
 }
 
 func seedRunIntegrationData(t *testing.T, gdb *gorm.DB) (models.User, models.User, models.Agent, models.Workflow) {

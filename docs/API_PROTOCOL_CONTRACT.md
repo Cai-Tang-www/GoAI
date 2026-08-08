@@ -49,6 +49,7 @@
 | `GET` | `/api/loops/:loop_id` | JWT + `loop:read` | Loop detail with evaluations |
 | `GET` | `/api/loops/:loop_id/evaluations` | JWT + `loop:read` | Evaluation list |
 | `POST` | `/api/runs/:run_id/replay` | JWT + `run:replay` | JSON envelope, `202` or idempotent `200` |
+| `POST` | `/api/threads/:thread_id/replay` | JWT + `run:replay` | Thread history replay, JSON envelope, `202` or idempotent `200` |
 | `GET` | `/a2a/agents/:agent_code/.well-known/agent-card.json` | protocol gateway | A2A Agent Card |
 | `POST` | `/a2a/agents/:agent_code/message:send` | protocol gateway | A2A Task |
 | `GET` | `/a2a/agents/:agent_code/tasks/:task_id` | protocol gateway | A2A Task |
@@ -152,6 +153,24 @@ Idempotency-Key: replay-demo-001
 ```
 
 Replay 使用原 Run 的输入和 Workflow 创建新 Run；管理员可以跨用户查询或回放，普通用户只能访问自己的 Run。
+
+### Thread Replay
+
+```http
+POST /api/threads/thread-demo/replay HTTP/1.1
+Authorization: Bearer <jwt>
+Content-Type: application/json
+Idempotency-Key: thread-replay-demo-001
+X-Trace-ID: trace-thread-replay-001
+
+{"source_run_id":"run-demo"}
+```
+
+`source_run_id` 可省略；省略时选择该 Thread 中按 `created_at ASC, id ASC` 的稳定历史里最新的终态 Run。可回放终态为 `success`、`failed` 和 `cancelled`。Thread 必须存在且为 `active`，来源 Run 必须属于目标 Thread。
+
+回放会创建新的 `run_id`、`trace_id` 和 `loop_id`，保留目标 Thread 以及来源 Run 的 Agent、Workflow、Provider 和 Model。新 Run 的 `input_json` 是不可变消息快照：`messages[]` 同时提供可执行的 `role/content` 字段和原始 `content_json`、发送方、接收方、Delegation 关联、状态与协议元数据，并按 `created_at ASC, id ASC` 排序；回放不会复制旧 Message。
+
+首次请求返回 `202 Accepted`，相同调用者、operation、Thread、来源和 `Idempotency-Key` 返回 `200 OK` 与同一 Run。相同 key 对应不同 Thread 或来源时返回 `409 IDEMPOTENCY_KEY_REUSED`；管理员和普通用户的幂等键彼此隔离。普通用户只能回放自己的 Thread，管理员可以跨 owner 回放，但新 Run 仍归属于目标 Thread owner。
 
 ### Loop / Trace 查询
 

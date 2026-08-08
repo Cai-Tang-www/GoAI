@@ -46,6 +46,10 @@ func (f *fakeAGUIRuntime) Snapshot(ctx context.Context, ownerUserID uint64, runI
 	return f.snapshotFunc(ctx, ownerUserID, runID)
 }
 
+func (f *fakeAGUIRuntime) ReplayThread(context.Context, services.ThreadReplayCommand) (*services.ThreadReplayResult, error) {
+	return nil, errors.New("thread replay is not configured")
+}
+
 func TestNewAGUIHandlerRejectsNilRuntime(t *testing.T) {
 	if _, err := NewAGUIHandler(nil); err == nil {
 		t.Fatal("expected nil runtime to be rejected")

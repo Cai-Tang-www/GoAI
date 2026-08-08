@@ -117,6 +117,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - 统一响应 envelope、稳定错误码和 `trace_id`
 - Run / RunStep 状态机与持久化
 - `POST /api/runs`、Run 查询、步骤查询和 Replay
+- `POST /api/threads/:thread_id/replay`：基于 Thread 历史 Message 创建新的 replay Run，支持来源选择、幂等和 owner/admin 隔离
 - Loop / Trace / Evaluation 只读查询 API，带 owner/admin 隔离
 - Run 创建幂等与 Kafka 消费原子 claim
 - Kafka 异步 Run 执行链路
@@ -266,6 +267,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `GET /api/loops/:loop_id`
 - `GET /api/loops/:loop_id/evaluations`
 - `POST /api/runs/:run_id/replay`
+- `POST /api/threads/:thread_id/replay`
 - `POST/GET/PUT`、停用、健康检查和 Tool discovery：`/api/mcp/servers/*`
 - `/api/users/*`：用户管理接口
 
@@ -287,7 +289,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - 认证：`AUTH_MISSING_TOKEN` `AUTH_INVALID_TOKEN` `AUTH_INVALID_CREDENTIALS`
 - 授权：`AUTH_FORBIDDEN`
 - 参数：`VALIDATION_FAILED` `INVALID_ID`
-- 资源：`USER_NOT_FOUND` `USER_ALREADY_EXISTS` `RUN_NOT_FOUND`
+- 资源：`USER_NOT_FOUND` `USER_ALREADY_EXISTS` `RUN_NOT_FOUND` `RUN_NOT_REPLAYABLE` `THREAD_NOT_FOUND` `THREAD_UNAVAILABLE`
 - MCP：`MCP_SERVER_NOT_FOUND` `MCP_SERVER_ALREADY_EXISTS` `MCP_SERVER_INVALID_STATE` `MCP_SERVER_UNHEALTHY` `MCP_TOOL_NOT_FOUND` `MCP_TOOL_INVOCATION_FAILED` `MCP_INVALID_CONFIG` `MCP_CREDENTIAL_NOT_FOUND` `MCP_TRANSPORT_FAILED` `MCP_PROTOCOL_FAILED` `MCP_TOOL_REPORTED_ERROR`
 - 幂等：`IDEMPOTENCY_KEY_REUSED`
 - Provider：`PROVIDER_NOT_FOUND` `PROVIDER_DRIVER_NOT_FOUND` `PROVIDER_INVALID_CONFIG` `MODEL_NOT_CONFIGURED` `STREAM_INTERRUPTED`

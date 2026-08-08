@@ -22,6 +22,9 @@ func TestWrapErrorMapsKnownSentinels(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "run not found", err: services.ErrRunNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeRunNotFound},
+		{name: "run not replayable", err: services.ErrRunNotReplayable(), wantStatus: http.StatusConflict, wantCode: CodeRunNotReplayable},
+		{name: "thread not found", err: services.ErrThreadNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeThreadNotFound},
+		{name: "thread unavailable", err: services.ErrThreadUnavailable(), wantStatus: http.StatusConflict, wantCode: CodeThreadUnavailable},
 		{name: "loop not found", err: services.ErrLoopNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeLoopNotFound},
 		{name: "run forbidden", err: services.ErrRunForbidden(), wantStatus: http.StatusForbidden, wantCode: CodeAuthForbidden},
 		{name: "agent not found", err: services.ErrAgentNotFound(), wantStatus: http.StatusNotFound, wantCode: CodeAgentNotFound},
