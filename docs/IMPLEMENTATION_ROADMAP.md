@@ -77,11 +77,12 @@ GoAI 当前主线已经从“Run/Workflow 后端”升级为“多 Agent 协议�
 - Parent resume 使用带 heartbeat、expires_at 和递增 execution attempt fencing token 的执行租约，多实例并发只能有一个 worker 接管
 - 持久化 Workflow/Delegation 游标与成功 RunStep checkpoint 支持从 crash point 继续；遗留 running Step、再次 A2A 挂起和终态残留租约均可幂等收敛
 - **Issue #47 已落地**：显式 `agent_group` 支持多 Child Run fan-out/fan-in、`all`/`any`/`quorum` 聚合、部分失败收敛、group coordinator resume lease 和真实 A2A HTTP 多 Runtime 闭环
+- **Issue #55 已落地**：Supervisor 的 `agent` 节点可通过 `routing_policy=registry` 按 active Agent、版本一致的 Workflow Capability 和健康 A2A Endpoint 确定性选择 Worker；选择结果进入 RunStep，跨 Agent 委派仍固定经过 A2A Client/Gateway
 
 后续补齐：
 - 多副本共享 nonce store、凭据轮换与 mTLS/OIDC 增强
 - AG-UI `parentRunId` 分支和用户主动 resume
-- Supervisor / Router / Worker 协作策略
+- 更复杂的 Supervisor / Router / Worker 策略：基于负载、租户、成本或模型能力的动态路由
 ### 8. Eino Graph 能力化接入（Issue #37，V1 已落地）
 - 把 Graph 定位成 Agent 的一种执行能力，而不是平台的 Agent 间通信机制
 - 已使用 Eino Graph 执行单个 Agent 内部的串行/可达 Workflow 节点

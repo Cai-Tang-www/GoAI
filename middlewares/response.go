@@ -40,6 +40,9 @@ const (
 	CodeEndpointNotFound          = "ENDPOINT_NOT_FOUND"
 	CodeEndpointAlreadyExists     = "ENDPOINT_ALREADY_EXISTS"
 	CodeEndpointHealthCheckFailed = "ENDPOINT_HEALTH_CHECK_FAILED"
+	CodeAgentRouteNotFound        = "AGENT_ROUTE_NOT_FOUND"
+	CodeAgentRouteUnavailable     = "AGENT_ROUTE_UNAVAILABLE"
+	CodeAgentRouteInvalid         = "AGENT_ROUTE_INVALID"
 	CodeWorkflowNotFound          = "WORKFLOW_NOT_FOUND"
 	CodeMCPServerNotFound         = "MCP_SERVER_NOT_FOUND"
 	CodeMCPServerAlreadyExists    = "MCP_SERVER_ALREADY_EXISTS"
@@ -401,6 +404,12 @@ func WrapError(err error) *AppError {
 		return EndpointAlreadyExistsError()
 	case errors.Is(err, services.ErrEndpointHealthCheckFailed()):
 		return EndpointHealthCheckFailedError(err)
+	case errors.Is(err, services.ErrAgentRouteNotFound()):
+		return &AppError{HTTPStatus: http.StatusNotFound, Code: CodeAgentRouteNotFound, Message: "agent route not found", Err: err}
+	case errors.Is(err, services.ErrAgentRouteUnavailable()):
+		return &AppError{HTTPStatus: http.StatusServiceUnavailable, Code: CodeAgentRouteUnavailable, Message: "agent route is unavailable", Err: err}
+	case errors.Is(err, services.ErrAgentRouteInvalid()):
+		return &AppError{HTTPStatus: http.StatusBadRequest, Code: CodeAgentRouteInvalid, Message: "agent route is invalid", Err: err}
 	case errors.Is(err, services.ErrWorkflowNotFound()):
 		return WorkflowNotFoundError()
 	case errors.Is(err, context.DeadlineExceeded):

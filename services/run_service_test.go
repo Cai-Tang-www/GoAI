@@ -1179,9 +1179,17 @@ func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T)
 	if err := gdb.Create(&target).Error; err != nil {
 		t.Fatalf("create target agent failed: %v", err)
 	}
+	targetWorkflow := models.Workflow{
+		AgentID: target.ID, Version: 1,
+		DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`,
+		Checksum:       "target-workflow", IsActive: true, CreatedBy: 1,
+	}
+	if err := gdb.Create(&targetWorkflow).Error; err != nil {
+		t.Fatalf("create target workflow failed: %v", err)
+	}
 	capability := models.AgentCapability{
 		AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow,
-		Version: "1", InputSchemaJSON: "{}", OutputSchemaJSON: "{}", ConfigJSON: "{}", Status: models.AgentCapabilityStatusActive,
+		WorkflowID: &targetWorkflow.ID, Version: "1", InputSchemaJSON: "{}", OutputSchemaJSON: "{}", ConfigJSON: "{}", Status: models.AgentCapabilityStatusActive,
 	}
 	if err := gdb.Create(&capability).Error; err != nil {
 		t.Fatalf("create capability failed: %v", err)
@@ -1238,6 +1246,61 @@ func TestHandleRunExecuteAgentNodeUsesA2AInvokerAndAggregatedInput(t *testing.T)
 	}
 }
 
+func TestHandleRunExecuteAgentNodeRoutesByRegistryCapability(t *testing.T) {
+	gdb, service, _ := setupRunTestService(t)
+	source, workflow := seedAgentWorkflow(t, gdb)
+	workflow.DefinitionJSON = `{"entry_node":"delegate","nodes":[{"key":"delegate","type":"agent","config":{"capability":"write","routing_policy":"registry"}}],"edges":[]}`
+	if err := gdb.Save(&workflow).Error; err != nil {
+		t.Fatalf("update workflow failed: %v", err)
+	}
+	createWorker := func(code string) {
+		t.Helper()
+		agent := models.Agent{AgentCode: code, Name: code, OwnerUserID: 1, Status: models.AgentStatusActive}
+		if err := gdb.Create(&agent).Error; err != nil {
+			t.Fatalf("create worker %s: %v", code, err)
+		}
+		workerWorkflow := models.Workflow{AgentID: agent.ID, Version: 1, DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`, Checksum: code + "-checksum", IsActive: true, CreatedBy: 1}
+		if err := gdb.Create(&workerWorkflow).Error; err != nil {
+			t.Fatalf("create worker workflow %s: %v", code, err)
+		}
+		capability := models.AgentCapability{AgentID: agent.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow, WorkflowID: &workerWorkflow.ID, Version: "1", Status: models.AgentCapabilityStatusActive}
+		if err := gdb.Create(&capability).Error; err != nil {
+			t.Fatalf("create worker capability %s: %v", code, err)
+		}
+		endpoint := models.AgentEndpoint{AgentID: agent.ID, EndpointCode: code + "-local", Protocol: models.AgentEndpointProtocolA2A, Transport: models.AgentEndpointTransportHTTP, Address: "http://127.0.0.1/a2a/agents/" + code, Status: models.AgentEndpointStatusActive}
+		if err := gdb.Create(&endpoint).Error; err != nil {
+			t.Fatalf("create worker endpoint %s: %v", code, err)
+		}
+	}
+	createWorker("writer-z")
+	createWorker("writer-a")
+
+	invoker := &recordingAgentInvoker{result: &AgentInvocationResult{TaskID: "dynamic-task", State: AgentInvocationStateCompleted, OutputJSON: `{"document":"ok"}`}}
+	service.agentInvoker = invoker
+	service.stepRetryBackoffs = []time.Duration{0, 0, 0}
+	run := models.Run{RunID: "run_registry_route", ThreadID: "thread-registry-route", AgentID: source.ID, WorkflowID: workflow.ID, UserID: 1, TriggerType: "api", InputJSON: `{}`, Status: models.RunStatusQueued}
+	if err := gdb.Create(&run).Error; err != nil {
+		t.Fatalf("create run failed: %v", err)
+	}
+	if err := service.HandleRunExecute(context.Background(), run.RunID); err != nil {
+		t.Fatalf("handle dynamically routed run failed: %v", err)
+	}
+	if len(invoker.requests) != 1 || invoker.requests[0].TargetAgentCode != "writer-a" {
+		t.Fatalf("router did not select deterministic worker: %+v", invoker.requests)
+	}
+	var step models.RunStep
+	if err := gdb.Where("run_id = ? AND step_key = ? AND status = ?", run.RunID, "delegate", models.RunStepStatusSuccess).First(&step).Error; err != nil {
+		t.Fatalf("load routed step: %v", err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(step.OutputJSON), &output); err != nil {
+		t.Fatalf("decode routed output: %v", err)
+	}
+	if output["routing_policy"] != "registry" || output["selection_reason"] != "registry:agent_code=writer-a;endpoint_code=writer-a-local" || output["workflow_version"] != float64(1) {
+		t.Fatalf("route metadata was not persisted: %+v", output)
+	}
+}
+
 func TestHandleRunResumeCompletesPreviousDelegationWhenNextAgentSuspends(t *testing.T) {
 	gdb, service, _ := setupRunTestService(t)
 	source, workflow := seedAgentWorkflow(t, gdb)
@@ -1257,9 +1320,17 @@ func TestHandleRunResumeCompletesPreviousDelegationWhenNextAgentSuspends(t *test
 		if err := gdb.Create(&agent).Error; err != nil {
 			t.Fatalf("create target agent %s failed: %v", target.code, err)
 		}
+		workflow := models.Workflow{
+			AgentID: agent.ID, Version: 1,
+			DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`,
+			Checksum:       target.code + "-workflow", IsActive: true, CreatedBy: 1,
+		}
+		if err := gdb.Create(&workflow).Error; err != nil {
+			t.Fatalf("create target workflow %s failed: %v", target.code, err)
+		}
 		capability := models.AgentCapability{
 			AgentID: agent.ID, CapabilityCode: target.capability, Name: target.capability,
-			CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "1", Status: models.AgentCapabilityStatusActive,
+			CapabilityType: models.AgentCapabilityTypeWorkflow, WorkflowID: &workflow.ID, Version: "1", Status: models.AgentCapabilityStatusActive,
 		}
 		if err := gdb.Create(&capability).Error; err != nil {
 			t.Fatalf("create target capability %s failed: %v", target.capability, err)
@@ -1373,7 +1444,11 @@ func TestHandleRunExecuteAgentNodeDoesNotInvokeWithoutInvoker(t *testing.T) {
 	if err := gdb.Create(&target).Error; err != nil {
 		t.Fatalf("create target agent failed: %v", err)
 	}
-	if err := gdb.Create(&models.AgentCapability{AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow, Version: "1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
+	targetWorkflow := models.Workflow{AgentID: target.ID, Version: 1, DefinitionJSON: `{"entry_node":"worker","nodes":[{"key":"worker","type":"noop"}],"edges":[]}`, Checksum: "target-workflow", IsActive: true, CreatedBy: 1}
+	if err := gdb.Create(&targetWorkflow).Error; err != nil {
+		t.Fatalf("create target workflow failed: %v", err)
+	}
+	if err := gdb.Create(&models.AgentCapability{AgentID: target.ID, CapabilityCode: "write", Name: "Write", CapabilityType: models.AgentCapabilityTypeWorkflow, WorkflowID: &targetWorkflow.ID, Version: "1", Status: models.AgentCapabilityStatusActive}).Error; err != nil {
 		t.Fatalf("create capability failed: %v", err)
 	}
 	run := models.Run{RunID: "run_agent_no_invoker", ThreadID: "thread-agent", AgentID: source.ID, WorkflowID: workflow.ID, UserID: 1, TriggerType: "api", InputJSON: `{}`, Status: models.RunStatusQueued}

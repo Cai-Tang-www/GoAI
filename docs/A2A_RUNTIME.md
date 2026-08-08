@@ -43,16 +43,17 @@ Agent Registry 是 A2A Runtime 的管理面前置条件，不是新的执行 tra
 
 ## 出站调用流程
 
-1. `RunService` 执行 Workflow 的 `agent` 节点。
-2. Runtime 根据目标 `Agent`、活跃 `AgentCapability` 和活跃 A2A `AgentEndpoint` 组装 `AgentInvocationRequest`。
-3. `a2aclient` 通过 Agent Card discovery 获取目标能力声明，并校验 HTTP+JSON binding、Capability、Delegation extension 和 Push Notification 能力。
-4. Client 使用官方 A2A Go SDK 发送带 PushConfig 的 `message:send`，并设置 `ReturnImmediately=true`。
-5. 目标 Gateway 将请求映射为 `Message + Delegation + Child Run`，持久化 PushConfig，投递 Child Run，并立即返回 accepted Task。
-6. 源 Runtime 将当前 Parent Run 和 RunStep 原子推进为 `waiting_external`，保存 Parent Step 与后继节点游标，随后释放 Worker。
-7. Target Child Run 独立执行；进入成功、失败或取消终态后，将 Task/Artifact 作为签名 callback 发往源 Gateway。
-8. 源 Runtime 校验机器身份、notification token、Task/Delegation 关联和终态事件哈希，幂等写入 Result Message。
-9. 成功 callback 发布 Kafka `run_resume`；Resume Worker 原子 claim Delegation 与 Parent Run，从持久化后继节点游标继续 Eino Graph。
-10. Parent Run 终态和 Result Message 继续由 AG-UI SSE 从数据库快照回传；客户端断开不会取消已经落库的跨 Agent 协作。
+1. Supervisor `RunService` 执行 Workflow 的 `agent` 节点。
+2. `routing_policy=registry` 时，Registry Router 按 `agent_code` 稳定顺序，从 active Agent、版本一致的 Workflow Capability 和 active A2A Endpoint 中选择 Worker；显式 `target_agent` 也经过同一套 Registry 门禁。
+3. Runtime 根据选中的 `Agent`、`AgentCapability` 和 `AgentEndpoint` 组装 `AgentInvocationRequest`，并把选路原因和 Workflow 版本写入 RunStep 输出。
+4. `a2aclient` 通过 Agent Card discovery 获取目标能力声明，并校验 HTTP+JSON binding、Capability、Delegation extension 和 Push Notification 能力。
+5. Client 使用官方 A2A Go SDK 发送带 PushConfig 的 `message:send`，并设置 `ReturnImmediately=true`。
+6. 目标 Gateway 将请求映射为 `Message + Delegation + Child Run`，持久化 PushConfig，投递 Child Run，并立即返回 accepted Task。
+7. 源 Runtime 将当前 Parent Run 和 RunStep 原子推进为 `waiting_external`，保存 Parent Step 与后继节点游标，随后释放 Worker。
+8. Target Child Run 独立执行；进入成功、失败或取消终态后，将 Task/Artifact 作为签名 callback 发往源 Gateway。
+9. 源 Runtime 校验机器身份、notification token、Task/Delegation 关联和终态事件哈希，幂等写入 Result Message。
+10. 成功 callback 发布 Kafka `run_resume`；Resume Worker 原子 claim Delegation 与 Parent Run，从持久化后继节点游标继续 Eino Graph。
+11. Parent Run 终态和 Result Message 继续由 AG-UI SSE 从数据库快照回传；客户端断开不会取消已经落库的跨 Agent 协作。
 
 ## 委派关联元数据
 
@@ -82,8 +83,8 @@ GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信
   "key": "delegate_writer",
   "type": "agent",
   "config": {
-    "target_agent": "writer",
     "capability": "write",
+    "routing_policy": "registry",
     "input_from": ["planner"],
     "timeout_ms": 120000
   }
@@ -92,8 +93,9 @@ GoAI 在 Delegation 扩展中同时传递协议路由信息和运行时关联信
 
 字段语义：
 
-- `target_agent`：目标 Agent 的稳定 `agent_code`。
+- `target_agent`：可选的目标 Agent 稳定 `agent_code`；填写后仍需通过 Registry 门禁。
 - `capability`：目标 Agent 暴露的活跃能力编码。
+- `routing_policy`：填 `registry` 时由 Router 根据能力、Workflow 版本和健康 A2A Endpoint 按稳定顺序选择 Worker；未填写时必须提供 `target_agent`。
 - `input_from`：只读取成功的上游 RunStep 输出，并与原始 Run 输入聚合。
 - `timeout_ms`：出站 A2A discovery 与委派提交的超时预算，默认 120 秒，最大 300 秒；不会让 Parent Worker 阻塞等待 Child Run 终态。
 
@@ -177,7 +179,7 @@ RecoveryWorker 周期扫描并恢复以下窗口：
 - V1 nonce store 为单进程内存实现；多副本部署前必须升级为共享 nonce store。
 - 尚未实现 mTLS/OIDC、跨副本共享 nonce store、AG-UI `parentRunId` 分支和用户主动 resume。
 - 远程来源 Delegation 当前可能使用远程 A2A Task ID 填充 `ChildRunID`；后续可独立建模 `RemoteTaskID`，但不改变现有 A2A 契约。
-- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow 与显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
+- Eino Graph 当前作为单个 Agent 的能力执行器，已接入串行/可达 Workflow、Registry Router 和显式 `agent_group` 节点；Agent 间通信仍必须复用本 A2A 边界，后续并行 DAG、条件和流式能力不得引入 Service 直调旁路。
 
 ## 测试契约
 
