@@ -122,6 +122,7 @@ Agent Registry 管理“谁可以被调用”，A2A Runtime 管理“这次如�
 - Workflow DSL 基础校验与拓扑排序
 - Provider Registry 与 OpenAI-compatible 调试通道
 - Agent Registry 管理 API：Agent / Capability / Endpoint 注册、ownership、健康检查、发布校验与发现
+- MCP Tool Runtime：MCP Server owner-scoped Registry、官方 SDK 健康检查、Tool discovery snapshot 与 Eino `tool` 节点调用
 - HTTP / SSE / Kafka / Worker 优雅关闭
 - 服务治理：进程内限流、下游超时、按 target 熔断、快速失败和恢复观测（见 `docs/SERVICE_GOVERNANCE.md`）
 - 旧 Task 模型、空包和误导性文件名清理
@@ -252,6 +253,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
 - `POST /api/runs/:run_id/replay`
+- `POST/GET/PUT`、停用、健康检查和 Tool discovery：`/api/mcp/servers/*`
 - `/api/users/*`：用户管理接口
 
 ### 统一响应
@@ -273,6 +275,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - 授权：`AUTH_FORBIDDEN`
 - 参数：`VALIDATION_FAILED` `INVALID_ID`
 - 资源：`USER_NOT_FOUND` `USER_ALREADY_EXISTS` `RUN_NOT_FOUND`
+- MCP：`MCP_SERVER_NOT_FOUND` `MCP_SERVER_ALREADY_EXISTS` `MCP_SERVER_INVALID_STATE` `MCP_SERVER_UNHEALTHY` `MCP_TOOL_NOT_FOUND` `MCP_TOOL_INVOCATION_FAILED` `MCP_INVALID_CONFIG` `MCP_CREDENTIAL_NOT_FOUND` `MCP_TRANSPORT_FAILED` `MCP_PROTOCOL_FAILED` `MCP_TOOL_REPORTED_ERROR`
 - 幂等：`IDEMPOTENCY_KEY_REUSED`
 - Provider：`PROVIDER_NOT_FOUND` `PROVIDER_DRIVER_NOT_FOUND` `PROVIDER_INVALID_CONFIG` `MODEL_NOT_CONFIGURED` `STREAM_INTERRUPTED`
 - 系统：`INTERNAL_ERROR` `RBAC_PERMISSION_LOAD_FAILED` `KAFKA_PUBLISH_FAILED`
@@ -298,6 +301,8 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `run:create` `run:read` `run:replay`
 - `user:read_self` `user:update_self` `user:manage`
 - `chat:use`
+- `agent:create` `agent:read` `agent:update` `agent:activate` `agent:manage`
+- `mcp:create` `mcp:read` `mcp:update` `mcp:invoke` `mcp:manage`
 
 请求通过 JWT 认证但权限不足时，返回 `403` 和 `AUTH_FORBIDDEN`。
 
@@ -350,6 +355,7 @@ Kafka producer、Redis 和 MySQL 的第三方 `Close()` API 不接收 context，
 - [产品设计提案](docs/PRODUCT_PROPOSAL.md)
 - [实施路线图](docs/IMPLEMENTATION_ROADMAP.md)
 - [统一响应契约](docs/RESPONSE_CONTRACT.md)
+- [MCP Tool Runtime](docs/MCP_RUNTIME.md)
 - [HTTP / AG-UI / A2A 协议契约](docs/API_PROTOCOL_CONTRACT.md)
 - [HTTP 压测基线](bench/README.md)
 
