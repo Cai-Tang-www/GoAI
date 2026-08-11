@@ -1,20 +1,23 @@
-import { Button, Form, Input, Modal, Select, Table, message } from 'antd'
+import { Button, Form, Input, InputNumber, Modal, Select, Table } from 'antd'
 import { Eraser, Play, Search } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiRequest, errorDescription } from '../api/client'
+import { apiRequest } from '../api/client'
 import type { Agent, RecentRun } from '../api/types'
 import { EmptyPanel } from '../components/EmptyPanel'
 import { PageHeader } from '../components/PageHeader'
+import { RequestErrorAlert } from '../components/RequestErrorAlert'
 import { StatusTag } from '../components/StatusTag'
 import { formatTime, shortId } from '../lib/format'
 import { clearRecentRuns, loadRecentRuns, rememberRun } from '../lib/storage'
+import { isFormValidationError, notifyRequestError } from '../lib/notify'
 
 export function RunsPage() {
   const [runs, setRuns] = useState<RecentRun[]>(loadRecentRuns)
   const [agents, setAgents] = useState<Agent[]>([])
   const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [formError, setFormError] = useState<unknown>(null)
   const [form] = Form.useForm()
   const navigate = useNavigate()
 
@@ -26,6 +29,7 @@ export function RunsPage() {
   }, [])
 
   const createRun = async (values: { agent_code: string; workflow_version?: number; input?: string }) => {
+    setFormError(null)
     setCreating(true)
     try {
       let input: unknown = {}
@@ -33,13 +37,14 @@ export function RunsPage() {
       const result = await apiRequest<{ run_id: string; status: string }>('/api/runs', {
         method: 'POST',
         headers: { 'Idempotency-Key': crypto.randomUUID() },
-        body: { agent_code: values.agent_code, workflow_version: values.workflow_version || 0, trigger_type: 'manual', input },
+        body: { agent_code: values.agent_code, workflow_version: Number(values.workflow_version ?? 0), trigger_type: 'manual', input },
       })
       rememberRun({ runId: result.run_id, agentCode: values.agent_code, status: result.status, title: '手动触发', visitedAt: new Date().toISOString() })
       setCreateOpen(false)
       navigate(`/runs/${result.run_id}`)
     } catch (error) {
-      message.error(errorDescription(error))
+      if (isFormValidationError(error)) setFormError(error)
+      else notifyRequestError(error)
     } finally {
       setCreating(false)
     }
@@ -50,7 +55,7 @@ export function RunsPage() {
       <PageHeader
         title="运行记录"
         description="后端不提供 Run 列表，此处保存由当前浏览器发起或访问过的运行。"
-        actions={<Button type="primary" icon={<Play size={16} />} onClick={() => setCreateOpen(true)}>手动触发</Button>}
+        actions={<Button type="primary" icon={<Play size={16} />} onClick={() => { setFormError(null); setCreateOpen(true) }}>手动触发</Button>}
       />
       <div className="run-search-strip">
         <Search size={17} />
@@ -78,10 +83,11 @@ export function RunsPage() {
       </section>
       <Modal title="手动触发 Run" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => form.submit()} confirmLoading={creating} okText="触发运行">
         <Form form={form} layout="vertical" onFinish={createRun} initialValues={{ workflow_version: 0, input: '{}' }}>
+          {Boolean(formError) && <RequestErrorAlert error={formError} />}
           <Form.Item name="agent_code" label="Agent" rules={[{ required: true }]}>
             <Select showSearch options={agents.map((agent) => ({ value: agent.agent_code, label: `${agent.name} (${agent.agent_code})` }))} />
           </Form.Item>
-          <Form.Item name="workflow_version" label="Workflow 版本"><Input type="number" min={0} /></Form.Item>
+          <Form.Item name="workflow_version" label="Workflow 版本"><InputNumber min={0} precision={0} style={{ width: '100%' }} /></Form.Item>
           <Form.Item name="input" label="输入 JSON" rules={[{ validator: async (_, value) => { if (value) JSON.parse(value) } }]}><Input.TextArea className="code-input" rows={7} /></Form.Item>
         </Form>
       </Modal>

@@ -73,6 +73,10 @@ a { color: #286f6c; }
 .json-view pre { margin: 0; padding: 18px; overflow: auto; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .json-copy { position: absolute !important; z-index: 2; top: 6px; right: 6px; color: #a4b8b5 !important; background: #223238 !important; }
 .error-actions { display: flex; gap: 8px; }
+.request-error-toast { display: inline-flex; align-items: center; gap: 12px; text-align: left; }
+.request-error-toast span, .request-error-toast strong, .request-error-toast small { display: block; }
+.request-error-toast small { margin-top: 2px; color: #778589; }
+.form-request-error { margin-bottom: 18px; }
 .code-editor { border: 1px solid #d8e0de; border-radius: 3px; overflow: hidden; }
 .code-editor .cm-editor { font-size: 12px; }
 

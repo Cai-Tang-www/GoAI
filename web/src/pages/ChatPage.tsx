@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   CircleStop,
+  CircleSlash2,
   Clock3,
   MoreHorizontal,
   PanelLeft,
@@ -12,16 +13,19 @@ import {
   Send,
   Trash2,
   UserRound,
+  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { ApiError, apiRequest, errorDescription } from '../api/client'
-import { streamAgent } from '../api/agui'
+import { buildInterruptResume, streamAgent } from '../api/agui'
+import type { InterruptDecision } from '../api/agui'
 import type { Agent, AGUIEvent, ChatMessage, ChatSession } from '../api/types'
 import { StatusTag } from '../components/StatusTag'
 import { formatTime, prettyJSON } from '../lib/format'
 import { loadSessions, rememberRun, saveSessions } from '../lib/storage'
+import { notifyRequestError } from '../lib/notify'
 
 interface PendingInterrupt {
   id: string
@@ -103,7 +107,7 @@ export function ChatPage() {
     if (id === activeId) setActiveId(sessions.find((session) => session.id !== id)?.id || '')
   }
 
-  const handleEvent = (session: ChatSession, event: AGUIEvent) => {
+  const handleEvent = (session: ChatSession, event: AGUIEvent, streamRunId = '') => {
     const sessionId = session.id
     if (event.type === 'RUN_STARTED') {
       updateRuntime(sessionId, (current) => ({ ...current, status: 'running' }))
@@ -113,17 +117,17 @@ export function ChatPage() {
     if (event.type === 'STEP_STARTED' && event.stepName) updateRuntime(sessionId, (current) => ({ ...current, steps: [...current.steps, { name: event.stepName!, status: 'running' }] }))
     if (event.type === 'STEP_FINISHED' && event.stepName) updateRuntime(sessionId, (current) => ({ ...current, steps: current.steps.map((step) => step.name === event.stepName ? { ...step, status: 'success' } : step) }))
     if (event.type === 'TEXT_MESSAGE_START' && event.messageId) {
-      updateSession(sessionId, (session) => ({ ...session, messages: [...session.messages, { id: event.messageId!, role: 'assistant', content: '', pending: true, runId: event.runId || session.currentRunId, createdAt: new Date().toISOString() }] }))
+      updateSession(sessionId, (session) => ({ ...session, messages: [...session.messages, { id: event.messageId!, role: 'assistant', content: '', pending: true, runId: event.runId || streamRunId || session.currentRunId, createdAt: new Date().toISOString() }] }))
     }
     if (event.type === 'TEXT_MESSAGE_CONTENT' && event.messageId) {
       updateSession(sessionId, (session) => {
         const exists = session.messages.some((item) => item.id === event.messageId)
-        const messages = exists ? session.messages.map((item) => item.id === event.messageId ? { ...item, content: item.content + (event.delta || '') } : item) : [...session.messages, { id: event.messageId!, role: 'assistant' as const, content: event.delta || '', pending: true, runId: session.currentRunId, createdAt: new Date().toISOString() }]
+        const messages = exists ? session.messages.map((item) => item.id === event.messageId ? { ...item, content: item.content + (event.delta || '') } : item) : [...session.messages, { id: event.messageId!, role: 'assistant' as const, content: event.delta || '', pending: true, runId: event.runId || streamRunId || session.currentRunId, createdAt: new Date().toISOString() }]
         return { ...session, messages }
       })
     }
     if (event.type === 'TEXT_MESSAGE_END' && event.messageId) updateSession(sessionId, (session) => ({ ...session, messages: session.messages.map((item) => item.id === event.messageId ? { ...item, pending: false } : item) }))
-      if (event.type === 'RUN_FINISHED') {
+    if (event.type === 'RUN_FINISHED') {
       const status = event.outcome?.type === 'interrupt' ? 'waiting_input' : 'success'
       updateRuntime(sessionId, (current) => ({
         ...current,
@@ -133,33 +137,39 @@ export function ChatPage() {
           payloadText: prettyJSON(interrupt.metadata?.defaultPayload || {}),
         })),
       }))
-      const runId = event.runId || session.currentRunId
+      const runId = event.runId || streamRunId || session.currentRunId
       if (runId) rememberRun({ runId, threadId: event.threadId || session.threadId, agentCode: session.agentCode, status, title: session.title, visitedAt: new Date().toISOString() })
     }
     if (event.type === 'RUN_ERROR') {
       updateRuntime(sessionId, (current) => ({ ...current, status: 'failed' }))
-      const errorMessage: ChatMessage = { id: crypto.randomUUID(), role: 'assistant', content: event.message || 'Agent 运行失败', failed: true, createdAt: new Date().toISOString() }
+      const errorMessage: ChatMessage = { id: crypto.randomUUID(), role: 'assistant', content: event.message || 'Agent 运行失败', runId: event.runId || streamRunId || session.currentRunId, failed: true, createdAt: new Date().toISOString() }
       updateSession(sessionId, (session) => ({ ...session, messages: [...session.messages, errorMessage] }))
     }
   }
 
   const runStream = async (session: ChatSession, body: Parameters<typeof streamAgent>[1]) => {
     const controller = new AbortController()
+    let streamRunId = body.runId || session.currentRunId || ''
     controllersRef.current[session.id] = controller
     updateRuntime(session.id, (current) => ({ ...current, running: true, stopNotice: false }))
     try {
-      await streamAgent(session.agentCode, body, controller.signal, (event) => handleEvent(session, event))
+      await streamAgent(session.agentCode, body, controller.signal, (event) => {
+        streamRunId = event.runId || streamRunId
+        handleEvent(session, event, streamRunId)
+      })
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return false
       updateRuntime(session.id, (current) => ({ ...current, status: 'failed' }))
-      message.error(errorDescription(error))
+      notifyRequestError(error)
       if (error instanceof ApiError) {
-        updateSession(session.id, (current) => ({ ...current, messages: [...current.messages, { id: crypto.randomUUID(), role: 'assistant', content: errorDescription(error), failed: true, createdAt: new Date().toISOString() }] }))
+        updateSession(session.id, (current) => ({ ...current, messages: [...current.messages, { id: crypto.randomUUID(), role: 'assistant', content: errorDescription(error), runId: streamRunId || undefined, failed: true, createdAt: new Date().toISOString() }] }))
       }
+      return false
     } finally {
       updateRuntime(session.id, (current) => ({ ...current, running: false }))
       if (controllersRef.current[session.id] === controller) delete controllersRef.current[session.id]
     }
+    return true
   }
 
   const send = async () => {
@@ -186,14 +196,14 @@ export function ChatPage() {
     updateRuntime(activeId, (current) => ({ ...current, running: false, stopNotice: true, status: 'detached' }))
   }
 
-  const resume = async (interrupt: PendingInterrupt, status: 'resolved' | 'cancelled') => {
+  const resume = async (interrupt: PendingInterrupt, decision: InterruptDecision) => {
     if (!active?.currentRunId) return
-    let payload: unknown
-    if (status === 'resolved') {
-      try { payload = JSON.parse(interrupt.payloadText || '{}') } catch { message.error('Payload 不是合法 JSON'); return }
-    }
+    let resumeItem: ReturnType<typeof buildInterruptResume>
+    try { resumeItem = buildInterruptResume(interrupt.id, interrupt.payloadText, decision) }
+    catch { message.error('Payload 必须是合法 JSON 对象'); return }
     updateRuntime(active.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: true } : item) }))
-    await runStream(active, { runId: active.currentRunId, resume: [{ interruptId: interrupt.id, status, ...(status === 'resolved' ? { payload } : {}) }] })
+    const accepted = await runStream(active, { runId: active.currentRunId, resume: [resumeItem] })
+    if (!accepted) updateRuntime(active.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: false } : item) }))
   }
 
   const agentMenu = active ? (
@@ -269,8 +279,9 @@ export function ChatPage() {
                     <Input.TextArea id={`interrupt-${interrupt.id}`} className="code-input" value={interrupt.payloadText} onChange={(event) => updateRuntime(active!.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, payloadText: event.target.value } : item) }))} rows={4} disabled={interrupt.submitted} />
                   </div>
                   <div className="interrupt-actions">
-                    <Button disabled={interrupt.submitted} onClick={() => resume(interrupt, 'cancelled')}>取消节点</Button>
-                    <Button type="primary" disabled={interrupt.submitted} onClick={() => resume(interrupt, 'resolved')}>提交结果</Button>
+                    <Button icon={<CircleSlash2 size={15} />} disabled={interrupt.submitted} onClick={() => resume(interrupt, 'cancelled')}>取消节点</Button>
+                    <Button danger icon={<X size={15} />} disabled={interrupt.submitted} onClick={() => resume(interrupt, 'rejected')}>拒绝</Button>
+                    <Button type="primary" icon={<Check size={15} />} disabled={interrupt.submitted} onClick={() => resume(interrupt, 'approved')}>批准</Button>
                   </div>
                 </div>
               ))}

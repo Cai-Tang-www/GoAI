@@ -13,6 +13,23 @@ export interface RunAgentInput {
   resume?: Array<{ interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown }>
 }
 
+export type InterruptDecision = 'approved' | 'rejected' | 'cancelled'
+
+export function buildInterruptResume(interruptId: string, payloadText: string, decision: InterruptDecision): NonNullable<RunAgentInput['resume']>[number] {
+  if (decision === 'cancelled') return { interruptId, status: 'cancelled' }
+
+  const parsed = JSON.parse(payloadText || '{}') as unknown
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Payload must be a JSON object')
+  }
+
+  return {
+    interruptId,
+    status: 'resolved',
+    payload: { ...parsed, approved: decision === 'approved' },
+  }
+}
+
 export async function streamAgent(
   agentCode: string,
   input: RunAgentInput,

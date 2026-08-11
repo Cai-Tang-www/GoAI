@@ -1,16 +1,17 @@
 import { useQuery } from '@tanstack/react-query'
-import { Alert, Button, Collapse, Descriptions, Segmented, Skeleton, Table, Timeline, Tooltip, Tree, message } from 'antd'
+import { Alert, Button, Collapse, Descriptions, Segmented, Skeleton, Table, Timeline, Tooltip, Tree } from 'antd'
 import type { TreeDataNode } from 'antd'
 import { ArrowLeft, Copy, GitBranch, History, MessagesSquare, RefreshCw, RotateCcw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { apiRequest, errorDescription } from '../api/client'
+import { apiRequest } from '../api/client'
 import type { Run, RunStep, RunTrace } from '../api/types'
 import { ErrorState } from '../components/ErrorState'
 import { JsonView } from '../components/JsonView'
 import { PageHeader } from '../components/PageHeader'
 import { StatusTag } from '../components/StatusTag'
 import { formatTime, pick, shortId } from '../lib/format'
+import { notifyRequestError } from '../lib/notify'
 import { rememberRun } from '../lib/storage'
 
 type TraceRecord = Record<string, unknown>
@@ -50,7 +51,7 @@ function LoopDetailPanel({ loop }: { loop: TraceRecord }) {
   const evaluationsQuery = useQuery({ queryKey: ['loop-evaluations', loopId], queryFn: () => apiRequest<TraceRecord[]>(`/api/loops/${encodeURIComponent(loopId)}/evaluations`), enabled: Boolean(loopId) })
   if (detailQuery.isLoading || evaluationsQuery.isLoading) return <Skeleton active paragraph={{ rows: 3 }} />
   if (detailQuery.error || evaluationsQuery.error) return <ErrorState error={detailQuery.error || evaluationsQuery.error} onRetry={() => { detailQuery.refetch(); evaluationsQuery.refetch() }} />
-  return <div className="loop-detail"><JsonView value={detailQuery.data} maxHeight={260} /><Table rowKey={(row, index) => String(recordValue(row, 'id', 'ID') || index)} size="small" pagination={false} dataSource={evaluationsQuery.data || []} columns={[{ title: 'Evaluator', render: (_, row) => <code>{recordValue<string>(row, 'evaluator_code', 'EvaluatorCode') || '—'}</code> }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: 'Score', render: (_, row) => recordValue<number>(row, 'score', 'Score') ?? '—' }, { title: '结果', render: (_, row) => <code>{shortId(String(recordValue(row, 'result_json', 'ResultJSON') || '—'), 32)}</code> }]} /></div>
+  return <div className="loop-detail"><JsonView value={detailQuery.data} maxHeight={260} /><Table rowKey={(row) => `${loopId}:${recordValue<string>(row, 'evaluator_code', 'EvaluatorCode') || 'unknown'}`} size="small" pagination={false} dataSource={evaluationsQuery.data || []} columns={[{ title: 'Evaluator', render: (_, row) => <code>{recordValue<string>(row, 'evaluator_code', 'EvaluatorCode') || '—'}</code> }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: 'Score', render: (_, row) => recordValue<number>(row, 'score', 'Score') ?? '—' }, { title: '结果', render: (_, row) => <code>{shortId(String(recordValue(row, 'result_json', 'ResultJSON') || '—'), 32)}</code> }]} /></div>
 }
 
 export function RunDetailPage() {
@@ -92,7 +93,7 @@ export function RunDetailPage() {
       const result = await apiRequest<{ run_id: string; status: string }>(`/api/runs/${encodeURIComponent(runId)}/replay`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } })
       rememberRun({ runId: result.run_id, threadId, status: result.status, title: `Replay ${shortId(runId)}`, visitedAt: new Date().toISOString() })
       navigate(`/runs/${result.run_id}`)
-    } catch (error) { message.error(errorDescription(error)) } finally { setReplaying(null) }
+    } catch (error) { notifyRequestError(error) } finally { setReplaying(null) }
   }
 
   const replayThread = async () => {
@@ -102,7 +103,7 @@ export function RunDetailPage() {
       const result = await apiRequest<{ run_id: string; status: string }>(`/api/threads/${encodeURIComponent(threadId)}/replay`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: { source_run_id: runId } })
       rememberRun({ runId: result.run_id, threadId, status: result.status, title: `Thread Replay ${shortId(threadId)}`, visitedAt: new Date().toISOString() })
       navigate(`/runs/${result.run_id}`)
-    } catch (error) { message.error(errorDescription(error)) } finally { setReplaying(null) }
+    } catch (error) { notifyRequestError(error) } finally { setReplaying(null) }
   }
 
   const delegationRows = useMemo(() => traceQuery.data?.delegations || [], [traceQuery.data])
@@ -151,16 +152,16 @@ export function RunDetailPage() {
             {runTree.length ? <Tree showLine defaultExpandAll treeData={runTree} /> : <span>暂无 Run 关系</span>}
             <div className="trace-divider" />
             <div className="section-heading"><div><h2>委派记录</h2><span>{delegationRows.length} 条 A2A 委派</span></div></div>
-            <Table rowKey={(row, index) => String(recordValue(row, 'delegation_id', 'DelegationID', 'id', 'ID') || index)} dataSource={delegationRows} pagination={false} scroll={{ x: 780 }} columns={[{ title: '来源 Agent', render: (_, row) => <code>#{String(recordValue(row, 'source_agent_id', 'SourceAgentID') || '—')}</code> }, { title: '目标 Agent', render: (_, row) => <code>#{String(recordValue(row, 'target_agent_id', 'TargetAgentID') || '—')}</code> }, { title: 'Capability', render: (_, row) => <code>{recordValue<string>(row, 'capability_code', 'CapabilityCode') || '—'}</code> }, { title: 'Child Run', render: (_, row) => { const id = recordValue<string>(row, 'child_run_id', 'ChildRunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }]} />
+            <Table rowKey={(row) => String(recordValue(row, 'delegation_id', 'DelegationID', 'id', 'ID') || '')} dataSource={delegationRows} pagination={false} scroll={{ x: 780 }} columns={[{ title: '来源 Agent', render: (_, row) => <code>#{String(recordValue(row, 'source_agent_id', 'SourceAgentID') || '—')}</code> }, { title: '目标 Agent', render: (_, row) => <code>#{String(recordValue(row, 'target_agent_id', 'TargetAgentID') || '—')}</code> }, { title: 'Capability', render: (_, row) => <code>{recordValue<string>(row, 'capability_code', 'CapabilityCode') || '—'}</code> }, { title: 'Child Run', render: (_, row) => { const id = recordValue<string>(row, 'child_run_id', 'ChildRunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }]} />
           </section>
           <aside className="content-section"><div className="section-heading"><div><h2>Trace 概览</h2><span>关联资源数量</span></div></div><div className="metric-list">{[['Runs', traceQuery.data?.runs.length], ['Steps', traceQuery.data?.steps.length], ['Messages', traceQuery.data?.messages.length], ['Loops', traceQuery.data?.loops.length], ['Evaluations', traceQuery.data?.evaluations.length]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{value ?? '—'}</strong></div>)}</div></aside>
           <section className="content-section trace-wide">
             <div className="section-heading"><div><h2>消息</h2><span>Thread 与 Delegation 消息</span></div><MessagesSquare size={18} /></div>
-            <Table rowKey={(row, index) => String(recordValue(row, 'message_id', 'MessageID', 'id', 'ID') || index)} dataSource={traceQuery.data?.messages || []} pagination={{ pageSize: 8, hideOnSinglePage: true }} scroll={{ x: 900 }} expandable={{ expandedRowRender: (row) => <JsonView value={{ content: parseJSON(recordValue(row, 'content_json', 'ContentJSON')), metadata: parseJSON(recordValue(row, 'metadata_json', 'MetadataJSON')) }} maxHeight={280} /> }} columns={[{ title: '消息', render: (_, row) => <code>{shortId(recordValue<string>(row, 'message_id', 'MessageID'), 22)}</code> }, { title: '发送方', render: (_, row) => `${recordValue<string>(row, 'sender_type', 'SenderType') || '—'} · ${recordValue<string>(row, 'sender_id', 'SenderID') || '—'}` }, { title: '类型', render: (_, row) => <code>{recordValue<string>(row, 'message_type', 'MessageType') || '—'}</code> }, { title: 'Run', render: (_, row) => { const id = recordValue<string>(row, 'run_id', 'RunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: '时间', render: (_, row) => formatTime(recordValue<string>(row, 'created_at', 'CreatedAt')) }]} />
+            <Table rowKey={(row) => String(recordValue(row, 'message_id', 'MessageID', 'id', 'ID') || '')} dataSource={traceQuery.data?.messages || []} pagination={{ pageSize: 8, hideOnSinglePage: true }} scroll={{ x: 900 }} expandable={{ expandedRowRender: (row) => <JsonView value={{ content: parseJSON(recordValue(row, 'content_json', 'ContentJSON')), metadata: parseJSON(recordValue(row, 'metadata_json', 'MetadataJSON')) }} maxHeight={280} /> }} columns={[{ title: '消息', render: (_, row) => <code>{shortId(recordValue<string>(row, 'message_id', 'MessageID'), 22)}</code> }, { title: '发送方', render: (_, row) => `${recordValue<string>(row, 'sender_type', 'SenderType') || '—'} · ${recordValue<string>(row, 'sender_id', 'SenderID') || '—'}` }, { title: '类型', render: (_, row) => <code>{recordValue<string>(row, 'message_type', 'MessageType') || '—'}</code> }, { title: 'Run', render: (_, row) => { const id = recordValue<string>(row, 'run_id', 'RunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: '时间', render: (_, row) => formatTime(recordValue<string>(row, 'created_at', 'CreatedAt')) }]} />
           </section>
           <section className="content-section trace-wide">
             <div className="section-heading"><div><h2>Loops 与 Evaluations</h2><span>展开查看 Loop 快照和独立评估结果</span></div></div>
-            <Table rowKey={(row, index) => String(recordValue(row, 'loop_id', 'LoopID', 'id', 'ID') || index)} dataSource={traceQuery.data?.loops || []} pagination={false} expandable={{ expandedRowRender: (row) => <LoopDetailPanel loop={row} /> }} columns={[{ title: 'Loop', render: (_, row) => <code>{shortId(recordValue<string>(row, 'loop_id', 'LoopID'), 24)}</code> }, { title: '类型', render: (_, row) => <code>{recordValue<string>(row, 'loop_type', 'LoopType') || '—'}</code> }, { title: 'Run', render: (_, row) => { const id = recordValue<string>(row, 'run_id', 'RunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: 'Token', render: (_, row) => recordValue<number>(row, 'total_tokens', 'TotalTokens') ?? '—' }, { title: '延迟', render: (_, row) => `${recordValue<number>(row, 'latency_ms', 'LatencyMS') || 0}ms` }]} />
+            <Table rowKey={(row) => String(recordValue(row, 'loop_id', 'LoopID', 'id', 'ID') || '')} dataSource={traceQuery.data?.loops || []} pagination={false} expandable={{ expandedRowRender: (row) => <LoopDetailPanel loop={row} /> }} columns={[{ title: 'Loop', render: (_, row) => <code>{shortId(recordValue<string>(row, 'loop_id', 'LoopID'), 24)}</code> }, { title: '类型', render: (_, row) => <code>{recordValue<string>(row, 'loop_type', 'LoopType') || '—'}</code> }, { title: 'Run', render: (_, row) => { const id = recordValue<string>(row, 'run_id', 'RunID') || ''; return id ? <Link to={`/runs/${id}`}>{shortId(id)}</Link> : '—' } }, { title: '状态', render: (_, row) => <StatusTag status={recordValue<string>(row, 'status', 'Status')} /> }, { title: 'Token', render: (_, row) => recordValue<number>(row, 'total_tokens', 'TotalTokens') ?? '—' }, { title: '延迟', render: (_, row) => `${recordValue<number>(row, 'latency_ms', 'LatencyMS') || 0}ms` }]} />
           </section>
         </div>
       ))}
