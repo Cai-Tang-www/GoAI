@@ -64,6 +64,30 @@ func validMCPServerCommand(code string) UpsertMCPServerCommand {
 	return UpsertMCPServerCommand{
 		ServerCode: code, Name: "Local Tools", Transport: models.MCPServerTransportStreamableHTTP,
 		Endpoint: "http://127.0.0.1:8090/mcp", AuthType: models.MCPServerAuthTypeNone,
+		ConfigJSON: `{"timeout_ms":5000}`,
+	}
+}
+
+func TestMCPRegistryPersistsSafeConfigJSON(t *testing.T) {
+	_, service := setupMCPRegistryTest(t, &fakeMCPProtocolClient{})
+	command := validMCPServerCommand("configured")
+	created, err := service.Create(context.Background(), MCPRegistryActor{UserID: 11}, command)
+	if err != nil {
+		t.Fatalf("create configured MCP server: %v", err)
+	}
+	if created.ConfigJSON != command.ConfigJSON {
+		t.Fatalf("created config_json = %q, want %q", created.ConfigJSON, command.ConfigJSON)
+	}
+	loaded, err := service.Get(context.Background(), MCPRegistryActor{UserID: 11}, "configured")
+	if err != nil {
+		t.Fatalf("get configured MCP server: %v", err)
+	}
+	if loaded.ConfigJSON != command.ConfigJSON {
+		t.Fatalf("loaded config_json = %q, want %q", loaded.ConfigJSON, command.ConfigJSON)
+	}
+	command.ConfigJSON = `{"auth":{"token":"secret"}}`
+	if _, err := service.Update(context.Background(), MCPRegistryActor{UserID: 11}, "configured", command); !errors.Is(err, ErrMCPRegistryValidation()) {
+		t.Fatalf("expected sensitive config rejection, got %v", err)
 	}
 }
 

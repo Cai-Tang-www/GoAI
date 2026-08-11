@@ -61,6 +61,7 @@ type UpsertMCPServerCommand struct {
 	Endpoint      string `json:"endpoint"`
 	AuthType      string `json:"auth_type"`
 	CredentialRef string `json:"credential_ref"`
+	ConfigJSON    string `json:"config_json"`
 }
 
 // MCPServerView 是不包含真实凭据的 MCP Server 管理面视图。
@@ -73,6 +74,7 @@ type MCPServerView struct {
 	Endpoint      string     `json:"endpoint"`
 	AuthType      string     `json:"auth_type"`
 	CredentialRef string     `json:"credential_ref,omitempty"`
+	ConfigJSON    string     `json:"config_json"`
 	Status        string     `json:"status"`
 	ConfigVersion uint64     `json:"config_version"`
 	LastError     string     `json:"last_error,omitempty"`
@@ -126,7 +128,7 @@ func (s *MCPRegistryService) Create(ctx context.Context, actor MCPRegistryActor,
 	server := models.MCPServer{
 		OwnerUserID: actor.UserID, ServerCode: command.ServerCode, Name: command.Name,
 		Description: command.Description, Transport: command.Transport, Endpoint: command.Endpoint,
-		AuthType: command.AuthType, CredentialRef: command.CredentialRef,
+		AuthType: command.AuthType, CredentialRef: command.CredentialRef, ConfigJSON: command.ConfigJSON,
 		Status: models.MCPServerStatusInactive, ConfigVersion: 1,
 	}
 	if err := s.database.WithContext(ctx).Create(&server).Error; err != nil {
@@ -185,7 +187,7 @@ func (s *MCPRegistryService) Update(ctx context.Context, actor MCPRegistryActor,
 			return err
 		}
 		configurationChanged := server.Transport != command.Transport || server.Endpoint != command.Endpoint ||
-			server.AuthType != command.AuthType || server.CredentialRef != command.CredentialRef
+			server.AuthType != command.AuthType || server.CredentialRef != command.CredentialRef || server.ConfigJSON != command.ConfigJSON
 		if configurationChanged {
 			if err := s.ensureServerNotReferencedByActiveWorkflow(ctx, tx, server.OwnerUserID, server.ServerCode); err != nil {
 				return err
@@ -197,6 +199,7 @@ func (s *MCPRegistryService) Update(ctx context.Context, actor MCPRegistryActor,
 			updates["endpoint"] = command.Endpoint
 			updates["auth_type"] = command.AuthType
 			updates["credential_ref"] = command.CredentialRef
+			updates["config_json"] = command.ConfigJSON
 			updates["status"] = models.MCPServerStatusInactive
 			updates["config_version"] = server.ConfigVersion + 1
 			updates["last_error"] = ""
@@ -307,6 +310,9 @@ func normalizeMCPServerCommand(command UpsertMCPServerCommand) UpsertMCPServerCo
 	command.Endpoint = strings.TrimSpace(command.Endpoint)
 	command.AuthType = strings.ToLower(strings.TrimSpace(command.AuthType))
 	command.CredentialRef = strings.TrimSpace(command.CredentialRef)
+	if normalized, err := normalizeJSONObject(command.ConfigJSON); err == nil {
+		command.ConfigJSON = normalized
+	}
 	if command.Transport == "" {
 		command.Transport = models.MCPServerTransportStreamableHTTP
 	}
@@ -322,6 +328,9 @@ func validateMCPServerCommand(command UpsertMCPServerCommand) error {
 	}
 	if command.Name == "" || len(command.Name) > 128 || len(command.Description) > 4000 {
 		return fmt.Errorf("%w: invalid MCP server metadata", errMCPRegistryValidation)
+	}
+	if err := validateEndpointConfigJSON(command.ConfigJSON); err != nil {
+		return fmt.Errorf("%w: config_json %v", errMCPRegistryValidation, err)
 	}
 	if command.Transport != models.MCPServerTransportStreamableHTTP {
 		return fmt.Errorf("%w: transport must be streamable_http", errMCPRegistryValidation)
@@ -361,7 +370,7 @@ func mcpServerView(server models.MCPServer) MCPServerView {
 	return MCPServerView{
 		ServerCode: server.ServerCode, Name: server.Name, Description: server.Description,
 		OwnerUserID: server.OwnerUserID, Transport: server.Transport, Endpoint: server.Endpoint,
-		AuthType: server.AuthType, CredentialRef: server.CredentialRef, Status: server.Status,
+		AuthType: server.AuthType, CredentialRef: server.CredentialRef, ConfigJSON: server.ConfigJSON, Status: server.Status,
 		ConfigVersion: server.ConfigVersion, LastError: server.LastError, LastHealthyAt: server.LastHealthyAt,
 		CreatedAt: server.CreatedAt, UpdatedAt: server.UpdatedAt,
 	}

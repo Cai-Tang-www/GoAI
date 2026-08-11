@@ -29,6 +29,7 @@ type MCPServer struct {
 	Endpoint      string `gorm:"size:512;not null"`
 	AuthType      string `gorm:"size:32;not null"`
 	CredentialRef string `gorm:"size:255"`
+	ConfigJSON    string `gorm:"type:json;not null;default:'{}'"`
 	Status        string `gorm:"size:20;not null;index"`
 	ConfigVersion uint64 `gorm:"not null;default:1"`
 	LastError     string `gorm:"type:text"`
