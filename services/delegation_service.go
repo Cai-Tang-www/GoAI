@@ -118,6 +118,7 @@ type AgentDescriptor struct {
 // DelegationRuntime 定义 A2A Gateway 与多 Agent 协作运行时之间的边界。
 type DelegationRuntime interface {
 	DescribeAgent(context.Context, string) (*AgentDescriptor, error)
+	DescribeAgentForDiscovery(context.Context, string) (*AgentDescriptor, error)
 	AcceptDelegation(context.Context, AcceptDelegationCommand) (*DelegationResult, error)
 	CancelDelegation(context.Context, string, string, string) (*DelegationSnapshot, error)
 	DelegationSnapshot(context.Context, string, string, string) (*DelegationSnapshot, error)
@@ -213,15 +214,28 @@ func (s *RuntimeService) CancelDelegation(ctx context.Context, targetAgentCode, 
 
 // DescribeAgent 返回活跃 Agent、能力和 A2A Endpoint 的协议无关发现描述。
 func (s *RuntimeService) DescribeAgent(ctx context.Context, agentCode string) (*AgentDescriptor, error) {
+	return s.describeAgent(ctx, agentCode, false)
+}
+
+// DescribeAgentForDiscovery 服务于公开 Agent Card discovery：不要求 Agent 已激活，
+// 并包含尚未通过健康检查的 A2A Endpoint，用于打破"激活依赖健康检查、健康检查依赖卡片"的发布死锁。
+// 委派门禁不受影响：Router 与委派执行路径仍只选择 active Agent。
+func (s *RuntimeService) DescribeAgentForDiscovery(ctx context.Context, agentCode string) (*AgentDescriptor, error) {
+	return s.describeAgent(ctx, agentCode, true)
+}
+
+func (s *RuntimeService) describeAgent(ctx context.Context, agentCode string, discovery bool) (*AgentDescriptor, error) {
 	code := strings.TrimSpace(agentCode)
 	if code == "" {
 		return nil, errors.New("agent_code is required")
 	}
 
+	agentQuery := s.database.WithContext(ctx).Where("agent_code = ?", code)
+	if !discovery {
+		agentQuery = agentQuery.Where("status = ?", models.AgentStatusActive)
+	}
 	var agent models.Agent
-	if err := s.database.WithContext(ctx).
-		Where("agent_code = ? AND status = ?", code, models.AgentStatusActive).
-		First(&agent).Error; err != nil {
+	if err := agentQuery.First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errAgentNotFound
 		}
@@ -235,9 +249,13 @@ func (s *RuntimeService) DescribeAgent(ctx context.Context, agentCode string) (*
 		Find(&capabilities).Error; err != nil {
 		return nil, fmt.Errorf("loading agent capabilities: %w", err)
 	}
+	endpointQuery := s.database.WithContext(ctx).
+		Where("agent_id = ? AND protocol = ?", agent.ID, models.AgentEndpointProtocolA2A)
+	if !discovery {
+		endpointQuery = endpointQuery.Where("status = ?", models.AgentEndpointStatusActive)
+	}
 	var endpoints []models.AgentEndpoint
-	if err := s.database.WithContext(ctx).
-		Where("agent_id = ? AND protocol = ? AND status = ?", agent.ID, models.AgentEndpointProtocolA2A, models.AgentEndpointStatusActive).
+	if err := endpointQuery.
 		Order("endpoint_code ASC").
 		Find(&endpoints).Error; err != nil {
 		return nil, fmt.Errorf("loading agent endpoints: %w", err)

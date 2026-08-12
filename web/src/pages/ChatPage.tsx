@@ -1,17 +1,14 @@
-import { useQuery } from '@tanstack/react-query'
-import { Alert, Avatar, Button, Dropdown, Input, Select, Skeleton, Tooltip, message } from 'antd'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Avatar, Button, Input, Select, Skeleton, Tooltip, message } from 'antd'
 import {
   Bot,
   Check,
   ChevronDown,
   CircleStop,
   CircleSlash2,
-  Clock3,
-  MoreHorizontal,
-  PanelLeft,
   Plus,
+  PanelLeft,
   Send,
-  Trash2,
   UserRound,
   X,
 } from 'lucide-react'
@@ -20,12 +17,13 @@ import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { ApiError, apiRequest, errorDescription } from '../api/client'
 import { buildInterruptResume, streamAgent } from '../api/agui'
-import type { InterruptDecision } from '../api/agui'
-import type { Agent, AGUIEvent, ChatMessage, ChatSession } from '../api/types'
+import type { InterruptDecision, RunAgentInput } from '../api/agui'
+import type { Agent, AGUIEvent, ChatMessage, ThreadMessage, ThreadSummary } from '../api/types'
 import { StatusTag } from '../components/StatusTag'
 import { formatTime, prettyJSON } from '../lib/format'
-import { loadSessions, rememberRun, saveSessions } from '../lib/storage'
 import { notifyRequestError } from '../lib/notify'
+
+const DRAFT_KEY = 'draft'
 
 interface PendingInterrupt {
   id: string
@@ -43,93 +41,130 @@ interface SessionRuntime {
   steps: Array<{ name: string; status: string }>
   interrupts: PendingInterrupt[]
   stopNotice: boolean
+  currentRunId?: string
+  agentCode?: string
+  live: ChatMessage[]
 }
 
-const emptyRuntime: SessionRuntime = { running: false, status: 'idle', steps: [], interrupts: [], stopNotice: false }
+const emptyRuntime: SessionRuntime = { running: false, status: 'idle', steps: [], interrupts: [], stopNotice: false, live: [] }
 
-function createSession(agentCode = ''): ChatSession {
-  const now = new Date().toISOString()
-  return { id: crypto.randomUUID(), title: '新对话', agentCode, threadId: '', messages: [], updatedAt: now }
+function toChatMessage(item: ThreadMessage): ChatMessage | null {
+  if (item.message_type !== 'input' && item.message_type !== 'result') return null
+  if (item.role !== 'user' && item.role !== 'assistant') return null
+  return {
+    id: item.message_id,
+    role: item.role,
+    content: item.content,
+    runId: item.run_id || undefined,
+    createdAt: item.created_at,
+  }
 }
 
 export function ChatPage() {
-  const agentsQuery = useQuery({ queryKey: ['active-agents'], queryFn: () => apiRequest<Agent[]>('/api/agents') })
-  const activeAgents = useMemo(() => (agentsQuery.data || []).filter((agent) => agent.status === 'active'), [agentsQuery.data])
-  const [sessions, setSessions] = useState<ChatSession[]>(loadSessions)
-  const [activeId, setActiveId] = useState<string>(() => loadSessions()[0]?.id || '')
+  const queryClient = useQueryClient()
+  const agentsQuery = useQuery({ queryKey: ['published-agents'], queryFn: () => apiRequest<Agent[]>('/api/agents/published') })
+  const threadsQuery = useQuery({ queryKey: ['threads'], queryFn: () => apiRequest<ThreadSummary[]>('/api/threads') })
+  const publishedAgents = agentsQuery.data || []
+  const threads = useMemo(() => threadsQuery.data || [], [threadsQuery.data])
+
+  const [activeKey, setActiveKey] = useState<string>(DRAFT_KEY)
+  const [draftAgent, setDraftAgent] = useState('')
   const [input, setInput] = useState('')
   const [sessionPanelOpen, setSessionPanelOpen] = useState(() => window.innerWidth > 991)
-  const [runtimeBySession, setRuntimeBySession] = useState<Record<string, SessionRuntime>>({})
+  const [runtimeByKey, setRuntimeByKey] = useState<Record<string, SessionRuntime>>({})
   const controllersRef = useRef<Record<string, AbortController>>({})
   const messageViewportRef = useRef<HTMLDivElement>(null)
-  const active = sessions.find((session) => session.id === activeId)
-  const runtime = runtimeBySession[activeId] || emptyRuntime
 
-  useEffect(() => { saveSessions(sessions) }, [sessions])
+  const activeThread = threads.find((thread) => thread.thread_id === activeKey)
+  const runtime = runtimeByKey[activeKey] || emptyRuntime
+  const isDraft = activeKey === DRAFT_KEY
+  const agentCode = runtime.agentCode || (isDraft ? draftAgent : activeThread?.agent_code) || ''
+
+  const messagesQuery = useQuery({
+    queryKey: ['thread-messages', activeKey],
+    queryFn: () => apiRequest<ThreadMessage[]>(`/api/threads/${encodeURIComponent(activeKey)}/messages`),
+    enabled: !isDraft,
+    staleTime: 30_000,
+  })
+
+  const displayMessages = useMemo(() => {
+    const live = runtime.live
+    const liveIds = new Set(live.map((item) => item.id))
+    const liveRunIds = new Set(live.filter((item) => item.role === 'assistant' && item.runId).map((item) => item.runId))
+    const history = (messagesQuery.data || [])
+      .map(toChatMessage)
+      .filter((item): item is ChatMessage => item !== null)
+      .filter((item) => !liveIds.has(item.id) && !(item.role === 'assistant' && item.runId && liveRunIds.has(item.runId)))
+    return [...history, ...live]
+  }, [messagesQuery.data, runtime.live])
+
   useEffect(() => {
     const viewport = messageViewportRef.current
     if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
-  }, [active?.messages, runtime.steps, runtime.interrupts])
+  }, [displayMessages, runtime.steps, runtime.interrupts])
+
   useEffect(() => {
     const controllers = controllersRef.current
     return () => { Object.values(controllers).forEach((controller) => controller.abort()) }
   }, [])
 
   useEffect(() => {
-    if (sessions.length === 0 && activeAgents.length > 0) {
-      const session = createSession(activeAgents[0].agent_code)
-      setSessions([session])
-      setActiveId(session.id)
-      setRuntimeBySession({ [session.id]: emptyRuntime })
+    if (!draftAgent && publishedAgents.length > 0) setDraftAgent(publishedAgents[0].agent_code)
+  }, [draftAgent, publishedAgents])
+
+  const updateRuntime = (key: string, updater: (current: SessionRuntime) => SessionRuntime) => {
+    setRuntimeByKey((current) => ({ ...current, [key]: updater(current[key] || emptyRuntime) }))
+  }
+
+  const newConversation = () => {
+    setActiveKey(DRAFT_KEY)
+    setRuntimeByKey((current) => ({ ...current, [DRAFT_KEY]: { ...emptyRuntime, agentCode: current[DRAFT_KEY]?.agentCode } }))
+  }
+
+  // 草稿会话在 RUN_STARTED 拿到 threadId 后迁移为服务端会话，运行态与控制器一并转移。
+  const migrateDraft = (threadId: string) => {
+    setRuntimeByKey((current) => {
+      const next = { ...current }
+      next[threadId] = current[DRAFT_KEY] || emptyRuntime
+      next[DRAFT_KEY] = emptyRuntime
+      return next
+    })
+    const controller = controllersRef.current[DRAFT_KEY]
+    if (controller) {
+      controllersRef.current[threadId] = controller
+      delete controllersRef.current[DRAFT_KEY]
     }
-  }, [activeAgents, sessions.length])
-
-  const updateSession = (id: string, updater: (session: ChatSession) => ChatSession) => {
-    setSessions((current) => current.map((session) => session.id === id ? updater(session) : session))
+    setActiveKey((current) => (current === DRAFT_KEY ? threadId : current))
   }
 
-  const updateRuntime = (id: string, updater: (current: SessionRuntime) => SessionRuntime) => {
-    setRuntimeBySession((current) => ({ ...current, [id]: updater(current[id] || emptyRuntime) }))
-  }
-
-  const newSession = () => {
-    const session = createSession(activeAgents[0]?.agent_code || '')
-    setSessions((current) => [session, ...current])
-    setActiveId(session.id)
-    setRuntimeBySession((current) => ({ ...current, [session.id]: emptyRuntime }))
-  }
-
-  const removeSession = (id: string) => {
-    controllersRef.current[id]?.abort()
-    delete controllersRef.current[id]
-    setSessions((current) => current.filter((session) => session.id !== id))
-    setRuntimeBySession((current) => { const next = { ...current }; delete next[id]; return next })
-    if (id === activeId) setActiveId(sessions.find((session) => session.id !== id)?.id || '')
-  }
-
-  const handleEvent = (session: ChatSession, event: AGUIEvent, streamRunId = '') => {
-    const sessionId = session.id
+  const handleEvent = (keyRef: { current: string }, agent: string, event: AGUIEvent, streamRunId: string) => {
     if (event.type === 'RUN_STARTED') {
-      updateRuntime(sessionId, (current) => ({ ...current, status: 'running' }))
-      updateSession(sessionId, (session) => ({ ...session, threadId: event.threadId || session.threadId, currentRunId: event.runId || session.currentRunId, updatedAt: new Date().toISOString() }))
-      if (event.runId) rememberRun({ runId: event.runId, threadId: event.threadId, agentCode: session.agentCode, status: 'running', title: session.title, visitedAt: new Date().toISOString() })
+      if (keyRef.current === DRAFT_KEY && event.threadId) {
+        migrateDraft(event.threadId)
+        keyRef.current = event.threadId
+      }
+      updateRuntime(keyRef.current, (current) => ({ ...current, status: 'running', agentCode: agent, currentRunId: event.runId || current.currentRunId }))
+      void queryClient.invalidateQueries({ queryKey: ['threads'] })
     }
-    if (event.type === 'STEP_STARTED' && event.stepName) updateRuntime(sessionId, (current) => ({ ...current, steps: [...current.steps, { name: event.stepName!, status: 'running' }] }))
-    if (event.type === 'STEP_FINISHED' && event.stepName) updateRuntime(sessionId, (current) => ({ ...current, steps: current.steps.map((step) => step.name === event.stepName ? { ...step, status: 'success' } : step) }))
+    const key = keyRef.current
+    if (event.type === 'STEP_STARTED' && event.stepName) updateRuntime(key, (current) => ({ ...current, steps: [...current.steps, { name: event.stepName!, status: 'running' }] }))
+    if (event.type === 'STEP_FINISHED' && event.stepName) updateRuntime(key, (current) => ({ ...current, steps: current.steps.map((step) => step.name === event.stepName ? { ...step, status: 'success' } : step) }))
     if (event.type === 'TEXT_MESSAGE_START' && event.messageId) {
-      updateSession(sessionId, (session) => ({ ...session, messages: [...session.messages, { id: event.messageId!, role: 'assistant', content: '', pending: true, runId: event.runId || streamRunId || session.currentRunId, createdAt: new Date().toISOString() }] }))
+      updateRuntime(key, (current) => ({ ...current, live: [...current.live, { id: event.messageId!, role: 'assistant', content: '', pending: true, runId: event.runId || streamRunId || current.currentRunId, createdAt: new Date().toISOString() }] }))
     }
     if (event.type === 'TEXT_MESSAGE_CONTENT' && event.messageId) {
-      updateSession(sessionId, (session) => {
-        const exists = session.messages.some((item) => item.id === event.messageId)
-        const messages = exists ? session.messages.map((item) => item.id === event.messageId ? { ...item, content: item.content + (event.delta || '') } : item) : [...session.messages, { id: event.messageId!, role: 'assistant' as const, content: event.delta || '', pending: true, runId: event.runId || streamRunId || session.currentRunId, createdAt: new Date().toISOString() }]
-        return { ...session, messages }
+      updateRuntime(key, (current) => {
+        const exists = current.live.some((item) => item.id === event.messageId)
+        const live = exists
+          ? current.live.map((item) => item.id === event.messageId ? { ...item, content: item.content + (event.delta || '') } : item)
+          : [...current.live, { id: event.messageId!, role: 'assistant' as const, content: event.delta || '', pending: true, runId: event.runId || streamRunId || current.currentRunId, createdAt: new Date().toISOString() }]
+        return { ...current, live }
       })
     }
-    if (event.type === 'TEXT_MESSAGE_END' && event.messageId) updateSession(sessionId, (session) => ({ ...session, messages: session.messages.map((item) => item.id === event.messageId ? { ...item, pending: false } : item) }))
+    if (event.type === 'TEXT_MESSAGE_END' && event.messageId) updateRuntime(key, (current) => ({ ...current, live: current.live.map((item) => item.id === event.messageId ? { ...item, pending: false } : item) }))
     if (event.type === 'RUN_FINISHED') {
       const status = event.outcome?.type === 'interrupt' ? 'waiting_input' : 'success'
-      updateRuntime(sessionId, (current) => ({
+      updateRuntime(key, (current) => ({
         ...current,
         status,
         interrupts: (event.outcome?.interrupts || []).map((interrupt) => ({
@@ -137,130 +172,182 @@ export function ChatPage() {
           payloadText: prettyJSON(interrupt.metadata?.defaultPayload || {}),
         })),
       }))
-      const runId = event.runId || streamRunId || session.currentRunId
-      if (runId) rememberRun({ runId, threadId: event.threadId || session.threadId, agentCode: session.agentCode, status, title: session.title, visitedAt: new Date().toISOString() })
+      void queryClient.invalidateQueries({ queryKey: ['threads'] })
     }
     if (event.type === 'RUN_ERROR') {
-      updateRuntime(sessionId, (current) => ({ ...current, status: 'failed' }))
-      const errorMessage: ChatMessage = { id: crypto.randomUUID(), role: 'assistant', content: event.message || 'Agent 运行失败', runId: event.runId || streamRunId || session.currentRunId, failed: true, createdAt: new Date().toISOString() }
-      updateSession(sessionId, (session) => ({ ...session, messages: [...session.messages, errorMessage] }))
+      updateRuntime(key, (current) => ({
+        ...current,
+        status: 'failed',
+        live: [...current.live, { id: crypto.randomUUID(), role: 'assistant', content: event.message || 'Agent 运行失败', runId: event.runId || streamRunId || current.currentRunId, failed: true, createdAt: new Date().toISOString() }],
+      }))
+      void queryClient.invalidateQueries({ queryKey: ['threads'] })
     }
   }
 
-  const runStream = async (session: ChatSession, body: Parameters<typeof streamAgent>[1]) => {
+  const runStream = async (startKey: string, agent: string, body: RunAgentInput) => {
     const controller = new AbortController()
-    let streamRunId = body.runId || session.currentRunId || ''
-    controllersRef.current[session.id] = controller
-    updateRuntime(session.id, (current) => ({ ...current, running: true, stopNotice: false }))
+    const keyRef = { current: startKey }
+    let streamRunId = body.runId || ''
+    controllersRef.current[startKey] = controller
+    updateRuntime(startKey, (current) => ({ ...current, running: true, stopNotice: false }))
     try {
-      await streamAgent(session.agentCode, body, controller.signal, (event) => {
+      await streamAgent(agent, body, controller.signal, (event) => {
         streamRunId = event.runId || streamRunId
-        handleEvent(session, event, streamRunId)
+        handleEvent(keyRef, agent, event, streamRunId)
       })
     } catch (error) {
       if (controller.signal.aborted) return false
-      updateRuntime(session.id, (current) => ({ ...current, status: 'failed' }))
+      updateRuntime(keyRef.current, (current) => ({ ...current, status: 'failed' }))
       notifyRequestError(error)
       if (error instanceof ApiError) {
-        updateSession(session.id, (current) => ({ ...current, messages: [...current.messages, { id: crypto.randomUUID(), role: 'assistant', content: errorDescription(error), runId: streamRunId || undefined, failed: true, createdAt: new Date().toISOString() }] }))
+        updateRuntime(keyRef.current, (current) => ({ ...current, live: [...current.live, { id: crypto.randomUUID(), role: 'assistant', content: errorDescription(error), runId: streamRunId || undefined, failed: true, createdAt: new Date().toISOString() }] }))
       }
       return false
     } finally {
-      updateRuntime(session.id, (current) => ({ ...current, running: false }))
-      if (controllersRef.current[session.id] === controller) delete controllersRef.current[session.id]
+      // 仅当自己仍是该会话的活跃流时才清理运行态，避免停止后重发的新流被旧流误关。
+      const key = keyRef.current
+      if (controllersRef.current[key] === controller) {
+        updateRuntime(key, (current) => ({ ...current, running: false }))
+        delete controllersRef.current[key]
+      }
     }
     return true
   }
 
   const send = async () => {
-    if (!active || !input.trim() || runtime.running || !active.agentCode) return
+    if (!input.trim() || runtime.running || !agentCode) return
     const content = input.trim()
     setInput('')
-    updateRuntime(active.id, (current) => ({ ...current, steps: [], interrupts: [], status: 'idle', stopNotice: false }))
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: 'user', content, createdAt: new Date().toISOString() }
-    const nextMessages = [...active.messages.filter((item) => !item.failed), userMessage]
-    const title = active.messages.length === 0 ? content.slice(0, 24) : active.title
-    updateSession(active.id, (session) => ({ ...session, title, messages: nextMessages, updatedAt: new Date().toISOString() }))
-    await runStream({ ...active, title, messages: nextMessages }, {
-      threadId: active.threadId,
+    const startKey = activeKey
+    const historyBefore = displayMessages.filter((item) => !item.failed)
+    updateRuntime(startKey, (current) => ({
+      ...current,
+      steps: [],
+      interrupts: [],
+      status: 'idle',
+      agentCode,
+      live: [...current.live.filter((item) => !item.failed), userMessage],
+    }))
+    await runStream(startKey, agentCode, {
+      threadId: isDraft ? '' : activeKey,
       runId: '',
       state: {},
       tools: [],
       context: [],
-      messages: nextMessages.map(({ id, role, content: text }) => ({ id, role, content: text })),
+      messages: [...historyBefore, userMessage].map(({ id, role, content: text }) => ({ id, role, content: text })),
     })
   }
 
   const stop = () => {
-    controllersRef.current[activeId]?.abort()
-    updateRuntime(activeId, (current) => ({ ...current, running: false, stopNotice: true, status: 'detached' }))
+    controllersRef.current[activeKey]?.abort()
+    delete controllersRef.current[activeKey]
+    updateRuntime(activeKey, (current) => ({ ...current, running: false, stopNotice: true, status: 'detached' }))
   }
 
   const resume = async (interrupt: PendingInterrupt, decision: InterruptDecision) => {
-    if (!active?.currentRunId) return
+    if (!runtime.currentRunId || !agentCode) return
     let resumeItem: ReturnType<typeof buildInterruptResume>
     try { resumeItem = buildInterruptResume(interrupt.id, interrupt.payloadText, decision) }
     catch { message.error('Payload 必须是合法 JSON 对象'); return }
-    updateRuntime(active.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: true } : item) }))
-    const accepted = await runStream(active, { runId: active.currentRunId, resume: [resumeItem] })
-    if (!accepted) updateRuntime(active.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: false } : item) }))
+    const key = activeKey
+    updateRuntime(key, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: true } : item) }))
+    const accepted = await runStream(key, agentCode, { runId: runtime.currentRunId, resume: [resumeItem] })
+    if (!accepted) updateRuntime(key, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, submitted: false } : item) }))
   }
 
-  const agentMenu = active ? (
-    <Select
-      className="agent-select"
-      value={active.agentCode || undefined}
-      placeholder="选择 Agent"
-      loading={agentsQuery.isLoading}
-      options={activeAgents.map((agent) => ({ value: agent.agent_code, label: agent.name }))}
-      onChange={(value) => updateSession(active.id, (session) => ({ ...session, agentCode: value }))}
-      suffixIcon={<ChevronDown size={14} />}
-      disabled={runtime.running}
-    />
-  ) : null
+  const selectThread = (threadId: string) => {
+    setActiveKey(threadId)
+    setSessionPanelOpen(window.innerWidth > 991)
+  }
+
+  const currentRunId = runtime.currentRunId || (!isDraft ? activeThread?.last_run_id : undefined)
+  const emptyState = displayMessages.length === 0 && !(!isDraft && messagesQuery.isLoading)
 
   return (
     <div className="chat-page">
       <aside className={`chat-sessions ${sessionPanelOpen ? 'open' : ''}`}>
-        <div className="chat-session-head"><div><span>CONVERSATIONS</span><strong>对话</strong></div><Tooltip title="新建对话"><Button aria-label="新建对话" type="text" icon={<Plus size={17} />} onClick={newSession} /></Tooltip></div>
-        <div className="session-list">
-          {sessions.map((session) => (
-            <div key={session.id} className={`session-item ${session.id === activeId ? 'active' : ''}`}>
-              <button className="session-open" type="button" aria-current={session.id === activeId ? 'page' : undefined} onClick={() => setActiveId(session.id)}>
-                <span className="session-icon"><Bot size={15} /></span>
-                <span><strong>{session.title}</strong><small>{session.agentCode || '未选择 Agent'} · {formatTime(session.updatedAt).slice(5, 16)}</small></span>
-              </button>
-              <Dropdown trigger={['click']} menu={{ items: [{ key: 'delete', label: '删除对话', icon: <Trash2 size={14} />, danger: true }], onClick: ({ domEvent }) => { domEvent.stopPropagation(); removeSession(session.id) } }}>
-                <Tooltip title="会话操作"><Button aria-label={`管理会话 ${session.title}`} type="text" size="small" icon={<MoreHorizontal size={15} />} /></Tooltip>
-              </Dropdown>
-            </div>
-          ))}
+        <div className="chat-session-head">
+          <div><span>CONVERSATIONS</span><strong>对话</strong></div>
+          <Tooltip title="新建对话"><Button aria-label="新建对话" type="text" icon={<Plus size={17} />} onClick={newConversation} /></Tooltip>
         </div>
-        <div className="session-local-note"><Clock3 size={14} /><span>会话仅保存在当前浏览器</span></div>
+        <div className="session-list">
+          <button type="button" className={`session-item session-draft ${isDraft ? 'active' : ''}`} onClick={newConversation}>
+            <span className="session-icon"><Plus size={15} /></span>
+            <span><strong>新对话</strong><small>{draftAgent || '选择 Agent 后发起'}</small></span>
+          </button>
+          {threadsQuery.isLoading && <Skeleton active paragraph={{ rows: 4 }} style={{ padding: 12 }} />}
+          {threads.map((thread) => {
+            const threadRuntime = runtimeByKey[thread.thread_id]
+            const status = threadRuntime?.running ? 'running' : thread.last_run_status
+            return (
+              <button
+                key={thread.thread_id}
+                type="button"
+                className={`session-item ${thread.thread_id === activeKey ? 'active' : ''}`}
+                aria-current={thread.thread_id === activeKey ? 'page' : undefined}
+                onClick={() => selectThread(thread.thread_id)}
+              >
+                <span className="session-icon"><Bot size={15} /></span>
+                <span>
+                  <strong>{thread.title || '未命名对话'}</strong>
+                  <small>
+                    <i className={`session-dot ${status || 'idle'}`} />
+                    {thread.agent_name || thread.agent_code || '—'} · {formatTime(thread.updated_at).slice(5, 16)}
+                  </small>
+                </span>
+              </button>
+            )
+          })}
+          {!threadsQuery.isLoading && threads.length === 0 && (
+            <p className="session-empty">历史会话保存在服务端，发起第一次对话后会出现在这里。</p>
+          )}
+        </div>
+        <div className="session-local-note"><Check size={13} /><span>会话与消息由服务端持久化</span></div>
       </aside>
       <main className="chat-workspace">
         <header className="chat-toolbar">
           <Button aria-label="切换会话列表" className="session-toggle" type="text" icon={<PanelLeft size={18} />} onClick={() => setSessionPanelOpen((open) => !open)} />
-          <div className="chat-agent"><span>当前 Agent</span>{agentMenu}</div>
-          <div className="chat-run-state">{runtime.status !== 'idle' && <StatusTag status={runtime.status === 'detached' ? 'running' : runtime.status} />}{active?.currentRunId && <Link to={`/runs/${active.currentRunId}`}>查看 Run</Link>}</div>
+          <div className="chat-agent">
+            <span>当前 Agent</span>
+            <Select
+              className="agent-select"
+              value={agentCode || undefined}
+              placeholder="选择 Agent"
+              loading={agentsQuery.isLoading}
+              options={publishedAgents.map((agent) => ({ value: agent.agent_code, label: agent.name }))}
+              onChange={(value) => {
+                if (isDraft) setDraftAgent(value)
+                updateRuntime(activeKey, (current) => ({ ...current, agentCode: value }))
+              }}
+              suffixIcon={<ChevronDown size={14} />}
+              disabled={runtime.running}
+            />
+          </div>
+          <div className="chat-run-state">
+            {runtime.status !== 'idle' && <StatusTag status={runtime.status === 'detached' ? 'running' : runtime.status} />}
+            {currentRunId && <Link to={`/runs/${currentRunId}`}>查看 Run</Link>}
+          </div>
         </header>
         <div ref={messageViewportRef} className="message-viewport">
-          {!active || active.messages.length === 0 ? (
-            agentsQuery.isLoading ? <Skeleton active /> : (
+          {!isDraft && messagesQuery.isLoading ? (
+            <div className="message-list"><Skeleton active avatar paragraph={{ rows: 3 }} /><Skeleton active avatar paragraph={{ rows: 2 }} /></div>
+          ) : emptyState ? (
+            agentsQuery.isLoading ? <Skeleton active style={{ padding: 40 }} /> : (
               <div className="chat-empty">
                 <div className="chat-empty-mark"><Bot size={30} /></div>
                 <h1>向 Agent 发起一次运行</h1>
-                <p>选择已发布的 Agent，输入任务。步骤、委派和人工介入会在这里实时呈现。</p>
-                {activeAgents.length === 0 && <Alert type="warning" showIcon message="暂无已启用 Agent" description="请先到 Agent 管理页完成 Workflow、Capability 和 Endpoint 配置并发布。" action={<Link to="/agents">前往配置</Link>} />}
+                <p>选择已发布的 Agent，输入任务。步骤、委派和人工介入会在这里实时呈现，历史会话由服务端持久化。</p>
+                {publishedAgents.length === 0 && <Alert type="warning" showIcon message="暂无已发布 Agent" description="请先到 Agent 管理页完成 Workflow、Capability 和 Endpoint 配置并发布。" action={<Link to="/agents">前往配置</Link>} />}
               </div>
             )
           ) : (
             <div className="message-list">
-              {active.messages.map((item) => (
+              {displayMessages.map((item) => (
                 <article key={item.id} className={`chat-message ${item.role} ${item.failed ? 'failed' : ''}`}>
                   <Avatar className="message-avatar" icon={item.role === 'user' ? <UserRound size={16} /> : <Bot size={16} />} />
                   <div className="message-body">
-                    <div className="message-meta"><strong>{item.role === 'user' ? '你' : active.agentCode}</strong><span>{formatTime(item.createdAt).slice(11)}</span>{item.runId && <Link to={`/runs/${item.runId}`}>Run</Link>}</div>
+                    <div className="message-meta"><strong>{item.role === 'user' ? '你' : agentCode || 'Agent'}</strong><span>{formatTime(item.createdAt).slice(11)}</span>{item.runId && <Link to={`/runs/${item.runId}`}>Run</Link>}</div>
                     <div className="message-content"><ReactMarkdown>{item.content || (item.pending ? '正在生成…' : '')}</ReactMarkdown>{item.pending && <i className="typing-caret" />}</div>
                   </div>
                 </article>
@@ -276,7 +363,7 @@ export function ChatPage() {
                     <p>{interrupt.reason || `Interrupt · ${interrupt.id}`}</p>
                     {(interrupt.responseSchema || interrupt.metadata) && <details><summary>查看响应约束</summary><pre>{prettyJSON({ responseSchema: interrupt.responseSchema, metadata: interrupt.metadata })}</pre></details>}
                     <label className="interrupt-payload-label" htmlFor={`interrupt-${interrupt.id}`}>响应 Payload (JSON)</label>
-                    <Input.TextArea id={`interrupt-${interrupt.id}`} className="code-input" value={interrupt.payloadText} onChange={(event) => updateRuntime(active!.id, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, payloadText: event.target.value } : item) }))} rows={4} disabled={interrupt.submitted} />
+                    <Input.TextArea id={`interrupt-${interrupt.id}`} className="code-input" value={interrupt.payloadText} onChange={(event) => updateRuntime(activeKey, (current) => ({ ...current, interrupts: current.interrupts.map((item) => item.id === interrupt.id ? { ...item, payloadText: event.target.value } : item) }))} rows={4} disabled={interrupt.submitted} />
                   </div>
                   <div className="interrupt-actions">
                     <Button icon={<CircleSlash2 size={15} />} disabled={interrupt.submitted} onClick={() => resume(interrupt, 'cancelled')}>取消节点</Button>
@@ -295,11 +382,11 @@ export function ChatPage() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void send() } }}
-              placeholder={active?.agentCode ? `发送任务给 ${active.agentCode}` : '请先选择 Agent'}
+              placeholder={agentCode ? `发送任务给 ${agentCode}` : '请先选择 Agent'}
               autoSize={{ minRows: 1, maxRows: 6 }}
-              disabled={!active?.agentCode}
+              disabled={!agentCode}
             />
-            {runtime.running ? <Tooltip title="停止接收，后端任务不会被取消"><Button aria-label="停止接收事件" danger type="text" icon={<CircleStop size={20} />} onClick={stop} /></Tooltip> : <Tooltip title="发送"><Button aria-label="发送消息" type="primary" icon={<Send size={18} />} disabled={!input.trim() || !active?.agentCode} onClick={() => void send()} /></Tooltip>}
+            {runtime.running ? <Tooltip title="停止接收，后端任务不会被取消"><Button aria-label="停止接收事件" danger type="text" icon={<CircleStop size={20} />} onClick={stop} /></Tooltip> : <Tooltip title="发送"><Button aria-label="发送消息" type="primary" icon={<Send size={18} />} disabled={!input.trim() || !agentCode} onClick={() => void send()} /></Tooltip>}
           </div>
           <span>Enter 发送 · Shift + Enter 换行</span>
         </footer>

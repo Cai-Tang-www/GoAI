@@ -34,6 +34,7 @@ export function validateWorkflowDefinition(value: unknown): asserts value is Wor
   for (const node of definition.nodes) {
     if (!node?.key?.trim()) throw new Error('每个 node.key 都必须非空')
     if (keys.has(node.key)) throw new Error(`node.key 重复：${node.key}`)
+    if (node.key === 'start' || node.key === 'end') throw new Error(`node.key "${node.key}" 是编排引擎保留字，请换一个名字`)
     keys.add(node.key)
     if (!node.type?.trim()) throw new Error(`节点 ${node.key} 缺少 type`)
     if (node.config !== undefined && !isObject(node.config)) throw new Error(`节点 ${node.key} 的 config 必须是对象`)

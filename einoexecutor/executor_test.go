@@ -38,15 +38,15 @@ func TestExecuteBuildsAndInvokesEinoGraph(t *testing.T) {
 
 func TestExecuteRejectsParallelGraphUntilMergePolicyExists(t *testing.T) {
 	definition := &workflow.Definition{
-		EntryNode: "start",
+		EntryNode: "fanout",
 		Nodes: []workflow.Node{
-			{Key: "start", Type: "noop"},
+			{Key: "fanout", Type: "noop"},
 			{Key: "left", Type: "noop"},
 			{Key: "right", Type: "noop"},
 		},
 		Edges: []workflow.Edge{
-			{From: "start", To: "left"},
-			{From: "start", To: "right"},
+			{From: "fanout", To: "left"},
+			{From: "fanout", To: "right"},
 		},
 	}
 	_, err := New().Execute(context.Background(), definition, `{}`, func(context.Context, workflow.Node, string) (string, error) {

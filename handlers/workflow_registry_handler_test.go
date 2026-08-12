@@ -13,8 +13,8 @@ func TestWorkflowRegistryAPIUsesRBACAndVersionLifecycle(t *testing.T) {
 	})
 	requireRegistryResponse(t, createAgent, http.StatusCreated, "OK")
 	definition := map[string]any{
-		"entry_node": "start",
-		"nodes":      []map[string]any{{"key": "start", "type": "noop"}},
+		"entry_node": "prepare",
+		"nodes":      []map[string]any{{"key": "prepare", "type": "noop"}},
 		"edges":      []any{},
 	}
 

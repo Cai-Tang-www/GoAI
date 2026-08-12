@@ -35,14 +35,14 @@ func newWorkflowRegistryTestService(t *testing.T) (*gorm.DB, *AgentRegistryServi
 }
 
 func workflowDefinitionJSON() string {
-	return `{"entry_node":"start","nodes":[{"key":"start","type":"noop"}],"edges":[]}`
+	return `{"entry_node":"prepare","nodes":[{"key":"prepare","type":"noop"}],"edges":[]}`
 }
 
 func TestNormalizeWorkflowDefinitionProducesStableCanonicalChecksum(t *testing.T) {
 	first, firstChecksum, err := normalizeWorkflowDefinition([]byte(`{
     "edges": [],
-    "nodes": [{"type":"noop","key":" start "}],
-    "entry_node": " start "
+    "nodes": [{"type":"noop","key":" prepare "}],
+    "entry_node": " prepare "
   }`))
 	if err != nil {
 		t.Fatalf("normalize first definition: %v", err)

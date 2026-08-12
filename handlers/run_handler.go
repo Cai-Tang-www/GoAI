@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"GoAI/middlewares"
@@ -62,6 +63,69 @@ func (h *RunHandler) CreateRun(c *gin.Context) {
 		RunID:  result.Run.RunID,
 		Status: result.Run.Status,
 	}, "success")
+}
+
+// ListRuns 返回当前用户可见的 Run 列表，支持按 Thread/Agent/状态过滤。
+func (h *RunHandler) ListRuns(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	filter := services.RunListFilter{
+		ThreadID:  c.Query("thread_id"),
+		AgentCode: c.Query("agent_code"),
+		Status:    c.Query("status"),
+	}
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			middlewares.AbortWithError(c, middlewares.ValidationFailed("limit must be a positive integer", nil))
+			return
+		}
+		filter.Limit = limit
+	}
+	runs, err := h.service.ListRuns(c.Request.Context(), userID, isAdmin, filter)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, runs, "success")
+}
+
+// ListThreads 返回当前用户可见的会话列表。
+func (h *RunHandler) ListThreads(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	threads, err := h.service.ListThreads(c.Request.Context(), userID, isAdmin)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, threads, "success")
+}
+
+// ListThreadMessages 返回单个 Thread 的持久化消息历史。
+func (h *RunHandler) ListThreadMessages(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	threadID := c.Param("thread_id")
+	if appErr := validateResourceIDParam("thread_id", threadID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	messages, err := h.service.ListThreadMessages(c.Request.Context(), userID, isAdmin, threadID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, messages, "success")
 }
 
 // GetRun 处理 Run 详情查询并映射 service 层返回的统一错误。

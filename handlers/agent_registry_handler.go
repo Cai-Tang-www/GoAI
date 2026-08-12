@@ -46,6 +46,12 @@ func (h *AgentRegistryHandler) ListAgents(c *gin.Context) {
 	respondRegistry(c, http.StatusOK, views, err)
 }
 
+// ListPublishedAgents 返回全部已激活 Agent 的公开目录，供对话入口选择委派目标。
+func (h *AgentRegistryHandler) ListPublishedAgents(c *gin.Context) {
+	views, err := h.service.ListPublishedAgents(c.Request.Context())
+	respondRegistry(c, http.StatusOK, views, err)
+}
+
 // GetAgent 返回目标 Agent 的管理面详情。
 func (h *AgentRegistryHandler) GetAgent(c *gin.Context) {
 	actor, ok := registryActor(c)

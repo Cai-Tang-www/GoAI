@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Alert, Button, Collapse, Descriptions, Segmented, Skeleton, Table, Timeline, Tooltip, Tree } from 'antd'
 import type { TreeDataNode } from 'antd'
 import { ArrowLeft, Copy, GitBranch, History, MessagesSquare, RefreshCw, RotateCcw } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiRequest } from '../api/client'
 import type { Run, RunStep, RunTrace } from '../api/types'
@@ -12,7 +12,6 @@ import { PageHeader } from '../components/PageHeader'
 import { StatusTag } from '../components/StatusTag'
 import { formatTime, pick, shortId } from '../lib/format'
 import { notifyRequestError } from '../lib/notify'
-import { rememberRun } from '../lib/storage'
 
 type TraceRecord = Record<string, unknown>
 
@@ -81,17 +80,11 @@ export function RunDetailPage() {
   const threadId = runValue<string>(run, 'thread_id', 'ThreadID')
   const traceId = runValue<string>(run, 'trace_id', 'TraceID')
 
-  useEffect(() => {
-    if (!run) return
-    rememberRun({ runId, threadId, status, title: '运行详情', visitedAt: new Date().toISOString() })
-  }, [run, runId, threadId, status])
-
   const replayRun = async () => {
     if (replaying) return
     setReplaying('run')
     try {
       const result = await apiRequest<{ run_id: string; status: string }>(`/api/runs/${encodeURIComponent(runId)}/replay`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } })
-      rememberRun({ runId: result.run_id, threadId, status: result.status, title: `Replay ${shortId(runId)}`, visitedAt: new Date().toISOString() })
       navigate(`/runs/${result.run_id}`)
     } catch (error) { notifyRequestError(error) } finally { setReplaying(null) }
   }
@@ -101,7 +94,6 @@ export function RunDetailPage() {
     setReplaying('thread')
     try {
       const result = await apiRequest<{ run_id: string; status: string }>(`/api/threads/${encodeURIComponent(threadId)}/replay`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: { source_run_id: runId } })
-      rememberRun({ runId: result.run_id, threadId, status: result.status, title: `Thread Replay ${shortId(threadId)}`, visitedAt: new Date().toISOString() })
       navigate(`/runs/${result.run_id}`)
     } catch (error) { notifyRequestError(error) } finally { setReplaying(null) }
   }

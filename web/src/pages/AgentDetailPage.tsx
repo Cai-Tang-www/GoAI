@@ -15,7 +15,7 @@ import { formatTime, prettyJSON, shortId } from '../lib/format'
 import { isFormValidationError, notifyRequestError } from '../lib/notify'
 import { validateWorkflowDefinition } from '../lib/workflow'
 
-const emptyWorkflow = { entry_node: 'start', nodes: [{ key: 'start', type: 'noop', config: {} }], edges: [] }
+const emptyWorkflow = { entry_node: 'prepare', nodes: [{ key: 'prepare', type: 'noop', config: {} }], edges: [] }
 
 export function AgentDetailPage() {
   const { agentCode = '' } = useParams()

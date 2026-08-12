@@ -263,6 +263,10 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `POST /api/agents/:agent_code/agui`：AG-UI 标准协议入口
 - `/a2a/agents/:agent_code/*`：A2A Agent Card、委派、Task 查询与终态 callback 入口
 - `POST /api/runs`
+- `GET /api/runs`：当前用户可见的 Run 列表（admin 跨 owner），支持 `thread_id`/`agent_code`/`status`/`limit` 过滤
+- `GET /api/threads`：会话列表（附最近 Run 归属）
+- `GET /api/threads/:thread_id/messages`：Thread 持久化消息历史
+- `GET /api/agents/published`：已激活 Agent 公开目录（对话入口用）
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
 - `GET /api/runs/:run_id/trace`

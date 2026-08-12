@@ -3,11 +3,15 @@ import { validateWorkflowDefinition } from './workflow'
 
 describe('validateWorkflowDefinition', () => {
   it('accepts a minimal reachable workflow', () => {
-    expect(() => validateWorkflowDefinition({ entry_node: 'start', nodes: [{ key: 'start', type: 'noop', config: {} }], edges: [] })).not.toThrow()
+    expect(() => validateWorkflowDefinition({ entry_node: 'prepare', nodes: [{ key: 'prepare', type: 'noop', config: {} }], edges: [] })).not.toThrow()
+  })
+
+  it('rejects reserved graph engine node keys', () => {
+    expect(() => validateWorkflowDefinition({ entry_node: 'start', nodes: [{ key: 'start', type: 'noop', config: {} }], edges: [] })).toThrow('保留字')
   })
 
   it('rejects missing edge targets', () => {
-    expect(() => validateWorkflowDefinition({ entry_node: 'start', nodes: [{ key: 'start', type: 'noop' }], edges: [{ from: 'start', to: 'missing' }] })).toThrow('不存在的节点')
+    expect(() => validateWorkflowDefinition({ entry_node: 'prepare', nodes: [{ key: 'prepare', type: 'noop' }], edges: [{ from: 'prepare', to: 'missing' }] })).toThrow('不存在的节点')
   })
 
   it('validates interrupt identity and reason', () => {

@@ -209,21 +209,42 @@ export interface ChatMessage {
   createdAt: string
 }
 
-export interface ChatSession {
-  id: string
+export interface ThreadSummary {
+  thread_id: string
   title: string
-  agentCode: string
-  threadId: string
-  currentRunId?: string
-  messages: ChatMessage[]
-  updatedAt: string
+  status: string
+  agent_code: string
+  agent_name: string
+  last_run_id: string
+  last_run_status: string
+  run_count: number
+  created_at: string
+  updated_at: string
 }
 
-export interface RecentRun {
-  runId: string
-  threadId?: string
-  agentCode?: string
-  status?: string
-  title?: string
-  visitedAt: string
+export interface ThreadMessage {
+  message_id: string
+  run_id: string
+  sender_type: string
+  sender_id: string
+  message_type: string
+  role: string
+  content: string
+  content_json: unknown
+  status: string
+  created_at: string
+}
+
+export interface RunListItem {
+  run_id: string
+  thread_id: string
+  agent_code: string
+  agent_name: string
+  trigger_type: string
+  status: string
+  current_step: string
+  error_message: string
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
 }
