@@ -189,6 +189,13 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 		return
 	}
 	normalizeUserWriteRequest(&req)
+	// PUT 支持部分更新：未提供的字段保持原值，与 OpenAPI 契约中 email/password 均可选一致。
+	if req.Username == "" {
+		req.Username = user.Username
+	}
+	if req.Email == "" {
+		req.Email = user.Email
+	}
 	if appErr := validateUserWriteRequest(req, false); appErr != nil {
 		middlewares.AbortWithError(c, appErr)
 		return

@@ -1,0 +1,32 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Descriptions, Form, Input, Modal, Popconfirm, Select, Table, message } from 'antd'
+import { ArrowLeft, Edit3, HeartPulse, Power } from 'lucide-react'
+import { useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { apiRequest } from '../api/client'
+import type { MCPServer, MCPTool } from '../api/types'
+import { ErrorState } from '../components/ErrorState'
+import { JsonView } from '../components/JsonView'
+import { PageHeader } from '../components/PageHeader'
+import { RequestErrorAlert } from '../components/RequestErrorAlert'
+import { StatusTag } from '../components/StatusTag'
+import { formatTime } from '../lib/format'
+import { isFormValidationError, notifyRequestError } from '../lib/notify'
+
+export function MCPDetailPage() {
+  const { serverCode = '' } = useParams()
+  const navigate = useNavigate()
+  const client = useQueryClient()
+  const [editOpen, setEditOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState<unknown>(null)
+  const [form] = Form.useForm()
+  const serverQuery = useQuery({ queryKey: ['mcp-server', serverCode], queryFn: () => apiRequest<MCPServer>(`/api/mcp/servers/${encodeURIComponent(serverCode)}`) })
+  const toolsQuery = useQuery({ queryKey: ['mcp-tools', serverCode], queryFn: () => apiRequest<MCPTool[]>(`/api/mcp/servers/${encodeURIComponent(serverCode)}/tools`) })
+  const refresh = async () => { await client.invalidateQueries({ queryKey: ['mcp-server', serverCode] }); await client.invalidateQueries({ queryKey: ['mcp-tools', serverCode] }) }
+  const action = async (path: string, text: string) => { try { await apiRequest(path, { method: 'POST' }); message.success(text); await refresh() } catch (error) { notifyRequestError(error) } }
+  const save = async (values: Record<string, unknown>) => { setFormError(null); setSaving(true); try { await apiRequest(`/api/mcp/servers/${encodeURIComponent(serverCode)}`, { method: 'PUT', body: { ...values, server_code: serverCode } }); message.success('服务已更新'); setEditOpen(false); await refresh() } catch (error) { if (isFormValidationError(error)) setFormError(error); else notifyRequestError(error) } finally { setSaving(false) } }
+  const server = serverQuery.data
+  if (serverQuery.error) return <div className="page-shell"><ErrorState error={serverQuery.error} onRetry={() => serverQuery.refetch()} /></div>
+  return <div className="page-shell"><Button className="back-button" type="text" icon={<ArrowLeft size={16} />} onClick={() => navigate('/mcp')}>MCP 服务</Button><PageHeader eyebrow="MCP SERVER" title={server?.name || serverCode} description={server?.description || server?.endpoint} actions={<><Button icon={<Edit3 size={15} />} onClick={() => { form.setFieldsValue({ ...server, config_json: server?.config_json || '{}' }); setFormError(null); setEditOpen(true) }}>编辑</Button><Button type="primary" icon={<HeartPulse size={15} />} onClick={() => action(`/api/mcp/servers/${encodeURIComponent(serverCode)}/health-check`, '健康检查完成，Tool 快照已刷新')}>健康检查</Button></>} /><div className="detail-grid"><section className="content-section"><div className="section-heading"><div><h2>服务信息</h2><span>配置版本 v{server?.config_version}</span></div><StatusTag status={server?.status} /></div><Descriptions column={1} items={[{ key: 'code', label: 'Server Code', children: <code>{server?.server_code}</code> }, { key: 'endpoint', label: 'Endpoint', children: <code>{server?.endpoint}</code> }, { key: 'transport', label: 'Transport', children: <code>{server?.transport}</code> }, { key: 'auth', label: '认证', children: server?.auth_type }, { key: 'credential', label: '凭据引用', children: <code>{server?.credential_ref || '—'}</code> }, { key: 'config', label: '非敏感配置', children: <code>{server?.config_json || '{}'}</code> }, { key: 'healthy', label: '最后健康', children: formatTime(server?.last_healthy_at) }]} />{server?.last_error && <Alert type="error" showIcon message="最后一次检查失败" description={server.last_error} />}<div className="danger-zone"><span><strong>停用服务</strong><small>被 active Workflow 引用时后端会拒绝。</small></span><Popconfirm title="确认停用？" onConfirm={() => action(`/api/mcp/servers/${encodeURIComponent(serverCode)}/deactivate`, '服务已停用')}><Button danger icon={<Power size={14} />}>停用</Button></Popconfirm></div></section><section className="content-section span-two"><div className="section-heading"><div><h2>Tool 快照</h2><span>{toolsQuery.data?.length || 0} 个可发现工具</span></div></div>{toolsQuery.error ? <ErrorState error={toolsQuery.error} /> : <Table rowKey="tool_name" loading={toolsQuery.isLoading} dataSource={toolsQuery.data} expandable={{ expandedRowRender: (item) => <JsonView value={{ input: item.input_schema_json, output: item.output_schema_json }} maxHeight={280} /> }} columns={[{ title: 'Tool', dataIndex: 'tool_name', render: (value) => <code>{value}</code> }, { title: '描述', dataIndex: 'description', render: (value) => value || '—' }, { title: '更新时间', dataIndex: 'updated_at', render: formatTime }]} />}</section></div><Modal title="编辑 MCP Server" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => form.submit()} confirmLoading={saving}><Form form={form} layout="vertical" onFinish={save}>{Boolean(formError) && <RequestErrorAlert error={formError} />}<Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item><Form.Item name="endpoint" label="Endpoint" rules={[{ required: true }, { type: 'url' }]}><Input /></Form.Item><div className="form-grid"><Form.Item name="transport" label="Transport"><Select options={[{ value: 'streamable_http' }]} /></Form.Item><Form.Item name="auth_type" label="认证"><Select options={['none', 'bearer'].map((value) => ({ value }))} /></Form.Item></div><Form.Item name="credential_ref" label="凭据引用"><Input /></Form.Item><Form.Item name="config_json" label="非敏感配置 JSON" extra="不要在这里填写 secret、token 或 password。" rules={[{ validator: async (_, value) => { if (value) JSON.parse(value) } }]}><Input.TextArea className="code-input" rows={4} /></Form.Item></Form></Modal></div>
+}

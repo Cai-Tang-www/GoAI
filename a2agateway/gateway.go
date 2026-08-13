@@ -223,7 +223,7 @@ func targetAgentFromContext(ctx context.Context) (string, error) {
 }
 
 func (g *Gateway) serveAgentCard(ctx context.Context, targetAgent string, w http.ResponseWriter) {
-	descriptor, err := g.runtime.DescribeAgent(ctx, targetAgent)
+	descriptor, err := g.runtime.DescribeAgentForDiscovery(ctx, targetAgent)
 	if err != nil {
 		status := http.StatusInternalServerError
 		message := "agent card is unavailable"

@@ -123,6 +123,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		)
 		apiGroup.POST("/agents", middlewares.RequirePermission(models.PermissionAgentCreate), agentRegistryHandler.CreateAgent)
 		apiGroup.GET("/agents", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.ListAgents)
+		apiGroup.GET("/agents/published", middlewares.RequirePermission(models.PermissionRunCreate), agentRegistryHandler.ListPublishedAgents)
 		apiGroup.GET("/agents/:agent_code", middlewares.RequirePermission(models.PermissionAgentRead), agentRegistryHandler.GetAgent)
 		apiGroup.PUT("/agents/:agent_code", middlewares.RequirePermission(models.PermissionAgentUpdate), agentRegistryHandler.UpdateAgent)
 		apiGroup.POST("/agents/:agent_code/activate", middlewares.RequirePermission(models.PermissionAgentActivate), agentRegistryHandler.ActivateAgent)
@@ -155,6 +156,9 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.GET("/mcp/servers/:server_code/tools", middlewares.RequirePermission(models.PermissionMCPRead), mcpRegistryHandler.ListTools)
 
 		apiGroup.POST("/runs", middlewares.RequirePermission(models.PermissionRunCreate), runHandler.CreateRun)
+		apiGroup.GET("/runs", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRuns)
+		apiGroup.GET("/threads", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListThreads)
+		apiGroup.GET("/threads/:thread_id/messages", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListThreadMessages)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)
 		apiGroup.GET("/runs/:run_id/trace", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetRunTrace)

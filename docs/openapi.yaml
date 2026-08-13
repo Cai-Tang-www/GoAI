@@ -261,6 +261,53 @@ paths:
                 $ref: '#/components/schemas/Envelope'
         '409':
           $ref: '#/components/responses/Error'
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: listRuns
+      description: List runs visible to the current user (admin sees all owners), newest first.
+      parameters:
+        - name: thread_id
+          in: query
+          required: false
+          schema: {type: string}
+        - name: agent_code
+          in: query
+          required: false
+          schema: {type: string}
+        - name: status
+          in: query
+          required: false
+          schema: {type: string}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/threads:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: listThreads
+      description: List conversation threads owned by the current user (admin sees all owners), most recently updated first.
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/threads/{thread_id}/messages:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: listThreadMessages
+      description: List the persisted message history of a thread in chronological order.
+      parameters:
+        - $ref: '#/components/parameters/ThreadID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+        '404':
+          $ref: '#/components/responses/Error'
   /api/runs/{run_id}:
     get:
       tags: [Runs, Observability]
@@ -377,6 +424,15 @@ paths:
       tags: [Agents]
       security: [{bearerAuth: []}]
       operationId: listAgents
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+  /api/agents/published:
+    get:
+      tags: [Agents]
+      security: [{bearerAuth: []}]
+      operationId: listPublishedAgents
+      description: Public directory of all active agents (safe summary fields only), for choosing a chat/delegation target.
       responses:
         '200':
           $ref: '#/components/responses/Envelope'

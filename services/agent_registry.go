@@ -253,6 +253,23 @@ func (s *AgentRegistryService) ListAgents(ctx context.Context, actor RegistryAct
 	return views, nil
 }
 
+// ListPublishedAgents 返回全部已激活 Agent 的公开目录，供对话入口选择可用 Agent；
+// 只暴露安全的摘要字段，不包含 Endpoint 凭据等敏感信息。
+func (s *AgentRegistryService) ListPublishedAgents(ctx context.Context) ([]AgentSummaryView, error) {
+	var agents []models.Agent
+	if err := s.database.WithContext(ctx).
+		Where("status = ?", models.AgentStatusActive).
+		Order("agent_code ASC").
+		Find(&agents).Error; err != nil {
+		return nil, fmt.Errorf("listing published agents: %w", err)
+	}
+	views := make([]AgentSummaryView, 0, len(agents))
+	for _, agent := range agents {
+		views = append(views, agentSummaryView(agent))
+	}
+	return views, nil
+}
+
 // GetAgent 返回当前主体可管理的 Agent 完整详情。
 func (s *AgentRegistryService) GetAgent(ctx context.Context, actor RegistryActor, agentCode string) (*AgentDetailView, error) {
 	agent, err := s.loadOwnedAgent(ctx, s.database, actor, agentCode, false)

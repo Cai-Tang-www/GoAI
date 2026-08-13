@@ -348,6 +348,10 @@ func Validate(def *Definition) error {
 		if _, exists := nodeSet[key]; exists {
 			return fmt.Errorf("duplicate workflow node key: %s", key)
 		}
+		// Eino 编排图保留 start/end 作为虚拟入口和出口节点，业务节点不得占用。
+		if key == "start" || key == "end" {
+			return fmt.Errorf("workflow node key %q is reserved by the graph engine", key)
+		}
 		if strings.TrimSpace(n.Type) == "" {
 			return fmt.Errorf("workflow node type is required for key: %s", key)
 		}

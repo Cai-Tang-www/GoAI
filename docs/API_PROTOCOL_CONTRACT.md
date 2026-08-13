@@ -301,8 +301,8 @@ Content-Type: application/json
 {
   "version": 1,
   "definition": {
-    "entry_node": "start",
-    "nodes": [{"key": "start", "type": "noop"}],
+    "entry_node": "prepare",
+    "nodes": [{"key": "prepare", "type": "noop"}],
     "edges": []
   }
 }

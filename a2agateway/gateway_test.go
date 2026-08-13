@@ -50,6 +50,10 @@ func (f *fakeDelegationRuntime) DescribeAgent(_ context.Context, code string) (*
 	return f.descriptor, f.describeErr
 }
 
+func (f *fakeDelegationRuntime) DescribeAgentForDiscovery(ctx context.Context, code string) (*services.AgentDescriptor, error) {
+	return f.DescribeAgent(ctx, code)
+}
+
 func (f *fakeDelegationRuntime) AcceptDelegation(_ context.Context, command services.AcceptDelegationCommand) (*services.DelegationResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
