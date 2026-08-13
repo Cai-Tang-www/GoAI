@@ -161,6 +161,7 @@ func New(deps Dependencies) (*gin.Engine, error) {
 		apiGroup.GET("/threads/:thread_id/messages", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListThreadMessages)
 		apiGroup.GET("/runs/:run_id", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRun)
 		apiGroup.GET("/runs/:run_id/steps", middlewares.RequirePermission(models.PermissionRunRead), runHandler.ListRunSteps)
+		apiGroup.GET("/runs/:run_id/workflow", middlewares.RequirePermission(models.PermissionRunRead), runHandler.GetRunWorkflow)
 		apiGroup.GET("/runs/:run_id/trace", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.GetRunTrace)
 		apiGroup.GET("/runs/:run_id/loops", middlewares.RequirePermission(models.PermissionLoopRead), runHandler.ListRunLoops)
 		apiGroup.POST("/runs/:run_id/replay", middlewares.RequirePermission(models.PermissionRunReplay), runHandler.ReplayRun)

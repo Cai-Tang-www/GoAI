@@ -269,6 +269,7 @@ GoAI 使用下面的 A2A Message metadata 扩展表达委派语义：
 - `GET /api/agents/published`：已激活 Agent 公开目录（对话入口用）
 - `GET /api/runs/:run_id`
 - `GET /api/runs/:run_id/steps`
+- `GET /api/runs/:run_id/workflow`
 - `GET /api/runs/:run_id/trace`
 - `GET /api/runs/:run_id/loops`
 - `GET /api/loops/:loop_id`
