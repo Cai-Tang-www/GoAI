@@ -249,6 +249,49 @@ a { color: #286f6c; }
 @keyframes wf-pulse { 50% { opacity: .3; transform: scale(.7); } }
 .wf-handle { width: 7px !important; height: 7px !important; background: #7fa39c !important; border: 2px solid #fff !important; }
 .wf-minimap { border: 1px solid #d7dfdd; border-radius: 8px; overflow: hidden; }
+
+/* ---- Workflow 可视化编辑器 ---- */
+.workflow-editor-page { display: flex; flex-direction: column; gap: 14px; }
+.editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.editor-toolbar-left { display: flex; align-items: center; gap: 18px; }
+.editor-toolbar-left h1 { margin: 0; font-size: 21px; letter-spacing: -.3px; }
+.editor-version { display: inline-flex; align-items: center; gap: 8px; color: #66757a; font-size: 13px; }
+.editor-toolbar-actions { display: flex; align-items: center; gap: 8px; }
+.editor-issues { display: flex; flex-direction: column; gap: 8px; }
+.editor-layout { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: 14px; align-items: stretch; }
+.editor-layout:has(.node-config-panel) { grid-template-columns: 208px minmax(0, 1fr) 336px; }
+.editor-canvas { position: relative; }
+.editor-empty-hint { position: absolute; inset: 0; display: grid; place-items: center; color: #8a999d; font-size: 14px; pointer-events: none; }
+
+.node-palette { display: flex; flex-direction: column; gap: 8px; padding: 14px; background: #fff; border: 1px solid #d7dfdd; border-radius: 12px; align-self: start; }
+.palette-title { color: #536468; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.palette-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid #dde3e2; border-radius: 10px; background: #fbfcfc; cursor: grab; transition: border-color .15s, box-shadow .15s; }
+.palette-item:hover { border-color: #7fa39c; box-shadow: 0 3px 10px rgba(31, 52, 56, .1); }
+.palette-item:active { cursor: grabbing; }
+.palette-item .wf-node-icon { width: 28px; height: 28px; }
+.palette-item strong { display: block; font: 600 12px "SFMono-Regular", monospace; }
+.palette-item span { display: block; color: #7b898d; font-size: 11px; }
+.palette-note { margin-top: 4px; color: #8a999d; font-size: 11px; line-height: 1.5; }
+
+.node-config-panel { display: flex; flex-direction: column; gap: 13px; padding: 16px; background: #fff; border: 1px solid #d7dfdd; border-radius: 12px; align-self: start; max-height: calc(100vh - 230px); overflow-y: auto; }
+.config-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.config-head-actions { display: flex; gap: 6px; }
+.config-field { display: flex; flex-direction: column; gap: 5px; }
+.config-field > label { color: #536468; font-size: 12px; font-weight: 600; }
+.config-field-error { color: #b7463c; font-size: 12px; }
+.group-members { display: flex; flex-direction: column; gap: 8px; }
+.group-member { display: flex; flex-direction: column; gap: 5px; padding: 9px; border: 1px solid #e3e8e7; border-radius: 9px; background: #fafbfb; }
+.group-member-head { display: flex; gap: 6px; }
+
+.workflow-canvas .react-flow__node.selected .wf-node { border-color: #286f6c; box-shadow: 0 0 0 3px rgba(40, 111, 108, .18); }
+.workflow-canvas .react-flow__handle { width: 9px; height: 9px; background: #65837f; border: 2px solid #fff; }
+.workflow-canvas .react-flow__edge.selected .react-flow__edge-path { stroke: #286f6c; stroke-width: 2.5; }
+
+@media (max-width: 1100px) {
+  .editor-layout, .editor-layout:has(.node-config-panel) { grid-template-columns: 1fr; }
+  .node-palette { flex-direction: row; flex-wrap: wrap; }
+  .node-config-panel { max-height: none; }
+}
 .wf-step-inspect { margin-top: 16px; padding-top: 16px; border-top: 1px solid #e2e7e6; display: flex; flex-direction: column; gap: 12px; }
 .react-flow__node { cursor: pointer; }
 .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 24px; padding-top: 20px; border-top: 1px solid #ead6d3; }

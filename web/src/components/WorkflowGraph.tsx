@@ -55,7 +55,8 @@ function WorkflowGraphNode({ data }: NodeProps<Node<WorkflowGraphNodeData>>) {
   return data.errorMessage ? <Tooltip title={data.errorMessage}>{body}</Tooltip> : body
 }
 
-const NODE_TYPES = { workflowNode: WorkflowGraphNode }
+export const WORKFLOW_NODE_TYPES = { workflowNode: WorkflowGraphNode }
+const NODE_TYPES = WORKFLOW_NODE_TYPES
 
 export interface WorkflowGraphProps {
   definition: WorkflowDefinition

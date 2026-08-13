@@ -162,6 +162,56 @@ func TestWorkflowRegistryRejectsInvalidDefinitionAndEnforcesOwnership(t *testing
 	}
 }
 
+func TestWorkflowLayoutPersistsAndSurvivesDefinitionOnlyUpdate(t *testing.T) {
+	_, service := newWorkflowRegistryTestService(t)
+	ctx := context.Background()
+	owner := RegistryActor{UserID: 1}
+	if _, err := service.CreateAgent(ctx, owner, CreateAgentCommand{AgentCode: "writer", Name: "Writer"}); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	layout := `{"positions":{"prepare":{"x":40,"y":80}}}`
+	created, err := service.CreateWorkflow(ctx, owner, "writer", CreateWorkflowCommand{
+		Version: 1, Definition: []byte(workflowDefinitionJSON()), Layout: []byte(layout),
+	})
+	if err != nil {
+		t.Fatalf("create workflow with layout: %v", err)
+	}
+	if !strings.Contains(string(created.Layout), `"prepare"`) {
+		t.Fatalf("layout missing from create view: %s", created.Layout)
+	}
+
+	// 只改 definition 不带 layout（JSON 快捷保存路径）：布局必须保留。
+	updated, err := service.UpdateWorkflow(ctx, owner, "writer", 1, UpdateWorkflowCommand{
+		Definition: []byte(`{"entry_node":"finish","nodes":[{"key":"finish","type":"noop"}],"edges":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("update definition only: %v", err)
+	}
+	if !strings.Contains(string(updated.Layout), `"prepare"`) {
+		t.Fatalf("layout lost after definition-only update: %s", updated.Layout)
+	}
+
+	// 显式带 layout 更新则覆盖。
+	replaced, err := service.UpdateWorkflow(ctx, owner, "writer", 1, UpdateWorkflowCommand{
+		Definition: []byte(`{"entry_node":"finish","nodes":[{"key":"finish","type":"noop"}],"edges":[]}`),
+		Layout:     []byte(`{"positions":{"finish":{"x":1,"y":2}}}`),
+	})
+	if err != nil {
+		t.Fatalf("update with layout: %v", err)
+	}
+	if !strings.Contains(string(replaced.Layout), `"finish"`) || strings.Contains(string(replaced.Layout), `"prepare"`) {
+		t.Fatalf("layout not replaced: %s", replaced.Layout)
+	}
+
+	// 非对象 layout 拒绝。
+	if _, err := service.CreateWorkflow(ctx, owner, "writer", CreateWorkflowCommand{
+		Version: 2, Definition: []byte(workflowDefinitionJSON()), Layout: []byte(`[1,2]`),
+	}); !errors.Is(err, ErrAgentRegistryValidation()) {
+		t.Fatalf("invalid layout error = %v", err)
+	}
+}
+
 func TestWorkflowActivationRejectsMismatchedInactiveCapability(t *testing.T) {
 	database, service := newWorkflowRegistryTestService(t)
 	ctx := context.Background()
