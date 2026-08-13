@@ -120,7 +120,7 @@ function EditorCanvas({ state, dispatch }: { state: EditorState; dispatch: React
   )
 }
 
-function EditorInner({ agentCode, mode, workflow }: { agentCode: string; mode: 'new' | 'edit'; workflow?: Workflow }) {
+function EditorInner({ agentCode, mode, workflow, nextVersion }: { agentCode: string; mode: 'new' | 'edit'; workflow?: Workflow; nextVersion?: number }) {
   const navigate = useNavigate()
   const client = useQueryClient()
   const [searchParams] = useSearchParams()
@@ -135,12 +135,25 @@ function EditorInner({ agentCode, mode, workflow }: { agentCode: string; mode: '
   const [version, setVersion] = useState<number>(() => {
     const fromQuery = Number(searchParams.get('version'))
     if (Number.isInteger(fromQuery) && fromQuery > 0) return fromQuery
-    return (workflow?.version || 0) + 1
+    return nextVersion || (workflow?.version || 0) + 1
   })
 
   const analysis = useMemo(() => analyzeWorkflow(state.definition), [state.definition])
   const selectedNode = state.definition.nodes.find((node) => node.key === state.selectedKey) || null
   const allKeys = state.definition.nodes.map((node) => node.key)
+
+  // parseJsonDraft 解析 JSON 视图草稿；失败时记录错误并返回 null。
+  const parseJsonDraft = (): WorkflowDefinition | null => {
+    try {
+      const parsed = JSON.parse(jsonDraft) as WorkflowDefinition
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new Error('definition 需要包含 entry_node / nodes / edges')
+      setJsonError(null)
+      return parsed
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error))
+      return null
+    }
+  }
 
   const switchView = (next: 'canvas' | 'json') => {
     if (next === view) return
@@ -150,20 +163,16 @@ function EditorInner({ agentCode, mode, workflow }: { agentCode: string; mode: '
       setView('json')
       return
     }
-    try {
-      const parsed = JSON.parse(jsonDraft) as WorkflowDefinition
-      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new Error('definition 需要包含 entry_node / nodes / edges')
-      dispatch({ type: 'reset', definition: parsed, positions: fillMissingPositions(parsed, state.positions) })
-      setJsonError(null)
-      setView('canvas')
-    } catch (error) {
-      setJsonError(error instanceof Error ? error.message : String(error))
-    }
+    const parsed = parseJsonDraft()
+    if (!parsed) return
+    dispatch({ type: 'reset', definition: parsed, positions: fillMissingPositions(parsed, state.positions) })
+    setView('canvas')
   }
 
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      const payload = { definition: state.definition, layout: { positions: state.positions } }
+    mutationFn: async (definition: WorkflowDefinition) => {
+      const positions = fillMissingPositions(definition, state.positions)
+      const payload = { definition, layout: { positions } }
       if (mode === 'edit' && workflow) {
         await apiRequest(`/api/agents/${encodeURIComponent(agentCode)}/workflows/${workflow.version}`, { method: 'PUT', body: payload })
         return workflow.version
@@ -197,7 +206,28 @@ function EditorInner({ agentCode, mode, workflow }: { agentCode: string; mode: '
           <Tooltip title="撤销"><Button icon={<Undo2 size={15} />} disabled={state.past.length === 0} onClick={() => dispatch({ type: 'undo' })} /></Tooltip>
           <Tooltip title="重做"><Button icon={<Redo2 size={15} />} disabled={state.future.length === 0} onClick={() => dispatch({ type: 'redo' })} /></Tooltip>
           <Tooltip title="自动布局"><Button icon={<LayoutGrid size={15} />} onClick={() => dispatch({ type: 'auto-layout' })} /></Tooltip>
-          <Button type="primary" icon={<Save size={15} />} loading={saveMutation.isPending} disabled={!canSave} onClick={() => saveMutation.mutate()}>
+          <Button
+            type="primary"
+            icon={<Save size={15} />}
+            loading={saveMutation.isPending}
+            disabled={!canSave}
+            onClick={() => {
+              // JSON 视图下保存以草稿为准：先解析并同步回画布状态，避免丢弃未切回画布的修改。
+              if (view === 'json') {
+                const parsed = parseJsonDraft()
+                if (!parsed) return
+                const issues = analyzeWorkflow(parsed)
+                if (issues.errors.length > 0) {
+                  setJsonError(issues.errors[0])
+                  return
+                }
+                dispatch({ type: 'reset', definition: parsed, positions: fillMissingPositions(parsed, state.positions) })
+                saveMutation.mutate(parsed)
+                return
+              }
+              saveMutation.mutate(state.definition)
+            }}
+          >
             保存
           </Button>
         </div>
@@ -276,6 +306,12 @@ export function WorkflowEditorPage({ mode }: { mode: 'new' | 'edit' }) {
     enabled: mode === 'new' && Boolean(templateVersion),
     queryFn: () => apiRequest<Workflow>(`/api/agents/${encodeURIComponent(agentCode)}/workflows/${templateVersion}`),
   })
+  // 新建模式下取现有最大版本号 +1 作为默认版本，避免与已有版本冲突。
+  const listQuery = useQuery({
+    queryKey: ['workflows', agentCode],
+    enabled: mode === 'new',
+    queryFn: () => apiRequest<Workflow[]>(`/api/agents/${encodeURIComponent(agentCode)}/workflows`),
+  })
 
   if (mode === 'edit') {
     if (query.isLoading) return <div className="page-shell"><Skeleton active /></div>
@@ -296,7 +332,8 @@ export function WorkflowEditorPage({ mode }: { mode: 'new' | 'edit' }) {
     return <EditorInner agentCode={agentCode} mode="edit" workflow={query.data} />
   }
 
-  if (templateQuery.isLoading) return <div className="page-shell"><Skeleton active /></div>
+  if (templateQuery.isLoading || listQuery.isLoading) return <div className="page-shell"><Skeleton active /></div>
   const template = templateQuery.data
-  return <EditorInner key={template ? `from-${template.version}` : 'blank'} agentCode={agentCode} mode="new" workflow={template} />
+  const nextVersion = Math.max(0, ...(listQuery.data || []).map((item) => item.version)) + 1
+  return <EditorInner key={template ? `from-${template.version}` : 'blank'} agentCode={agentCode} mode="new" workflow={template} nextVersion={nextVersion} />
 }
