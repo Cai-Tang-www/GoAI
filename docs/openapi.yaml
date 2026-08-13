@@ -1040,11 +1040,17 @@ components:
       properties:
         version: {type: integer, minimum: 1}
         definition: {type: object}
+        layout:
+          type: object
+          description: Optional editor canvas metadata (e.g. node positions). Not part of the checksum.
     WorkflowUpdateRequest:
       type: object
       required: [definition]
       properties:
         definition: {type: object}
+        layout:
+          type: object
+          description: Optional editor canvas metadata (e.g. node positions). Not part of the checksum.
     A2AMessageSendRequest:
       type: object
       required: [message]

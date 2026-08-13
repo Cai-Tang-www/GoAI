@@ -9,6 +9,7 @@ const ChatPage = lazy(() => import('./pages/ChatPage').then((module) => ({ defau
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then((module) => ({ default: module.AgentsPage })))
 const AgentDetailPage = lazy(() => import('./pages/AgentDetailPage').then((module) => ({ default: module.AgentDetailPage })))
 const WorkflowDetailPage = lazy(() => import('./pages/WorkflowDetailPage').then((module) => ({ default: module.WorkflowDetailPage })))
+const WorkflowEditorPage = lazy(() => import('./pages/WorkflowEditorPage').then((module) => ({ default: module.WorkflowEditorPage })))
 const RunsPage = lazy(() => import('./pages/RunsPage').then((module) => ({ default: module.RunsPage })))
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((module) => ({ default: module.RunDetailPage })))
 const MCPPage = lazy(() => import('./pages/MCPPage').then((module) => ({ default: module.MCPPage })))
@@ -37,7 +38,9 @@ export default function App() {
         <Route path="/chat" element={<Suspense fallback={<PageLoader />}><ChatPage /></Suspense>} />
         <Route path="/agents" element={<Suspense fallback={<PageLoader />}><AgentsPage /></Suspense>} />
         <Route path="/agents/:agentCode" element={<Suspense fallback={<PageLoader />}><AgentDetailPage /></Suspense>} />
+        <Route path="/agents/:agentCode/workflows/new" element={<Suspense fallback={<PageLoader />}><WorkflowEditorPage mode="new" /></Suspense>} />
         <Route path="/agents/:agentCode/workflows/:version" element={<Suspense fallback={<PageLoader />}><WorkflowDetailPage /></Suspense>} />
+        <Route path="/agents/:agentCode/workflows/:version/edit" element={<Suspense fallback={<PageLoader />}><WorkflowEditorPage mode="edit" /></Suspense>} />
         <Route path="/runs" element={<Suspense fallback={<PageLoader />}><RunsPage /></Suspense>} />
         <Route path="/runs/:runId" element={<Suspense fallback={<PageLoader />}><RunDetailPage /></Suspense>} />
         <Route path="/mcp" element={<Suspense fallback={<PageLoader />}><MCPPage /></Suspense>} />

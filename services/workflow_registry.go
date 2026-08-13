@@ -21,11 +21,36 @@ import (
 type CreateWorkflowCommand struct {
 	Version    int             `json:"version"`
 	Definition json.RawMessage `json:"definition"`
+	Layout     json.RawMessage `json:"layout"`
 }
 
 // UpdateWorkflowCommand 描述替换一个 inactive Workflow 版本的定义。
 type UpdateWorkflowCommand struct {
 	Definition json.RawMessage `json:"definition"`
+	Layout     json.RawMessage `json:"layout"`
+}
+
+// maxWorkflowLayoutBytes 限制画布布局元数据的体积，防止把任意大 JSON 塞进该列。
+const maxWorkflowLayoutBytes = 64 * 1024
+
+// normalizeWorkflowLayout 校验并规范化可选的画布布局：必须是 JSON 对象，超限或非法则拒绝。
+func normalizeWorkflowLayout(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+	if len(trimmed) > maxWorkflowLayoutBytes {
+		return "", fmt.Errorf("%w: workflow layout exceeds %d bytes", errAgentRegistryValidation, maxWorkflowLayoutBytes)
+	}
+	var value map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
+		return "", fmt.Errorf("%w: workflow layout must be a JSON object", errAgentRegistryValidation)
+	}
+	canonical, err := canonicalizeJSON([]byte(trimmed))
+	if err != nil {
+		return "", fmt.Errorf("%w: normalizing workflow layout: %v", errAgentRegistryValidation, err)
+	}
+	return canonical, nil
 }
 
 // WorkflowCapabilityReferenceView 描述引用当前 Workflow 的 Capability。
@@ -41,6 +66,7 @@ type WorkflowView struct {
 	AgentCode    string                            `json:"agent_code"`
 	Version      int                               `json:"version"`
 	Definition   json.RawMessage                   `json:"definition"`
+	Layout       json.RawMessage                   `json:"layout,omitempty"`
 	Checksum     string                            `json:"checksum"`
 	IsActive     bool                              `json:"is_active"`
 	CreatedBy    uint64                            `json:"created_by"`
@@ -55,6 +81,10 @@ func (s *AgentRegistryService) CreateWorkflow(ctx context.Context, actor Registr
 	if err != nil {
 		return nil, err
 	}
+	normalizedLayout, err := normalizeWorkflowLayout(command.Layout)
+	if err != nil {
+		return nil, err
+	}
 	if command.Version <= 0 {
 		return nil, fmt.Errorf("%w: workflow version must be greater than zero", errAgentRegistryValidation)
 	}
@@ -66,7 +96,7 @@ func (s *AgentRegistryService) CreateWorkflow(ctx context.Context, actor Registr
 			return loadErr
 		}
 		created = models.Workflow{
-			AgentID: agent.ID, Version: command.Version, DefinitionJSON: normalizedDefinition,
+			AgentID: agent.ID, Version: command.Version, DefinitionJSON: normalizedDefinition, LayoutJSON: normalizedLayout,
 			Checksum: checksum, IsActive: false, CreatedBy: actor.UserID,
 		}
 		if createErr := tx.Create(&created).Error; createErr != nil {
@@ -125,6 +155,10 @@ func (s *AgentRegistryService) UpdateWorkflow(ctx context.Context, actor Registr
 	if err != nil {
 		return nil, err
 	}
+	normalizedLayout, err := normalizeWorkflowLayout(command.Layout)
+	if err != nil {
+		return nil, err
+	}
 
 	var updated models.Workflow
 	err = s.database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -142,13 +176,21 @@ func (s *AgentRegistryService) UpdateWorkflow(ctx context.Context, actor Registr
 		if err := rejectActiveWorkflowCapabilityReferences(ctx, tx, workflow.ID); err != nil {
 			return err
 		}
-		if err := tx.Model(workflow).Updates(map[string]any{
+		updates := map[string]any{
 			"definition_json": normalizedDefinition,
 			"checksum":        checksum,
-		}).Error; err != nil {
+		}
+		// layout 字段缺省表示"不改布局"（如纯 JSON 快捷保存），显式传入才覆盖。
+		if command.Layout != nil {
+			updates["layout_json"] = normalizedLayout
+		}
+		if err := tx.Model(workflow).Updates(updates).Error; err != nil {
 			return fmt.Errorf("updating workflow: %w", err)
 		}
 		workflow.DefinitionJSON = normalizedDefinition
+		if command.Layout != nil {
+			workflow.LayoutJSON = normalizedLayout
+		}
 		workflow.Checksum = checksum
 		updated = *workflow
 		return nil
@@ -318,6 +360,9 @@ func (s *AgentRegistryService) workflowViews(ctx context.Context, database *gorm
 			Definition: json.RawMessage(append([]byte(nil), []byte(workflow.DefinitionJSON)...)),
 			Checksum:   workflow.Checksum, IsActive: workflow.IsActive, CreatedBy: workflow.CreatedBy,
 			Capabilities: byWorkflow[workflow.ID], CreatedAt: workflow.CreatedAt, UpdatedAt: workflow.UpdatedAt,
+		}
+		if layout := strings.TrimSpace(workflow.LayoutJSON); layout != "" {
+			views[index].Layout = json.RawMessage(layout)
 		}
 		if views[index].Capabilities == nil {
 			views[index].Capabilities = []WorkflowCapabilityReferenceView{}

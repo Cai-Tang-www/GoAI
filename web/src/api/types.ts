@@ -72,11 +72,16 @@ export interface WorkflowDefinition {
   edges: WorkflowEdge[]
 }
 
+export interface WorkflowLayout {
+  positions?: Record<string, { x: number; y: number }>
+}
+
 export interface Workflow {
   id: number
   agent_code: string
   version: number
   definition: WorkflowDefinition
+  layout?: WorkflowLayout
   checksum: string
   is_active: boolean
   created_by: number
