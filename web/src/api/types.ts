@@ -72,17 +72,33 @@ export interface WorkflowDefinition {
   edges: WorkflowEdge[]
 }
 
+export interface WorkflowLayout {
+  positions?: Record<string, { x: number; y: number }>
+}
+
 export interface Workflow {
   id: number
   agent_code: string
   version: number
   definition: WorkflowDefinition
+  layout?: WorkflowLayout
   checksum: string
   is_active: boolean
   created_by: number
   capabilities: Array<{ capability_code: string; version: string; status: string }>
   created_at: string
   updated_at: string
+}
+
+export interface RunWorkflow {
+  run_id: string
+  agent_code: string
+  agent_name: string
+  workflow_id: number
+  version: number
+  definition: WorkflowDefinition
+  checksum: string
+  is_active: boolean
 }
 
 export interface Run {

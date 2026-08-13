@@ -64,6 +64,18 @@ type RunListItemView struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+// RunWorkflowView 是 Run 执行图查询的只读视图：Run 实际执行的那份 Workflow 定义。
+type RunWorkflowView struct {
+	RunID      string          `json:"run_id"`
+	AgentCode  string          `json:"agent_code"`
+	AgentName  string          `json:"agent_name"`
+	WorkflowID uint64          `json:"workflow_id"`
+	Version    int             `json:"version"`
+	Definition json.RawMessage `json:"definition"`
+	Checksum   string          `json:"checksum"`
+	IsActive   bool            `json:"is_active"`
+}
+
 // RunListFilter 描述控制台 Run 列表的可选过滤条件。
 type RunListFilter struct {
 	ThreadID  string
@@ -254,6 +266,40 @@ func (s *RunService) ListThreadMessages(ctx context.Context, userID uint64, isAd
 		})
 	}
 	return views, nil
+}
+
+// GetRunWorkflow 返回 Run 实际执行的 Workflow 定义，访问控制与 Run 详情一致（owner 或 admin）。
+// Run 记录了执行时的 workflow_id，因此即使 Agent 后续发布了新版本，这里仍返回当时的定义。
+func (s *RunService) GetRunWorkflow(ctx context.Context, userID uint64, isAdmin bool, runID string) (*RunWorkflowView, error) {
+	run, err := s.GetRunByRunID(ctx, userID, isAdmin, runID)
+	if err != nil {
+		return nil, err
+	}
+	var workflow models.Workflow
+	if err := s.database.WithContext(ctx).Where("id = ?", run.WorkflowID).First(&workflow).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errWorkflowNotFound
+		}
+		return nil, fmt.Errorf("loading run workflow: %w", err)
+	}
+	view := &RunWorkflowView{
+		RunID:      run.RunID,
+		WorkflowID: workflow.ID,
+		Version:    workflow.Version,
+		Definition: json.RawMessage(workflow.DefinitionJSON),
+		Checksum:   workflow.Checksum,
+		IsActive:   workflow.IsActive,
+	}
+	var agent models.Agent
+	if err := s.database.WithContext(ctx).Where("id = ?", workflow.AgentID).First(&agent).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("loading run workflow agent: %w", err)
+		}
+	} else {
+		view.AgentCode = agent.AgentCode
+		view.AgentName = agent.Name
+	}
+	return view, nil
 }
 
 // ListRuns 返回当前用户可见的 Run 列表；admin 可跨 owner 查看，支持按 Thread/Agent/状态过滤。

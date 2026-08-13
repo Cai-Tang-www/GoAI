@@ -5,11 +5,12 @@ import { ArrowLeft, Copy, GitBranch, History, MessagesSquare, RefreshCw, RotateC
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiRequest } from '../api/client'
-import type { Run, RunStep, RunTrace } from '../api/types'
+import type { Run, RunStep, RunTrace, RunWorkflow } from '../api/types'
 import { ErrorState } from '../components/ErrorState'
 import { JsonView } from '../components/JsonView'
 import { PageHeader } from '../components/PageHeader'
 import { StatusTag } from '../components/StatusTag'
+import { WorkflowGraph } from '../components/WorkflowGraph'
 import { formatTime, pick, shortId } from '../lib/format'
 import { notifyRequestError } from '../lib/notify'
 
@@ -56,8 +57,9 @@ function LoopDetailPanel({ loop }: { loop: TraceRecord }) {
 export function RunDetailPage() {
   const { runId = '' } = useParams()
   const navigate = useNavigate()
-  const [view, setView] = useState<'overview' | 'trace' | 'json'>('overview')
+  const [view, setView] = useState<'overview' | 'graph' | 'trace' | 'json'>('overview')
   const [replaying, setReplaying] = useState<'run' | 'thread' | null>(null)
+  const [selectedStepKey, setSelectedStepKey] = useState<string | null>(null)
   const runQuery = useQuery({
     queryKey: ['run', runId],
     queryFn: () => apiRequest<Run>(`/api/runs/${encodeURIComponent(runId)}`),
@@ -71,8 +73,14 @@ export function RunDetailPage() {
   const traceQuery = useQuery({
     queryKey: ['run-trace', runId],
     queryFn: () => apiRequest<RunTrace>(`/api/runs/${encodeURIComponent(runId)}/trace`),
-    enabled: view !== 'overview',
-    refetchInterval: () => view !== 'overview' && !isTerminal(runValue<string>(runQuery.data, 'status', 'Status')) ? 4000 : false,
+    enabled: view === 'trace' || view === 'json',
+    refetchInterval: () => (view === 'trace' || view === 'json') && !isTerminal(runValue<string>(runQuery.data, 'status', 'Status')) ? 4000 : false,
+  })
+  const workflowQuery = useQuery({
+    queryKey: ['run-workflow', runId],
+    queryFn: () => apiRequest<RunWorkflow>(`/api/runs/${encodeURIComponent(runId)}/workflow`),
+    enabled: view === 'graph',
+    staleTime: Infinity,
   })
 
   const run = runQuery.data
@@ -100,6 +108,11 @@ export function RunDetailPage() {
 
   const delegationRows = useMemo(() => traceQuery.data?.delegations || [], [traceQuery.data])
   const runTree = useMemo(() => buildRunTree(traceQuery.data?.runs || [], runId), [traceQuery.data, runId])
+  const selectedStep = useMemo(() => {
+    if (!selectedStepKey) return undefined
+    const matches = (stepsQuery.data || []).filter((step) => pick<string>(step, 'step_key', 'StepKey') === selectedStepKey)
+    return matches[matches.length - 1]
+  }, [selectedStepKey, stepsQuery.data])
 
   if (runQuery.isLoading) return <div className="page-shell"><Skeleton active /></div>
   if (runQuery.error) return <div className="page-shell"><Button type="text" icon={<ArrowLeft size={16} />} onClick={() => navigate('/runs')}>返回</Button><ErrorState error={runQuery.error} onRetry={() => runQuery.refetch()} /></div>
@@ -120,7 +133,7 @@ export function RunDetailPage() {
         <div><span>Trace</span><Tooltip title="复制 Trace ID"><button aria-label="复制 Trace ID" className="copy-id" onClick={() => navigator.clipboard.writeText(traceId || '')}><code>{shortId(traceId, 20)}</code><Copy size={13} /></button></Tooltip></div>
       </div>
       {runValue<string>(run, 'error_message', 'ErrorMessage') && <Alert type="error" showIcon message="运行失败" description={runValue<string>(run, 'error_message', 'ErrorMessage')} />}
-      <Segmented className="detail-segment" value={view} onChange={setView} options={[{ label: '步骤与信息', value: 'overview' }, { label: '协作 Trace', value: 'trace' }, { label: '原始 JSON', value: 'json' }]} />
+      <Segmented className="detail-segment" value={view} onChange={setView} options={[{ label: '步骤与信息', value: 'overview' }, { label: '执行图', value: 'graph' }, { label: '协作 Trace', value: 'trace' }, { label: '原始 JSON', value: 'json' }]} />
       {view === 'overview' && (
         <div className="detail-grid">
           <section className="content-section span-two">
@@ -137,6 +150,20 @@ export function RunDetailPage() {
           </aside>
         </div>
       )}
+      {view === 'graph' && (workflowQuery.isLoading ? <Skeleton active /> : workflowQuery.error ? <ErrorState error={workflowQuery.error} onRetry={() => workflowQuery.refetch()} /> : workflowQuery.data ? (
+        <section className="content-section">
+          <div className="section-heading"><div><h2>执行图</h2><span>{workflowQuery.data.agent_code || '—'} · Workflow v{workflowQuery.data.version} · 点击节点查看输入输出</span></div></div>
+          <WorkflowGraph definition={workflowQuery.data.definition} steps={stepsQuery.data} height={460} onNodeClick={setSelectedStepKey} />
+          {selectedStepKey && !selectedStep && <Alert className="wf-step-inspect" type="info" showIcon message={`节点 ${selectedStepKey} 在本次运行中尚未执行`} />}
+          {selectedStep && (
+            <div className="wf-step-inspect">
+              <div className="section-heading"><div><h2><code>{selectedStepKey}</code></h2><span>{pick<string>(selectedStep, 'step_type', 'StepType')} · attempt {pick<number>(selectedStep, 'attempt', 'Attempt') || 0} · {pick<number>(selectedStep, 'latency_ms', 'LatencyMS') || 0}ms</span></div><StatusTag status={pick<string>(selectedStep, 'status', 'Status')} /></div>
+              {pick<string>(selectedStep, 'error_message', 'ErrorMessage') && <Alert type="error" showIcon message={pick<string>(selectedStep, 'error_message', 'ErrorMessage')} />}
+              <div className="step-payload"><div><span>Input</span><JsonView value={parseJSON(pick<string>(selectedStep, 'input_json', 'InputJSON'))} maxHeight={220} /></div><div><span>Output</span><JsonView value={parseJSON(pick<string>(selectedStep, 'output_json', 'OutputJSON'))} maxHeight={220} /></div></div>
+            </div>
+          )}
+        </section>
+      ) : null)}
       {view === 'trace' && (traceQuery.isLoading ? <Skeleton active /> : traceQuery.error ? <ErrorState error={traceQuery.error} onRetry={() => traceQuery.refetch()} /> : (
         <div className="trace-layout">
           <section className="content-section">

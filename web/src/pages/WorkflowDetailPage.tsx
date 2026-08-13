@@ -1,9 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
 import { Alert, Button, Segmented, message } from 'antd'
-import { ArrowLeft, Save } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { ArrowLeft, PenSquare, Save } from 'lucide-react'
+import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { apiRequest } from '../api/client'
 import type { Workflow } from '../api/types'
@@ -12,6 +10,7 @@ import { ErrorState } from '../components/ErrorState'
 import { PageHeader } from '../components/PageHeader'
 import { RequestErrorAlert } from '../components/RequestErrorAlert'
 import { StatusTag } from '../components/StatusTag'
+import { WorkflowGraph } from '../components/WorkflowGraph'
 import { prettyJSON } from '../lib/format'
 import { isFormValidationError, notifyRequestError } from '../lib/notify'
 import { validateWorkflowDefinition } from '../lib/workflow'
@@ -24,21 +23,6 @@ export function WorkflowDetailPage() {
   const [draft, setDraft] = useState('')
   const [saveError, setSaveError] = useState<unknown>(null)
   const query = useQuery({ queryKey: ['workflow', agentCode, version], queryFn: async () => { const workflow = await apiRequest<Workflow>(`/api/agents/${encodeURIComponent(agentCode)}/workflows/${version}`); setDraft(prettyJSON(workflow.definition)); return workflow } })
-  const graph = useMemo(() => {
-    const definition = query.data?.definition
-    if (!definition) return { nodes: [], edges: [] }
-    const levels = new Map<string, number>([[definition.entry_node, 0]])
-    for (let pass = 0; pass < definition.nodes.length; pass += 1) for (const edge of definition.edges) if (levels.has(edge.from)) levels.set(edge.to, Math.max(levels.get(edge.to) || 0, (levels.get(edge.from) || 0) + 1))
-    const grouped = new Map<number, string[]>()
-    definition.nodes.forEach((node) => { const level = levels.get(node.key) || 0; grouped.set(level, [...(grouped.get(level) || []), node.key]) })
-    const nodes: Node[] = definition.nodes.map((node) => {
-      const level = levels.get(node.key) || 0
-      const row = grouped.get(level) || []
-      return { id: node.key, position: { x: level * 260, y: row.indexOf(node.key) * 120 }, sourcePosition: Position.Right, targetPosition: Position.Left, data: { label: <div className="workflow-node"><span>{node.type}</span><strong>{node.key}</strong>{node.key === definition.entry_node && <small>ENTRY</small>}</div> }, className: 'workflow-flow-node' }
-    })
-    const edges: Edge[] = definition.edges.map((edge, index) => ({ id: `${edge.from}-${edge.to}-${index}`, source: edge.from, target: edge.to, markerEnd: { type: MarkerType.ArrowClosed }, style: { stroke: '#65837f', strokeWidth: 1.5 } }))
-    return { nodes, edges }
-  }, [query.data])
 
   const save = async () => {
     setSaveError(null)
@@ -46,5 +30,5 @@ export function WorkflowDetailPage() {
   }
 
   if (query.error) return <div className="page-shell"><ErrorState error={query.error} onRetry={() => query.refetch()} /></div>
-  return <div className="page-shell workflow-page"><Button className="back-button" type="text" icon={<ArrowLeft size={16} />} onClick={() => navigate(`/agents/${agentCode}`)}>Agent 详情</Button><PageHeader eyebrow={`WORKFLOW · ${agentCode}`} title={`Version ${version}`} description={query.data?.checksum ? `Checksum ${query.data.checksum}` : '加载中'} actions={<><StatusTag status={query.data?.is_active ? 'active' : 'inactive'} />{!query.data?.is_active && <Button type="primary" icon={<Save size={15} />} onClick={save}>保存</Button>}</>} />{Boolean(saveError) && <RequestErrorAlert error={saveError} />}<div className="workflow-toolbar"><Segmented value={view} onChange={setView} options={[{ label: 'DAG', value: 'graph' }, { label: 'JSON', value: 'json' }]} />{query.data?.is_active && <Alert type="info" showIcon message="Active 版本只读；请新建版本后修改。" />}</div>{view === 'graph' ? <div className="workflow-canvas"><ReactFlow nodes={graph.nodes} edges={graph.edges} fitView minZoom={0.4} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false}><Background color="#d6dddb" gap={24} size={1} /><Controls showInteractive={false} /></ReactFlow></div> : <CodeEditor value={draft} onChange={setDraft} readOnly={Boolean(query.data?.is_active)} height="620px" />}</div>
+  return <div className="page-shell workflow-page"><Button className="back-button" type="text" icon={<ArrowLeft size={16} />} onClick={() => navigate(`/agents/${agentCode}`)}>Agent 详情</Button><PageHeader eyebrow={`WORKFLOW · ${agentCode}`} title={`Version ${version}`} description={query.data?.checksum ? `Checksum ${query.data.checksum}` : '加载中'} actions={<><StatusTag status={query.data?.is_active ? 'active' : 'inactive'} />{query.data?.is_active ? <Button icon={<PenSquare size={15} />} onClick={() => navigate(`/agents/${agentCode}/workflows/new?from=${version}`)}>基于此新建</Button> : <><Button icon={<PenSquare size={15} />} onClick={() => navigate(`/agents/${agentCode}/workflows/${version}/edit`)}>可视化编辑</Button><Button type="primary" icon={<Save size={15} />} onClick={save}>保存</Button></>}</>} />{Boolean(saveError) && <RequestErrorAlert error={saveError} />}<div className="workflow-toolbar"><Segmented value={view} onChange={setView} options={[{ label: 'DAG', value: 'graph' }, { label: 'JSON', value: 'json' }]} />{query.data?.is_active && <Alert type="info" showIcon message="Active 版本只读；请新建版本后修改。" />}</div>{view === 'graph' ? (query.data?.definition ? <WorkflowGraph definition={query.data.definition} height="calc(100vh - 250px)" /> : null) : <CodeEditor value={draft} onChange={setDraft} readOnly={Boolean(query.data?.is_active)} height="620px" />}</div>
 }

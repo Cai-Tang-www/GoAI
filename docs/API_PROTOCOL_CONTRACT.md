@@ -48,6 +48,7 @@
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
 | `GET` | `/api/runs/:run_id/steps` | JWT + `run:read` | JSON envelope |
+| `GET` | `/api/runs/:run_id/workflow` | JWT + `run:read` | Run 执行的 Workflow 定义（按 run 的 workflow_id 固定） |
 | `GET` | `/api/runs/:run_id/trace` | JWT + `loop:read` | Run/Step/Loop/A2A trace snapshot |
 | `GET` | `/api/runs/:run_id/loops` | JWT + `loop:read` | Loop list |
 | `GET` | `/api/loops/:loop_id` | JWT + `loop:read` | Loop detail with evaluations |
@@ -304,11 +305,14 @@ Content-Type: application/json
     "entry_node": "prepare",
     "nodes": [{"key": "prepare", "type": "noop"}],
     "edges": []
-  }
+  },
+  "layout": {"positions": {"prepare": {"x": 80, "y": 60}}}
 }
 ```
 
 The management service calls the shared Workflow parser and validator, trims stable identifiers, canonicalizes JSON, and stores a SHA-256 `checksum`. New versions start inactive. An active version cannot be edited in place; publish a new version instead.
+
+The optional `layout` field stores editor canvas metadata (node positions) as an opaque JSON object of at most 64 KB. It never participates in the definition checksum, so two logically identical definitions with different layouts share the same checksum. On `PUT`, omitting `layout` keeps the stored layout unchanged; sending it (including `{}`) replaces it. Responses include `layout` when present.
 
 The recommended rolling release sequence is:
 

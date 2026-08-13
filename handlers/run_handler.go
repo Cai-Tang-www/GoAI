@@ -148,6 +148,26 @@ func (h *RunHandler) GetRun(c *gin.Context) {
 	middlewares.Success(c, http.StatusOK, run, "success")
 }
 
+// GetRunWorkflow 返回 Run 实际执行的 Workflow 定义，供控制台渲染执行图。
+func (h *RunHandler) GetRunWorkflow(c *gin.Context) {
+	userID, isAdmin, ok := authPrincipal(c)
+	if !ok {
+		middlewares.AbortWithError(c, middlewares.UnauthorizedInvalidToken())
+		return
+	}
+	runID := c.Param("run_id")
+	if appErr := validateRunIDParam(runID); appErr != nil {
+		middlewares.AbortWithError(c, appErr)
+		return
+	}
+	workflow, err := h.service.GetRunWorkflow(c.Request.Context(), userID, isAdmin, runID)
+	if err != nil {
+		middlewares.AbortWithError(c, middlewares.WrapError(err))
+		return
+	}
+	middlewares.Success(c, http.StatusOK, workflow, "success")
+}
+
 // ListRunSteps 处理 Run 步骤查询并保证 owner 与 admin 的访问语义一致。
 func (h *RunHandler) ListRunSteps(c *gin.Context) {
 	userID, isAdmin, ok := authPrincipal(c)
