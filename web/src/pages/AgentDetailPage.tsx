@@ -4,8 +4,9 @@ import { Activity, ArrowLeft, CheckCircle2, Circle, Edit3, ExternalLink, HeartPu
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, apiRequest } from '../api/client'
-import type { Agent, AgentEndpoint, Capability, Workflow } from '../api/types'
+import type { Agent, AgentEndpoint, Capability, Workflow, WorkflowDefinition } from '../api/types'
 import { CodeEditor } from '../components/CodeEditor'
+import { WorkflowGraph } from '../components/WorkflowGraph'
 import { ErrorState } from '../components/ErrorState'
 import { JsonView } from '../components/JsonView'
 import { PageHeader } from '../components/PageHeader'
@@ -27,6 +28,16 @@ export function AgentDetailPage() {
   const [formError, setFormError] = useState<unknown>(null)
   const [jsonValue, setJsonValue] = useState(prettyJSON(emptyWorkflow))
   const [form] = Form.useForm()
+  // JSON 草稿合法时实时渲染 DAG 预览；不合法时静默保留上一次可用的预览为空。
+  const workflowPreview = useMemo<WorkflowDefinition | null>(() => {
+    try {
+      const definition: unknown = JSON.parse(jsonValue)
+      validateWorkflowDefinition(definition)
+      return definition
+    } catch {
+      return null
+    }
+  }, [jsonValue])
   const agentQuery = useQuery({ queryKey: ['agent', agentCode], queryFn: () => apiRequest<Agent>(`/api/agents/${encodeURIComponent(agentCode)}`) })
   const workflowsQuery = useQuery({ queryKey: ['workflows', agentCode], queryFn: () => apiRequest<Workflow[]>(`/api/agents/${encodeURIComponent(agentCode)}/workflows`) })
   const cardQuery = useQuery({ queryKey: ['agent-card', agentCode], queryFn: () => fetch(`/a2a/agents/${encodeURIComponent(agentCode)}/.well-known/agent-card.json`).then(async (response) => { if (!response.ok) throw new ApiError(response.status === 404 ? 'Agent 尚未发布' : `Agent Card 请求失败（HTTP ${response.status}）`, response.status, 'AGENT_CARD_FAILED', response.headers.get('X-Trace-ID') || '') ; return response.json() }), retry: false })
@@ -116,7 +127,7 @@ export function AgentDetailPage() {
           {modal === 'agent' && <><Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="description" label="描述"><Input.TextArea rows={4} /></Form.Item></>}
           {modal === 'capability' && <><Form.Item name="capability_code" label="Capability Code" rules={[{ required: true }]}><Input disabled={Boolean(editing)} className="code-input" /></Form.Item><Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item><div className="form-grid"><Form.Item name="capability_type" label="类型" extra="V1 只有 workflow 类型可参与 Agent 发布。" rules={[{ required: true }]}><Select options={['workflow', 'remote', 'tool', 'custom'].map((value) => ({ value }))} /></Form.Item><Form.Item name="status" label="状态"><Select options={['active', 'inactive'].map((value) => ({ value }))} /></Form.Item><Form.Item name="workflow_id" label="Workflow" dependencies={['capability_type']} rules={[{ validator: async (_, value) => { if (form.getFieldValue('capability_type') === 'workflow' && !value) throw new Error('workflow 类型必须选择 Workflow') } }]}><Select allowClear options={workflows.map((workflow) => ({ value: workflow.id, label: `v${workflow.version} · #${workflow.id}` }))} /></Form.Item><Form.Item name="version" label="版本" dependencies={['capability_type', 'workflow_id']} rules={[{ validator: async (_, value) => { if (form.getFieldValue('capability_type') !== 'workflow') return; const selected = workflows.find((workflow) => workflow.id === form.getFieldValue('workflow_id')); if (!value) throw new Error('workflow 类型必须填写版本'); if (selected && String(value) !== String(selected.version)) throw new Error(`版本必须与 Workflow v${selected.version} 一致`) } }]}><Input /></Form.Item></div>{['input_schema_json', 'output_schema_json', 'config_json'].map((field) => <Form.Item key={field} name={field} label={field} rules={[{ validator: async (_, value) => { if (value) JSON.parse(value) } }]}><Input.TextArea className="code-input" rows={3} /></Form.Item>)}</>}
           {modal === 'endpoint' && <><Form.Item name="endpoint_code" label="Endpoint Code" rules={[{ required: true }]}><Input disabled={Boolean(editing)} className="code-input" /></Form.Item><div className="form-grid"><Form.Item name="protocol" label="协议"><Input disabled /></Form.Item><Form.Item name="transport" label="传输"><Select options={['http', 'https'].map((value) => ({ value }))} /></Form.Item></div><Form.Item name="address" label="地址" rules={[{ required: true }, { type: 'url' }]}><Input placeholder="http://127.0.0.1:8080/a2a/agents/..." /></Form.Item><div className="form-grid"><Form.Item name="auth_type" label="认证类型"><Input /></Form.Item><Form.Item name="credential_ref" label="凭据引用"><Input placeholder="仅填写引用名，不要填写密钥" /></Form.Item></div><Form.Item name="config_json" label="非敏感配置 JSON" rules={[{ validator: async (_, value) => { if (value) JSON.parse(value) } }]}><Input.TextArea className="code-input" rows={4} /></Form.Item></>}
-          {modal === 'workflow' && <><Form.Item name="version" label="版本号" rules={[{ required: true }]}><InputNumber min={1} precision={0} /></Form.Item><Form.Item label="Definition JSON" required><CodeEditor value={jsonValue} onChange={setJsonValue} height="400px" /></Form.Item></>}
+          {modal === 'workflow' && <><Form.Item name="version" label="版本号" rules={[{ required: true }]}><InputNumber min={1} precision={0} /></Form.Item><Form.Item label="Definition JSON" required><CodeEditor value={jsonValue} onChange={setJsonValue} height="320px" /></Form.Item><Form.Item label="DAG 预览">{workflowPreview ? <WorkflowGraph definition={workflowPreview} height={220} /> : <Alert type="warning" showIcon message="JSON 暂不合法，修正后自动刷新预览" />}</Form.Item></>}
         </Form>
       </Modal>
     </div>

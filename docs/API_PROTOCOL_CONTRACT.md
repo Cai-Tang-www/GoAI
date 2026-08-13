@@ -48,6 +48,7 @@
 | `POST` | `/api/runs` | JWT + `run:create` | JSON envelope, `202` or idempotent `200` |
 | `GET` | `/api/runs/:run_id` | JWT + `run:read` | JSON envelope |
 | `GET` | `/api/runs/:run_id/steps` | JWT + `run:read` | JSON envelope |
+| `GET` | `/api/runs/:run_id/workflow` | JWT + `run:read` | Run 执行的 Workflow 定义（按 run 的 workflow_id 固定） |
 | `GET` | `/api/runs/:run_id/trace` | JWT + `loop:read` | Run/Step/Loop/A2A trace snapshot |
 | `GET` | `/api/runs/:run_id/loops` | JWT + `loop:read` | Loop list |
 | `GET` | `/api/loops/:loop_id` | JWT + `loop:read` | Loop detail with evaluations |

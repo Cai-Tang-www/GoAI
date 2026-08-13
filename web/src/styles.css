@@ -216,12 +216,41 @@ a { color: #286f6c; }
 .publish-actions .ant-alert { flex: 1 1 100%; }
 .workflow-toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
 .workflow-toolbar .ant-alert { flex: 1; padding-block: 5px; }
-.workflow-canvas { height: calc(100vh - 250px); min-height: 520px; border: 1px solid #d7dfdd; background: #f8faf9; }
-.workflow-flow-node { width: 180px !important; padding: 0 !important; border: 1px solid #9fb6b2 !important; border-radius: 3px !important; background: #fff !important; box-shadow: 0 3px 8px rgba(31,52,56,.06) !important; }
-.workflow-node { padding: 12px; text-align: left; }
-.workflow-node span { color: #5f817d; font: 9px "SFMono-Regular", monospace; text-transform: uppercase; }
-.workflow-node strong { display: block; margin-top: 5px; font: 13px "SFMono-Regular", monospace; }
-.workflow-node small { display: inline-block; margin-top: 8px; padding: 2px 4px; color: #fff; background: #286f6c; font-size: 8px; }
+.workflow-canvas { height: calc(100vh - 250px); min-height: 320px; border: 1px solid #d7dfdd; border-radius: 12px; background: #f8faf9; overflow: hidden; }
+.wf-node { display: flex; gap: 10px; width: 224px; min-height: 76px; padding: 11px 13px; text-align: left; background: #fff; border: 1.5px solid #c3d2ce; border-radius: 11px; box-shadow: 0 4px 12px rgba(31, 52, 56, .07); transition: border-color .15s, box-shadow .15s; }
+.wf-node:hover { border-color: #7fa39c; box-shadow: 0 6px 16px rgba(31, 52, 56, .12); }
+.wf-node-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 9px; color: #3d6f66; background: #e7f0ed; }
+.wf-type-llm .wf-node-icon { color: #7a4fa8; background: #f1e9f9; }
+.wf-type-agent .wf-node-icon { color: #2563ab; background: #e6eff9; }
+.wf-type-agent_tool .wf-node-icon { color: #1f7a8c; background: #e3f2f5; }
+.wf-type-agent_group .wf-node-icon { color: #a05a1f; background: #f9efe3; }
+.wf-type-tool .wf-node-icon { color: #57652f; background: #eef2e2; }
+.wf-type-interrupt .wf-node-icon { color: #b04747; background: #f9e9e9; }
+.wf-node-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wf-node-head { display: flex; align-items: center; gap: 6px; }
+.wf-node-type { color: #5f817d; font: 9px "SFMono-Regular", monospace; text-transform: uppercase; letter-spacing: .4px; }
+.wf-node-entry { padding: 1px 5px; color: #fff; background: #286f6c; border-radius: 4px; font-size: 8px; font-weight: 700; letter-spacing: .5px; }
+.wf-node-key { font: 600 13px "SFMono-Regular", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-node-summary { color: #7b898d; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-node-run { color: #5f817d; font: 10px "SFMono-Regular", monospace; }
+.wf-node-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: #9fb0ac; flex: none; }
+.wf-status-success { border-color: #4d9974; }
+.wf-status-success .wf-node-dot { background: #3d8a63; }
+.wf-status-success .wf-node-run { color: #327c4e; }
+.wf-status-failed, .wf-status-cancelled { border-color: #cd7a72; }
+.wf-status-failed .wf-node-dot, .wf-status-cancelled .wf-node-dot { background: #c0564c; }
+.wf-status-failed .wf-node-run, .wf-status-cancelled .wf-node-run { color: #b04747; }
+.wf-status-waiting { border-color: #d8a94e; }
+.wf-status-waiting .wf-node-dot { background: #cf9a2e; animation: wf-pulse 1.4s ease-in-out infinite; }
+.wf-status-waiting .wf-node-run { color: #a07716; }
+.wf-status-running { border-color: #5a8fc7; }
+.wf-status-running .wf-node-dot { background: #2f6fb5; animation: wf-pulse 1.1s ease-in-out infinite; }
+.wf-status-running .wf-node-run { color: #2563ab; }
+@keyframes wf-pulse { 50% { opacity: .3; transform: scale(.7); } }
+.wf-handle { width: 7px !important; height: 7px !important; background: #7fa39c !important; border: 2px solid #fff !important; }
+.wf-minimap { border: 1px solid #d7dfdd; border-radius: 8px; overflow: hidden; }
+.wf-step-inspect { margin-top: 16px; padding-top: 16px; border-top: 1px solid #e2e7e6; display: flex; flex-direction: column; gap: 12px; }
+.react-flow__node { cursor: pointer; }
 .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 24px; padding-top: 20px; border-top: 1px solid #ead6d3; }
 .danger-zone strong, .danger-zone small { display: block; }
 .danger-zone small { color: #8a7774; margin-top: 3px; }

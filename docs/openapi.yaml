@@ -332,6 +332,22 @@ paths:
           $ref: '#/components/responses/Envelope'
         '404':
           $ref: '#/components/responses/Error'
+  /api/runs/{run_id}/workflow:
+    get:
+      tags: [Runs, Observability]
+      security: [{bearerAuth: []}]
+      operationId: getRunWorkflow
+      description: >
+        Return the workflow definition that this run actually executed
+        (pinned by the run's workflow_id, so later versions do not affect it).
+        Used by the console to render the execution graph.
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Envelope'
+        '404':
+          $ref: '#/components/responses/Error'
   /api/runs/{run_id}/trace:
     get:
       tags: [Runs, Observability]

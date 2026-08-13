@@ -85,6 +85,17 @@ export interface Workflow {
   updated_at: string
 }
 
+export interface RunWorkflow {
+  run_id: string
+  agent_code: string
+  agent_name: string
+  workflow_id: number
+  version: number
+  definition: WorkflowDefinition
+  checksum: string
+  is_active: boolean
+}
+
 export interface Run {
   ID?: number
   RunID?: string
