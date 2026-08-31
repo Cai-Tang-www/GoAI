@@ -22,6 +22,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       theme={{
         token: {
           colorPrimary: '#286f6c',
+          colorTextLightSolid: '#ffffff',
           colorInfo: '#286f6c',
           colorSuccess: '#2f7b4c',
           colorWarning: '#b06b20',

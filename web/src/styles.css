@@ -48,6 +48,8 @@ a { color: #286f6c; }
 .page-header p { max-width: 720px; margin: 0; color: #69787c; font-size: 14px; line-height: 1.6; }
 .page-eyebrow { color: #708185; font: 10px/1.4 "SFMono-Regular", monospace; text-transform: uppercase; letter-spacing: .1em; }
 .page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ant-btn-primary:not(:disabled):not(.ant-btn-disabled) { color: #fff; opacity: 1; }
+.ant-btn-primary:not(:disabled):not(.ant-btn-disabled):hover { color: #fff; }
 .back-button { margin: -10px 0 14px -12px; color: #617176; }
 .content-section { background: #fff; border: 1px solid #e2e8e7; border-radius: 14px; padding: 22px; min-width: 0; box-shadow: 0 1px 3px rgba(18, 34, 39, .04); }
 .section-heading { min-height: 38px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
