@@ -286,6 +286,8 @@ a { color: #286f6c; }
 .group-member-head { display: flex; gap: 6px; }
 
 .workflow-canvas .react-flow__node.selected .wf-node { border-color: #286f6c; box-shadow: 0 0 0 3px rgba(40, 111, 108, .18); }
+.workflow-canvas .react-flow__node { will-change: transform; }
+.workflow-canvas .react-flow__node.dragging .wf-node { cursor: grabbing; border-color: #286f6c; box-shadow: 0 8px 22px rgba(40, 111, 108, .22); transition: none; }
 .workflow-canvas .react-flow__handle { width: 9px; height: 9px; background: #65837f; border: 2px solid #fff; }
 .workflow-canvas .react-flow__edge.selected .react-flow__edge-path { stroke: #286f6c; stroke-width: 2.5; }
 
