@@ -9,12 +9,13 @@ import {
   useReactFlow,
   type Edge,
   type Node,
+  type NodeChange,
   type OnSelectionChangeParams,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Alert, Button, InputNumber, Segmented, Skeleton, Tooltip, message } from 'antd'
 import { ArrowLeft, Bot, Boxes, CircleDot, Hammer, LayoutGrid, PauseCircle, Redo2, Save, Sparkles, Undo2, Wrench } from 'lucide-react'
-import { useCallback, useMemo, useReducer, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type DragEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { apiRequest } from '../api/client'
 import type { Workflow, WorkflowDefinition } from '../api/types'
@@ -27,6 +28,7 @@ import { notifyRequestError } from '../lib/notify'
 import {
   EDITOR_NODE_TYPES,
   analyzeWorkflow,
+  collectNodePositions,
   createEditorState,
   editorReducer,
   fillMissingPositions,
@@ -49,12 +51,37 @@ const PALETTE: Array<{ type: (typeof EDITOR_NODE_TYPES)[number]; label: string; 
 
 function EditorCanvas({ state, dispatch }: { state: EditorState; dispatch: React.Dispatch<Parameters<typeof editorReducer>[1]> }) {
   const { screenToFlowPosition } = useReactFlow()
+  const [livePositions, setLivePositions] = useState<EditorState['positions']>({})
+  const livePositionsRef = useRef(livePositions)
+  const liveFrameRef = useRef<number | null>(null)
+  const nodeKeys = useMemo(() => new Set(state.definition.nodes.map((node) => node.key)), [state.definition.nodes])
+
+  const scheduleLiveRender = useCallback(() => {
+    if (liveFrameRef.current !== null) return
+    liveFrameRef.current = requestAnimationFrame(() => {
+      liveFrameRef.current = null
+      setLivePositions({ ...livePositionsRef.current })
+    })
+  }, [])
+
+  useEffect(() => () => {
+    if (liveFrameRef.current !== null) cancelAnimationFrame(liveFrameRef.current)
+  }, [])
+
+  useEffect(() => {
+    const next = Object.fromEntries(Object.entries(livePositionsRef.current).filter(([key]) => nodeKeys.has(key)))
+    if (Object.keys(next).length !== Object.keys(livePositionsRef.current).length) {
+      livePositionsRef.current = next
+      setLivePositions(next)
+    }
+  }, [nodeKeys])
+
   const nodes: Node<WorkflowGraphNodeData>[] = useMemo(
     () =>
       state.definition.nodes.map((node) => ({
         id: node.key,
         type: 'workflowNode',
-        position: state.positions[node.key] || { x: 0, y: 0 },
+        position: livePositions[node.key] || state.positions[node.key] || { x: 0, y: 0 },
         selected: node.key === state.selectedKey,
         data: {
           nodeKey: node.key,
@@ -63,7 +90,7 @@ function EditorCanvas({ state, dispatch }: { state: EditorState; dispatch: React
           summary: summarizeNodeConfig(node),
         },
       })),
-    [state.definition, state.positions, state.selectedKey],
+    [livePositions, state.definition, state.positions, state.selectedKey],
   )
   const edges: Edge[] = useMemo(
     () =>
@@ -95,6 +122,26 @@ function EditorCanvas({ state, dispatch }: { state: EditorState; dispatch: React
     [dispatch],
   )
 
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    const changedPositions = collectNodePositions(changes)
+    if (Object.keys(changedPositions).length === 0) return
+    livePositionsRef.current = { ...livePositionsRef.current, ...changedPositions }
+    scheduleLiveRender()
+  }, [scheduleLiveRender])
+
+  const onNodeDragStop = useCallback((_: unknown, node: Node) => {
+    const positions = { ...livePositionsRef.current, [node.id]: { ...node.position } }
+    if (liveFrameRef.current !== null) cancelAnimationFrame(liveFrameRef.current)
+    liveFrameRef.current = null
+    livePositionsRef.current = {}
+    setLivePositions({})
+    dispatch({ type: 'move-nodes', positions })
+  }, [dispatch])
+
+  const onNodesDelete = useCallback((deleted: Node[]) => {
+    dispatch({ type: 'remove-nodes', keys: deleted.map((node) => node.id) })
+  }, [dispatch])
+
   return (
     <ReactFlow
       nodes={nodes}
@@ -107,10 +154,11 @@ function EditorCanvas({ state, dispatch }: { state: EditorState; dispatch: React
       proOptions={{ hideAttribution: true }}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}
       onDrop={onDrop}
+      onNodesChange={onNodesChange}
       onConnect={(connection) => { if (connection.source && connection.target) dispatch({ type: 'add-edge', from: connection.source, to: connection.target }) }}
-      onNodeDragStop={(_, node) => dispatch({ type: 'move-node', key: node.id, position: node.position })}
+      onNodeDragStop={onNodeDragStop}
       onSelectionChange={onSelectionChange}
-      onNodesDelete={(deleted) => deleted.forEach((node) => dispatch({ type: 'remove-node', key: node.id }))}
+      onNodesDelete={onNodesDelete}
       onEdgesDelete={(deleted) => deleted.forEach((edge) => dispatch({ type: 'remove-edge', from: edge.source, to: edge.target }))}
     >
       <Background color="#d6dddb" gap={24} size={1} />

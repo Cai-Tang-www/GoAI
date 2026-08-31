@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { NodeChange } from '@xyflow/react'
 import type { WorkflowDefinition } from '../api/types'
 import {
   analyzeWorkflow,
+  collectNodePositions,
   createEditorState,
   editorReducer,
   removeNodeCascade,
@@ -152,11 +154,40 @@ describe('editorReducer', () => {
     expect(moved.dirty).toBe(true)
   })
 
+  it('collectNodePositions 提取拖动中的 position changes', () => {
+    const changes: NodeChange[] = [
+      { id: 'a', type: 'position', position: { x: 24, y: 36 }, dragging: true },
+      { id: 'a', type: 'select', selected: true },
+      { id: 'b', type: 'position', position: { x: 140, y: 80 } },
+    ]
+    expect(collectNodePositions(changes)).toEqual({
+      a: { x: 24, y: 36 },
+      b: { x: 140, y: 80 },
+    })
+  })
+
+  it('move-nodes 批量落盘坐标且不生成拖动历史', () => {
+    const base = createEditorState(serial)
+    const moved = editorReducer(base, { type: 'move-nodes', positions: { a: { x: 99, y: 99 }, b: { x: 120, y: 40 } } })
+    expect(moved.positions).toMatchObject({ a: { x: 99, y: 99 }, b: { x: 120, y: 40 } })
+    expect(moved.past).toHaveLength(0)
+    expect(moved.dirty).toBe(true)
+  })
+
   it('remove-node 清除选中态', () => {
     const base = apply(createEditorState(serial), { type: 'select', key: 'b' })
     const removed = editorReducer(base, { type: 'remove-node', key: 'b' })
     expect(removed.selectedKey).toBeNull()
     expect(removed.definition.edges).toHaveLength(0)
+  })
+
+  it('remove-nodes 批量级联删除只生成一个历史快照', () => {
+    const base = apply(createEditorState(serial), { type: 'select', key: 'b' })
+    const removed = editorReducer(base, { type: 'remove-nodes', keys: ['b', 'b'] })
+    expect(removed.definition.nodes.map((node) => node.key)).toEqual(['a', 'c'])
+    expect(removed.definition.edges).toEqual([])
+    expect(removed.past).toHaveLength(1)
+    expect(removed.selectedKey).toBeNull()
   })
 
   it('set-entry 只接受存在的节点', () => {

@@ -48,6 +48,8 @@ a { color: #286f6c; }
 .page-header p { max-width: 720px; margin: 0; color: #69787c; font-size: 14px; line-height: 1.6; }
 .page-eyebrow { color: #708185; font: 10px/1.4 "SFMono-Regular", monospace; text-transform: uppercase; letter-spacing: .1em; }
 .page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ant-btn-primary:not(:disabled):not(.ant-btn-disabled) { color: #fff; opacity: 1; }
+.ant-btn-primary:not(:disabled):not(.ant-btn-disabled):hover { color: #fff; }
 .back-button { margin: -10px 0 14px -12px; color: #617176; }
 .content-section { background: #fff; border: 1px solid #e2e8e7; border-radius: 14px; padding: 22px; min-width: 0; box-shadow: 0 1px 3px rgba(18, 34, 39, .04); }
 .section-heading { min-height: 38px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -284,6 +286,8 @@ a { color: #286f6c; }
 .group-member-head { display: flex; gap: 6px; }
 
 .workflow-canvas .react-flow__node.selected .wf-node { border-color: #286f6c; box-shadow: 0 0 0 3px rgba(40, 111, 108, .18); }
+.workflow-canvas .react-flow__node { will-change: transform; }
+.workflow-canvas .react-flow__node.dragging .wf-node { cursor: grabbing; border-color: #286f6c; box-shadow: 0 8px 22px rgba(40, 111, 108, .22); transition: none; }
 .workflow-canvas .react-flow__handle { width: 9px; height: 9px; background: #65837f; border: 2px solid #fff; }
 .workflow-canvas .react-flow__edge.selected .react-flow__edge-path { stroke: #286f6c; stroke-width: 2.5; }
 

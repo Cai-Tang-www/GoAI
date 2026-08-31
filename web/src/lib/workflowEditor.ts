@@ -1,3 +1,4 @@
+import type { NodeChange } from '@xyflow/react'
 import type { WorkflowDefinition, WorkflowNode } from '../api/types'
 import { validateWorkflowDefinition } from './workflow'
 import { buildWorkflowGraph } from './workflowGraph'
@@ -25,12 +26,14 @@ export type EditorAction =
   | { type: 'reset'; definition: WorkflowDefinition; positions?: PositionMap }
   | { type: 'add-node'; nodeType: string; position: NodePosition }
   | { type: 'remove-node'; key: string }
+  | { type: 'remove-nodes'; keys: string[] }
   | { type: 'update-config'; key: string; config: Record<string, unknown> | undefined }
   | { type: 'rename-node'; key: string; nextKey: string }
   | { type: 'add-edge'; from: string; to: string }
   | { type: 'remove-edge'; from: string; to: string }
   | { type: 'set-entry'; key: string }
   | { type: 'move-node'; key: string; position: NodePosition }
+  | { type: 'move-nodes'; positions: PositionMap }
   | { type: 'auto-layout' }
   | { type: 'select'; key: string | null }
   | { type: 'undo' }
@@ -40,6 +43,15 @@ export const EDITOR_NODE_TYPES = ['noop', 'llm', 'agent', 'agent_tool', 'agent_g
 
 const HISTORY_LIMIT = 50
 const RESERVED_KEYS = new Set(['start', 'end'])
+
+// collectNodePositions 提取 React Flow 拖动帧，供画布局部状态即时渲染。
+export function collectNodePositions(changes: NodeChange[]): PositionMap {
+  const positions: PositionMap = {}
+  for (const change of changes) {
+    if (change.type === 'position' && change.position) positions[change.id] = { ...change.position }
+  }
+  return positions
+}
 
 // defaultNodeConfig 给新节点一个能通过表单渲染的最小 config；缺失的必填项由校验面板提示。
 export function defaultNodeConfig(nodeType: string, key: string): Record<string, unknown> | undefined {
@@ -236,6 +248,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'move-node':
       // 拖动只改坐标：不进撤销历史，避免一次拖拽产生一堆历史步。
       return { ...state, positions: { ...state.positions, [action.key]: action.position }, dirty: true }
+    case 'move-nodes': {
+      if (Object.keys(action.positions).length === 0) return state
+      return { ...state, positions: { ...state.positions, ...action.positions }, dirty: true }
+    }
     case 'add-node': {
       const key = uniqueNodeKey(action.nodeType, state.definition.nodes.map((node) => node.key))
       const node: WorkflowNode = { key, type: action.nodeType }
@@ -253,6 +269,14 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const positions = { ...state.positions }
       delete positions[action.key]
       return commit(state, { definition, positions }, state.selectedKey === action.key ? null : state.selectedKey)
+    }
+    case 'remove-nodes': {
+      const keys = [...new Set(action.keys)].filter((key) => state.definition.nodes.some((node) => node.key === key))
+      if (keys.length === 0) return state
+      const definition = keys.reduce(removeNodeCascade, state.definition)
+      const positions = { ...state.positions }
+      for (const key of keys) delete positions[key]
+      return commit(state, { definition, positions }, state.selectedKey && keys.includes(state.selectedKey) ? null : state.selectedKey)
     }
     case 'update-config': {
       const definition: WorkflowDefinition = {
